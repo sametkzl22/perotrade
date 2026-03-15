@@ -344,7 +344,7 @@ def ai_metrikler(pazar: dict, kompozit_skor: float, zaman_baski_carpani: float =
         tavsiye_oran = tavsiye_oran * zaman_baski_carpani
         
     tavsiye_kaldirac = min(tavsiye_kaldirac, 50) # Tavan 50x
-    tavsiye_oran = min(tavsiye_oran, 0.50)       # Tavan %50 bakiye
+    tavsiye_oran = min(tavsiye_oran, 0.40)       # Tavan %40 bakiye (kullanıcı isteği)
 
     # Volatilite çok yüksekse kaldıracı bastır (Fakat zaman baskisi cok ekstremse biraz esnek)
     if pazar["volatilite"] > 10.0 and zaman_baski_carpani <= 1.2: 

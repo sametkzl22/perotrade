@@ -289,8 +289,8 @@ def ws_fiyat_dinleyici(state, lock, dur_sinyali):
                                         
                                     # 4. Stagnation Switch (Fırsat Maliyeti / Yatay Seyir)
                                     gecen_dk = (time.time() - poz.get("acilis_zamani", time.time())) / 60.0
-                                    # Eger 30 dk gecmis ve fiyat yerinden (±%2) neredeyse hic oynamamis ise
-                                    if gecen_dk >= 30.0 and abs(pnl_pct) < 2.0:
+                                    # Eger 15 dk gecmis ve fiyat yerinden (±%0.2) neredeyse hic oynamamis ise
+                                    if gecen_dk >= 15.0 and abs(pnl_pct) < 0.2:
                                         if p_sembol not in kapanacak_semboller:
                                             kapanacak_semboller.append(p_sembol)
                                             poz["kapat_nedeni"] = "Fırsat Maliyeti: Yetersiz Volatilite (Daha hacimli coine geçiliyor)"
@@ -380,10 +380,10 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
                 sure_orani = gecen_saat / state["hedef_sure_saat"]
                 
                 hedef_farki_pct = (state["hedef_bakiye"] - state["bakiye"]) / state["hedef_bakiye"]
-                # 70% of time elapsed and still away from target -> Hard Aggression
-                if sure_orani > 0.70 and hedef_farki_pct > 0.10: # Hedeften en az %10 uzaksak
-                    zaman_baski_carpani = 2.0 # 2x kaldıraç, 2x margin oranı
-                elif sure_orani > 0.5 and hedef_farki_pct > 0:
+                # Hedef sürenin %70'inden fazlası geçti ve hala uzaksak (%30 ve altı süre kaldıysa)
+                if sure_orani >= 0.70 and hedef_farki_pct > 0.05:
+                    zaman_baski_carpani = 2.0 # Agresif modda 2x çarpanı (ai_engine'de oran %40 max kısıtlıdır)
+                elif sure_orani > 0.50 and hedef_farki_pct > 0:
                     zaman_baski_carpani = 1.0 + (sure_orani * hedef_farki_pct * 2.0)
                     
             karar_paketi = {"karar": "BEKLE", "dusunce": kapat_sinyali_nedeni, "aralik_sn": 5}
@@ -596,11 +596,12 @@ with tab_dash:
                           delta_color="normal")
             
             poz_liste.append({
-                "Sembol": s, "Tip": p["pozisyon"], "Kaldıraç": f"{p['islem_kaldirac']}x", 
-                "Giriş": f"${p['giris_fiyati']:.4f}", "Liq": f"${p['likidasyon_fiyati']:.4f}",
-                "Margin": f"${p['islem_margin']:.2f}",
-                "Tahmini PNL": f"{anlik_pnl:+.2f} USDT",
-                "Sıfır Risk(TS)": "Evet" if p['ts_aktif'] else "Hayır"
+                "Sembol": s, 
+                "Giriş Fiyatı": f"${p['giris_fiyati']:.4f}", 
+                "Kaldıraç": f"{p['islem_kaldirac']}x", 
+                "Kullanılan Margin": f"${p['islem_margin']:.2f}",
+                "Anlık Kar/Zarar ($)": f"{anlik_pnl:+.2f} USDT",
+                "ROE (%)": f"{pnl_pct:+.2f}%"
             })
             
         st.markdown("#### 📋 Detaylı Tablo")
@@ -624,7 +625,8 @@ with tab_dash:
     with k3: st.metric("Toplam Varlık (Tahmini)", f"${toplam:,.2f}", f"%{kar_yuzde:+.2f}")
     with k4: st.metric("Maks Drawdown", f"-%{st.session_state.max_drawdown:.2f}")
     
-    st.progress(min(toplam / st.session_state.hedef_bakiye, 1.0) if st.session_state.hedef_bakiye else 0.0)
+    prog_val = max(0.0, min(toplam / st.session_state.hedef_bakiye, 1.0)) if st.session_state.hedef_bakiye else 0.0
+    st.progress(prog_val)
     st.markdown("---")
     
     col_sol, col_sag = st.columns([2, 1])
