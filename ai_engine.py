@@ -312,7 +312,7 @@ def kompozit_skor_hesapla(pazar: dict, sma_sinyal: str) -> float:
         
     return max(-100.0, min(100.0, skor))
 
-def ai_metrikler(pazar: dict, kompozit_skor: float) -> tuple:
+def ai_metrikler(pazar: dict, kompozit_skor: float, zaman_baski_carpani: float = 1.0) -> tuple:
     guven = min(100.0, abs(kompozit_skor) * 0.8 + pazar["volatilite"] * 2)
     if pazar.get("is_breakout"): guven = min(100.0, guven + 15)
     
@@ -326,10 +326,10 @@ def ai_metrikler(pazar: dict, kompozit_skor: float) -> tuple:
     
     if guven > 90:
         tavsiye_kaldirac = random.randint(30, 50)
-        tavsiye_oran = 0.50 # %50 Bakiye
+        tavsiye_oran = 0.40 # %40 Bakiye (biraz geri çekildi zaman baskısı için yer bırakıldı)
     elif guven > 75:
         tavsiye_kaldirac = random.randint(20, 30)
-        tavsiye_oran = 0.25 # %25 Bakiye
+        tavsiye_oran = 0.20 # %20 Bakiye
     elif guven > 60:
         tavsiye_kaldirac = random.randint(10, 20)
         tavsiye_oran = 0.10 # %10 Bakiye
@@ -337,13 +337,23 @@ def ai_metrikler(pazar: dict, kompozit_skor: float) -> tuple:
         tavsiye_kaldirac = random.randint(2, 10)
         tavsiye_oran = 0.05 # Çok düşük güven, minik test
         
-    # Volatilite çok yüksekse kaldıracı bastır
-    if pazar["volatilite"] > 10.0: tavsiye_kaldirac = min(tavsiye_kaldirac, 10)
+    # Zaman Baskısı (Time-Bound Aggression)
+    if zaman_baski_carpani > 1.0:
+        # Örn çarpan 1.5 ise kaldıraç %50 artar
+        tavsiye_kaldirac = int(tavsiye_kaldirac * zaman_baski_carpani)
+        tavsiye_oran = tavsiye_oran * zaman_baski_carpani
+        
+    tavsiye_kaldirac = min(tavsiye_kaldirac, 50) # Tavan 50x
+    tavsiye_oran = min(tavsiye_oran, 0.50)       # Tavan %50 bakiye
+
+    # Volatilite çok yüksekse kaldıracı bastır (Fakat zaman baskisi cok ekstremse biraz esnek)
+    if pazar["volatilite"] > 10.0 and zaman_baski_carpani <= 1.2: 
+        tavsiye_kaldirac = min(tavsiye_kaldirac, 10)
     
     return guven, beklenen, tavsiye_kaldirac, tavsiye_oran
 
-def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon: str, btc_trendi: str, fonlama: dict) -> dict:
-    guven, beklenen_artis, kaldirac, oran = ai_metrikler(pazar, kompozit_skor)
+def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon: str, btc_trendi: str, fonlama: dict, zaman_baski_carpani: float = 1.0) -> dict:
+    guven, beklenen_artis, kaldirac, oran = ai_metrikler(pazar, kompozit_skor, zaman_baski_carpani)
     
     karar = "BEKLE"
     neden = f"Piyasa kararsız (Skor: {kompozit_skor:.1f}). Kesin kırılım yok."
@@ -404,15 +414,15 @@ def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon:
         "expected_growth": beklenen_artis,
         "tavsiye_kaldirac": kaldirac,
         "tavsiye_oran": oran,
-        "ozet": f"BTC: {btc_trendi} | Fonlama: {fonlama['oran']:.3f}%"
+        "ozet": f"BTC: {btc_trendi} | Fonlama: {fonlama['oran']:.3f}% | Time-Pr: {zaman_baski_carpani:.2f}"
     }
 
-def llm_karar(sembol: str, pazar: dict, sma_sinyal: str, api_key: str, acik_pozisyon: str, btc_trendi: str, fonlama: dict) -> dict:
+def llm_karar(sembol: str, pazar: dict, sma_sinyal: str, api_key: str, acik_pozisyon: str, btc_trendi: str, fonlama: dict, zaman_baski_carpani: float = 1.0) -> dict:
     import openai
     client = openai.OpenAI(api_key=api_key)
     
     komp_skor = kompozit_skor_hesapla(pazar, sma_sinyal)
-    guven, beklenen_artis, kaldirac, oran = ai_metrikler(pazar, komp_skor)
+    guven, beklenen_artis, kaldirac, oran = ai_metrikler(pazar, komp_skor, zaman_baski_carpani)
     breakout_str = "EVET" if pazar.get("is_breakout") else "HAYIR"
     tw_str = pazar.get('twitter', {}).get('tweet', 'Yok')
     
@@ -425,6 +435,7 @@ def llm_karar(sembol: str, pazar: dict, sma_sinyal: str, api_key: str, acik_pozi
     Fonlama Oranı Risk Durumu: {fonlama['risk']} (Oran: {fonlama['oran']:.3f}%)
     Fear & Greed Index: {pazar.get('fg_index', {}).get('durum', 'Neutral')} ({pazar.get('fg_index', {}).get('deger', 50)})
     Makro Risk Durumu: {makro['durum']} (Sebep: {makro['neden']})
+    Zaman Baskisi Çarpanı: {zaman_baski_carpani:.2f} (>1.0 ise agresifliği artır, hedefe az zaman kaldı!)
     
     {sembol} coini için 'LONG', 'SHORT', 'KAPAT' veya 'BEKLE' kararı ver.
     Veriler: Fiyat: {pazar['fiyat']}, SMA Sinyali: {sma_sinyal}, RSI: {pazar['rsi']:.2f}, Vol: %{pazar['volatilite']:.2f}, Trend: {pazar['hacim_trend']}, Breakout: {breakout_str}

@@ -15,6 +15,7 @@ import ccxt
 import ccxt.pro as ccxtpro
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit.runtime.scriptrunner import add_script_run_ctx
 
 import ai_engine
@@ -88,6 +89,8 @@ def session_state_baslat():
         "openai_key": "",
         "global_risk_seviyesi": "Normal",
         "kaldirac": 10, # Sadece eski kodun çökmemesi için geçici/yedek tutulur, pratikte tavsiye_kaldirac kullanılır.
+        "baslangic_zamani": 0.0,
+        "hedef_sure_saat": 24.0,
         
         "lock": threading.Lock(),
         "dur_sinyali": threading.Event(),
@@ -283,10 +286,20 @@ def ws_fiyat_dinleyici(state, lock, dur_sinyali):
                                             if f_s >= poz["trailing_stop_fiyat"]: ts_hit = True
                                             
                                         if ts_hit: kapanacak_semboller.append(p_sembol)
+                                        
+                                    # 4. Stagnation Switch (Fırsat Maliyeti / Yatay Seyir)
+                                    gecen_dk = (time.time() - poz.get("acilis_zamani", time.time())) / 60.0
+                                    # Eger 30 dk gecmis ve fiyat yerinden (±%2) neredeyse hic oynamamis ise
+                                    if gecen_dk >= 30.0 and abs(pnl_pct) < 2.0:
+                                        if p_sembol not in kapanacak_semboller:
+                                            kapanacak_semboller.append(p_sembol)
+                                            # Nedenini islem_kapat da belirtebilmek icin hack yapmiyoruz, direkt asagida dondurcez.
+                                            poz["kapat_nedeni"] = "Fırsat Maliyeti: Yetersiz Volatilite (Stagnation)"
                             
                             for ks in kapanacak_semboller:
                                 f_ks = guncel_fiyatlar.get(ks, state["aktif_pozisyonlar"][ks]["giris_fiyati"])
-                                islem_kapat(state, ks, f_ks, "🛡️ TS KAPAT - İz Süren Stop")
+                                rsn = state["aktif_pozisyonlar"][ks].get("kapat_nedeni", "🛡️ TS KAPAT - İz Süren Stop")
+                                islem_kapat(state, ks, f_ks, rsn)
                             
                             # --- DRAWDOWN TRACKER ---
                             anlik_v = state["bakiye"] + aktif_margin_toplami(state["aktif_pozisyonlar"]) + pnl_hesapla_coklu(state["aktif_pozisyonlar"], guncel_fiyatlar)
@@ -361,13 +374,23 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
             # Mevcut poz var mi secili coin icin?
             with lock: poz_durumu = state["aktif_pozisyonlar"].get(secilen_sembol, {}).get("pozisyon", "YOK")
                 
+            # --- ZAMAN BASKISI HESABI ---
+            zaman_baski_carpani = 1.0
+            if state.get("baslangic_zamani", 0) > 0 and state.get("hedef_sure_saat", 0) > 0:
+                gecen_saat = (time.time() - state["baslangic_zamani"]) / 3600.0
+                sure_orani = gecen_saat / state["hedef_sure_saat"]
+                
+                hedef_farki_pct = (state["hedef_bakiye"] - state["bakiye"]) / state["hedef_bakiye"]
+                if sure_orani > 0.5 and hedef_farki_pct > 0:
+                    zaman_baski_carpani = 1.0 + (sure_orani * hedef_farki_pct * 2.0)
+                    
             karar_paketi = {"karar": "BEKLE", "dusunce": kapat_sinyali_nedeni, "aralik_sn": 5}
             if not pozisyonu_kapat:
                 if state["ai_modu"] == "OpenAI LLM" and state["openai_key"]:
-                    karar_paketi = ai_engine.llm_karar(secilen_sembol, secilen_pazar, secilen_sma, state["openai_key"], poz_durumu, btc_trend, fonlama)
+                    karar_paketi = ai_engine.llm_karar(secilen_sembol, secilen_pazar, secilen_sma, state["openai_key"], poz_durumu, btc_trend, fonlama, zaman_baski_carpani)
                 else:
                     skor = ai_engine.kompozit_skor_hesapla(secilen_pazar, secilen_sma)
-                    karar_paketi = ai_engine.mock_ai_karar(secilen_sembol, secilen_pazar, skor, poz_durumu, btc_trend, fonlama)
+                    karar_paketi = ai_engine.mock_ai_karar(secilen_sembol, secilen_pazar, skor, poz_durumu, btc_trend, fonlama, zaman_baski_carpani)
             else:
                 karar_paketi["karar"] = "KAPAT"
                 
@@ -414,7 +437,8 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
                             "islem_kaldirac": tavsiye_kaldirac,
                             "kademeli_tp_yapildi": False,
                             "ts_aktif": False,
-                            "trailing_stop_fiyat": 0.0
+                            "trailing_stop_fiyat": 0.0,
+                            "acilis_zamani": time.time()
                         }
                         state["aktif_pozisyonlar"][secilen_sembol] = yeni_poz
                         state["bakiye"] -= margin
@@ -468,6 +492,7 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
 def baslat():
     if not st.session_state.bot_calisiyor:
         st.session_state.dur_sinyali.clear()
+        if st.session_state.baslangic_zamani == 0.0: st.session_state.baslangic_zamani = time.time()
         st.session_state.bot_calisiyor = True
         st.session_state.bot_durumu = "Çalışıyor"
         
@@ -497,7 +522,7 @@ with st.sidebar:
     st.markdown("---")
     st.session_state.baslangic_bakiye = st.number_input("Başlangıç (USDT)", min_value=1.0, value=st.session_state.baslangic_bakiye, disabled=st.session_state.bot_calisiyor)
     st.session_state.hedef_bakiye = st.number_input("Hedef (USDT)", min_value=2.0, value=st.session_state.hedef_bakiye, disabled=st.session_state.bot_calisiyor)
-    # Akıllı Kaldıraç sayesinde manual kaldıraç slider eklentisi kaldırıldı.
+    st.session_state.hedef_sure_saat = st.number_input("Hedef Süre (Saat)", min_value=1.0, value=st.session_state.hedef_sure_saat, disabled=st.session_state.bot_calisiyor)
     
     if not st.session_state.bot_calisiyor: st.session_state.bakiye = st.session_state.baslangic_bakiye
 
@@ -514,6 +539,21 @@ with st.sidebar:
         if st.button("⏹️ Durdur", use_container_width=True, disabled=not st.session_state.bot_calisiyor):
             durdur()
             st.rerun()
+            
+    st.markdown("---")
+    st.markdown("### 💼 Cüzdan & Sağlık")
+    bky = st.session_state.bakiye
+    kullanilan = aktif_margin_toplami(st.session_state.aktif_pozisyonlar)
+    tplm = bky + kullanilan
+    
+    st.metric("Toplam Varlık", f"${tplm:,.2f}")
+    st.metric("Boşta USDT", f"${bky:,.2f}")
+    st.metric("Kullanılan Margin", f"${kullanilan:,.2f}")
+    
+    gecen_sure = (time.time() - st.session_state.baslangic_zamani)/3600 if st.session_state.baslangic_zamani > 0 else 0
+    kalan_sure = max(0, st.session_state.hedef_sure_saat - gecen_sure)
+    if st.session_state.bot_calisiyor:
+        st.info(f"⏳ Kalan Hedef Süresi: {kalan_sure:.1f} Saat")
 
 # ─ Ana Ekran ─
 col_baslik, col_durum = st.columns([3, 1])
@@ -526,54 +566,87 @@ elif "Hedef" in st.session_state.bot_durumu: status_class = "status-target"
 col_durum.markdown(f"<div style='text-align:right; margin-top:20px;'><span class='status-badge {status_class}'>Durum: {st.session_state.bot_durumu}</span></div>", unsafe_allow_html=True)
 st.markdown(f"<div class='dashboard-header'><b>🎯 Odaklanılan Ticker: {st.session_state.aktif_sembol}</b> — Risk Barometresi: {st.session_state.global_risk_seviyesi}</div>", unsafe_allow_html=True)
 
-# ─ AI Strateji Paneli ─
-st.markdown("### 📊 Aktif Pozisyonlar Paneli")
-if not st.session_state.aktif_pozisyonlar:
-    st.info("Açık Pozisyon Bulunmuyor.")
-else:
-    poz_liste = []
-    for s, p in st.session_state.aktif_pozisyonlar.items():
-        anlik_pnl = pnl_hesapla(p['pozisyon'], p['giris_fiyati'], st.session_state.fiyat if s == st.session_state.aktif_sembol else p['giris_fiyati'], p['islem_margin'] * p['islem_kaldirac'], p['islem_kaldirac']) # Fiyat ws'den dogrudan dict'e yazilabiliyor o yuzden netlesmesi icin
-        poz_liste.append({
-            "Sembol": s, "Tip": p["pozisyon"], "Kaldıraç": f"{p['islem_kaldirac']}x", 
-            "Giriş": f"${p['giris_fiyati']:.4f}", "Liq": f"${p['likidasyon_fiyati']:.4f}",
-            "Margin": f"${p['islem_margin']:.2f}",
-            "Tahmini PNL": f"{anlik_pnl:+.2f} USDT",
-            "Sıfır Risk(TS)": "Evet" if p['ts_aktif'] else "Hayır"
-        })
-    st.dataframe(pd.DataFrame(poz_liste), use_container_width=True, hide_index=True)
+tab_dash, tab_tv = st.tabs(["📊 Dashboard", "📈 Grafikler (TradingView)"])
 
-## ARTIK BU KARTLAR OMOJERLEDI. KALDIRIYORUZ.
-
-st.markdown("---")
-
-# ─ Finansal Metrikler ─
-k1, k2, k3, k4 = st.columns(4)
-with k1: st.metric("Anlık Fiyat", f"${st.session_state.fiyat:,.4f}" if st.session_state.fiyat else "—", f"%{st.session_state.degisim_24s:+.2f}")
-with k2: 
-    hacim = st.session_state.hacim_24s
-    hacim_str = f"${hacim/1e6:,.1f}M" if hacim > 1e6 else f"${hacim:,.0f}" if hacim else "—"
-    st.metric("24s Hacim", hacim_str)
+with tab_dash:
+    # ─ AI Strateji Paneli ─
+    st.markdown("### 📊 Aktif Pozisyonlar Paneli")
+    if not st.session_state.aktif_pozisyonlar:
+        st.info("Açık Pozisyon Bulunmuyor.")
+    else:
+        poz_liste = []
+        for s, p in st.session_state.aktif_pozisyonlar.items():
+            anlik_pnl = pnl_hesapla(p['pozisyon'], p['giris_fiyati'], st.session_state.fiyat if s == st.session_state.aktif_sembol else p['giris_fiyati'], p['islem_margin'] * p['islem_kaldirac'], p['islem_kaldirac']) # Fiyat ws'den dogrudan dict'e yazilabiliyor o yuzden netlesmesi icin
+            poz_liste.append({
+                "Sembol": s, "Tip": p["pozisyon"], "Kaldıraç": f"{p['islem_kaldirac']}x", 
+                "Giriş": f"${p['giris_fiyati']:.4f}", "Liq": f"${p['likidasyon_fiyati']:.4f}",
+                "Margin": f"${p['islem_margin']:.2f}",
+                "Tahmini PNL": f"{anlik_pnl:+.2f} USDT",
+                "Sıfır Risk(TS)": "Evet" if p['ts_aktif'] else "Hayır"
+            })
+        st.dataframe(pd.DataFrame(poz_liste), use_container_width=True, hide_index=True)
     
-bakiye = st.session_state.bakiye
-# TAHMINI toplam fon varliklari: O anki bos bakiye + tum posizyonlardaki aktif pnl
-# Tam isabet icin gerceklestirilmedigi surece bu gorsel sadece fikir verir.
-toplam = bakiye + aktif_margin_toplami(st.session_state.aktif_pozisyonlar)
-kar_yuzde = ((toplam - st.session_state.baslangic_bakiye) / st.session_state.baslangic_bakiye * 100) if st.session_state.baslangic_bakiye else 0
+    st.markdown("---")
+    
+    # ─ Finansal Metrikler ─
+    k1, k2, k3, k4 = st.columns(4)
+    with k1: st.metric("Anlık Fiyat", f"${st.session_state.fiyat:,.4f}" if st.session_state.fiyat else "—", f"%{st.session_state.degisim_24s:+.2f}")
+    with k2: 
+        hacim = st.session_state.hacim_24s
+        hacim_str = f"${hacim/1e6:,.1f}M" if hacim > 1e6 else f"${hacim:,.0f}" if hacim else "—"
+        st.metric("24s Hacim", hacim_str)
+        
+    bakiye = st.session_state.bakiye
+    toplam = bakiye + aktif_margin_toplami(st.session_state.aktif_pozisyonlar)
+    kar_yuzde = ((toplam - st.session_state.baslangic_bakiye) / st.session_state.baslangic_bakiye * 100) if st.session_state.baslangic_bakiye else 0
+    
+    with k3: st.metric("Toplam Varlık (Tahmini)", f"${toplam:,.2f}", f"%{kar_yuzde:+.2f}")
+    with k4: st.metric("Maks Drawdown", f"-%{st.session_state.max_drawdown:.2f}")
+    
+    st.progress(min(toplam / st.session_state.hedef_bakiye, 1.0) if st.session_state.hedef_bakiye else 0.0)
+    st.markdown("---")
+    
+    col_sol, col_sag = st.columns([2, 1])
+    with col_sol:
+        st.markdown("<div class='dashboard-header'><b>📋 Vadeli İşlem Geçmişi</b></div>", unsafe_allow_html=True)
+        if st.session_state.islem_gecmisi:
+            df_log = pd.DataFrame(st.session_state.islem_gecmisi).iloc[::-1].reset_index(drop=True)
+            st.dataframe(df_log, use_container_width=True, hide_index=True, height=250)
+        else: st.info("Henüz işlem yok.")
 
-with k3: st.metric("Toplam Varlık (Tahmini)", f"${toplam:,.2f}", f"%{kar_yuzde:+.2f}")
-with k4: st.metric("Maks Drawdown", f"-%{st.session_state.max_drawdown:.2f}")
-
-st.progress(min(toplam / st.session_state.hedef_bakiye, 1.0) if st.session_state.hedef_bakiye else 0.0)
-st.markdown("---")
-
-col_sol, col_sag = st.columns([2, 1])
-with col_sol:
-    st.markdown("<div class='dashboard-header'><b>📋 Vadeli İşlem Geçmişi</b></div>", unsafe_allow_html=True)
-    if st.session_state.islem_gecmisi:
-        df_log = pd.DataFrame(st.session_state.islem_gecmisi).iloc[::-1].reset_index(drop=True)
-        st.dataframe(df_log, use_container_width=True, hide_index=True, height=250)
-    else: st.info("Henüz işlem yok.")
+with tab_tv:
+    st.markdown("### 📈 TradingView Gözlem Ekranı")
+    if st.session_state.aktif_sembol and st.session_state.aktif_sembol != "Bekleniyor...":
+        tv_symbol = "BINANCE:" + st.session_state.aktif_sembol.replace('/', '')
+        tv_html = f"""
+        <!-- TradingView Widget BEGIN -->
+        <div class="tradingview-widget-container">
+          <div class="tradingview-widget-container__widget"></div>
+          <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
+          {{
+          "width": "100%",
+          "height": 600,
+          "symbol": "{tv_symbol}",
+          "interval": "15",
+          "timezone": "Etc/UTC",
+          "theme": "dark",
+          "style": "1",
+          "locale": "tr",
+          "enable_publishing": false,
+          "backgroundColor": "rgba(11, 12, 16, 1)",
+          "gridColor": "rgba(42, 46, 57, 0.06)",
+          "hide_top_toolbar": false,
+          "hide_legend": false,
+          "save_image": false,
+          "container_id": "tradingview_cf1ea"
+        }}
+          </script>
+        </div>
+        <!-- TradingView Widget END -->
+        """
+        components.html(tv_html, height=600)
+    else:
+        st.info("Kripto para bekleniyor...")
         
     st.markdown("<div class='dashboard-header'><b>🔥 Breakout Radarı (Anlık Tarama)</b></div>", unsafe_allow_html=True)
     if st.session_state.taranan_coinler:
