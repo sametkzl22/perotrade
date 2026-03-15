@@ -161,6 +161,14 @@ def duyarlilik_puanla(haberler: list, sembol: str, twitter_skoru: float) -> floa
     skor += twitter_skoru  
     return max(-1.0, min(1.0, skor))
 
+def fear_and_greed_simulasyonu() -> dict:
+    fg_value = random.randint(10, 90)
+    if fg_value < 25: durum = "Extreme Fear"
+    elif fg_value < 45: durum = "Fear"
+    elif fg_value < 55: durum = "Neutral"
+    elif fg_value < 75: durum = "Greed"
+    else: durum = "Extreme Greed"
+    return {"deger": fg_value, "durum": durum}
 
 # ─────────────────────────────────────────────
 # 4) Dinamik Coin Seçimi (Top 20 + Breakout Scanner)
@@ -258,7 +266,8 @@ def pazar_durumu_cikar(df: pd.DataFrame, sembol: str, pre_fetched_news=None, twi
         "duyarlilik": duyarlilik,
         "twitter": tw_veri,
         "fiyat": df['close'].iloc[-1],
-        "is_breakout": False 
+        "is_breakout": False,
+        "fg_index": fear_and_greed_simulasyonu()
     }
 
 def kompozit_skor_hesapla(pazar: dict, sma_sinyal: str) -> float:
@@ -297,8 +306,13 @@ def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon:
     karar = "BEKLE"
     neden = f"Piyasa kararsız (Skor: {kompozit_skor:.1f}). Kesin kırılım yok."
     twitter_msg = f" 🐦 [{pazar['twitter']['yazar']}: {pazar['twitter']['skor']:+.1f} Etki]" if pazar.get("twitter", {}).get("aktif") else ""
+    fg = pazar.get("fg_index", {"deger": 50, "durum": "Neutral"})
+    fg_korku_var_mi = fg["durum"] in ["Fear", "Extreme Fear"]
 
-    if kompozit_skor > 40:
+    if pazar.get("is_breakout") and fg_korku_var_mi and acik_pozisyon != "LONG" and not (btc_trendi == "AŞAĞI"):
+        karar = "LONG"
+        neden = f"🚀 KORKUYU SATIN AL: Piyasada Aşırı Korku ({fg['deger']} - {fg['durum']}) varken hacim patlaması (Breakout) yakalandı! Güçlü AL sinyali."
+    elif kompozit_skor > 40:
         if acik_pozisyon == "SHORT": 
             karar = "KAPAT"
             neden = f"Trend YUKARI döndü! SHORT pozisyon riske girdi, acil kapatılıyor (Skor: {kompozit_skor:.1f})."
@@ -353,10 +367,12 @@ def llm_karar(sembol: str, pazar: dict, sma_sinyal: str, api_key: str, acik_pozi
     Mevcut Açık Pozisyon: {acik_pozisyon} ("YOK", "LONG", veya "SHORT" olabilir).
     BTC Genel Trendi: {btc_trendi} (Ana piyasa yönü, buna göre risk al).
     Fonlama Oranı Risk Durumu: {fonlama['risk']} (Oran: {fonlama['oran']:.3f}%)
+    Fear & Greed Index: {pazar.get('fg_index', {}).get('durum', 'Neutral')} ({pazar.get('fg_index', {}).get('deger', 50)})
     
     {sembol} coini için 'LONG', 'SHORT', 'KAPAT' veya 'BEKLE' kararı ver.
     Veriler: Fiyat: {pazar['fiyat']}, SMA Sinyali: {sma_sinyal}, RSI: {pazar['rsi']:.2f}, Vol: %{pazar['volatilite']:.2f}, Trend: {pazar['hacim_trend']}, Breakout: {breakout_str}
     Sosyal Trend Skoru: {pazar['duyarlilik']:.2f}
+    Eğer piyasa aşırı korkuda ('Fear' veya 'Extreme Fear') ve Breakout 'EVET' ise, bunu çok güçlü bir 'LONG' sinyali olarak değerlendir.
     
     YANIT FORMATI:
     Karar: [LONG/SHORT/KAPAT/BEKLE]
