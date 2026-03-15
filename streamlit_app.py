@@ -386,14 +386,20 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
                 sure_orani = gecen_saat / state["hedef_sure_saat"]
                 
                 hedef_farki_pct = (state["hedef_bakiye"] - state["bakiye"]) / state["hedef_bakiye"]
-                # Hedef sürenin %50'sinden fazlası geçti
-                if sure_orani >= 0.50 and hedef_farki_pct > 0.05:
+                # Kademeli zaman baskısı sistemi
+                if sure_orani >= 0.80 and hedef_farki_pct > 0.20:
+                    # BERSERKER MODU: Son %20 dilim, hedefe uzak
+                    zaman_baski_carpani = 4.0   # 4x çarpanı - Tüm riskleri göze al
+                    with lock:
+                        state["bot_durumu"] = "💥 BERSERKER Modu!"
+                        log_ekle(f"💥 BERSERKER MODU AKTİF! Süre: %{sure_orani*100:.0f} geçti. Hedefe Uzaklık: %{hedef_farki_pct*100:.0f}. MAKSİMUM AGRESİFLİK!", state)
+                elif sure_orani >= 0.70 and hedef_farki_pct > 0.30:
+                    # FINAL HUNTER MODU
+                    zaman_baski_carpani = 3.0
+                    with lock:
+                        log_ekle(f"🎯 FINAL HUNTER MODU AKTİF! Süre: %{sure_orani*100:.0f} geçti. Kaldıraç 3x çarpanı!", state)
+                elif sure_orani >= 0.50 and hedef_farki_pct > 0.05:
                     zaman_baski_carpani = 2.0
-                    if sure_orani >= 0.70 and hedef_farki_pct > 0.30:
-                        # FINAL HUNTER MODU: Sürenin %70'i geçmiş ve hedefe çok uzak
-                        zaman_baski_carpani = 3.0   # 3x çarpanı (20x -> 50x kaldıraç sınırına kadar)
-                        with lock:
-                            log_ekle(f"🎯 FINAL HUNTER MODU AKTİF! Süre: %{sure_orani*100:.0f} geçti. Hedefe Uzaklık: %{hedef_farki_pct*100:.0f}. Kaldıraç 3x çarpanı!", state)
                 elif sure_orani > 0.30 and hedef_farki_pct > 0:
                     zaman_baski_carpani = 1.0 + (sure_orani * hedef_farki_pct * 2.0)
                     
@@ -439,8 +445,9 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
                     tavsiye_kaldirac = karar_paketi.get("tavsiye_kaldirac", 10)
                     tavsiye_oran = karar_paketi.get("tavsiye_oran", 0.10)
                     
-                    # Maximum %20 limit checker inside bot
-                    kullanilabilir_max = min(tavsiye_oran, 0.20 - (risk_pct/100.0))
+                    # AI-Managed Full Autonomy: Global Risk Limit kontrolü (Berserker modda esnetilir)
+                    risk_limit = 0.40 if zaman_baski_carpani >= 4.0 else 0.30 if zaman_baski_carpani >= 3.0 else 0.20
+                    kullanilabilir_max = min(tavsiye_oran, risk_limit - (risk_pct/100.0))
                     if kullanilabilir_max > 0:
                         margin = state["bakiye"] * kullanilabilir_max
                         buyukluk_usdt = margin * tavsiye_kaldirac
@@ -594,16 +601,32 @@ with tab_dash:
     if not st.session_state.aktif_pozisyonlar:
         st.info("Açık Pozisyon Bulunmuyor.")
     else:
-        # Anlık Durum Kartları (Şık Card UI - Giriş Nedeni + Beklenen Hedef + Anlık PNL)
         st.markdown("#### ⚡ Anlık Durum Kartları")
         
         poz_liste = []
         for idx, (s, p) in enumerate(st.session_state.aktif_pozisyonlar.items()):
-            guncel_fiyat = st.session_state.fiyat if s == st.session_state.aktif_sembol else p['giris_fiyati']
-            anlik_pnl = pnl_hesapla(p['pozisyon'], p['giris_fiyati'], guncel_fiyat, p['islem_margin'] * p['islem_kaldirac'], p['islem_kaldirac'])
+            try:
+                guncel_fiyat = st.session_state.fiyat if s == st.session_state.aktif_sembol else p['giris_fiyati']
+                # PNL Senkronizasyonu: Fiyat henuz gelmediyse veya 0 ise hesaplama yapma
+                if guncel_fiyat <= 0 or p['giris_fiyati'] <= 0:
+                    anlik_pnl = 0.0
+                    pnl_pct = 0.0
+                else:
+                    anlik_pnl = pnl_hesapla(p['pozisyon'], p['giris_fiyati'], guncel_fiyat, p['islem_margin'] * p['islem_kaldirac'], p['islem_kaldirac'])
+                    pnl_pct = (anlik_pnl / p['islem_margin']) * 100 if p['islem_margin'] > 0 else 0
+                
+                # Anormal PNL Kontrolü (Fiyat Kopuklugu koruması)
+                if abs(pnl_pct) > 500:  # %500 uzerinde PNL olasi degildir, fiyat kopuklugu
+                    anlik_pnl = 0.0
+                    pnl_pct = 0.0
+                    
+            except Exception:
+                anlik_pnl = 0.0
+                pnl_pct = 0.0
+                guncel_fiyat = p.get('giris_fiyati', 0)
+                
             aktif_toplam_pnl += anlik_pnl
             
-            pnl_pct = (anlik_pnl / p['islem_margin']) * 100 if p['islem_margin'] > 0 else 0
             pnl_renk = "#00ff88" if anlik_pnl >= 0 else "#ff4444"
             beklenen = p.get('beklenen_hedef', 0)
             giris_nedeni = p.get('giris_nedeni', 'Otonom AI Kararı')
@@ -635,9 +658,10 @@ with tab_dash:
                 "Giriş Fiyatı": f"${p['giris_fiyati']:.4f}", 
                 "Kaldıraç": f"{p['islem_kaldirac']}x", 
                 "Kullanılan Margin": f"${p['islem_margin']:.2f}",
-                "Anlık Kar/Zarar ($)": f"{anlik_pnl:+.2f} USDT",
+                "Anlık K/Z ($)": f"{anlik_pnl:+.2f}",
                 "ROE (%)": f"{pnl_pct:+.2f}%",
-                "Liq Riski (%)": f"{liq_risk_pct:.1f}%"
+                "Liq Riski": f"%{liq_risk_pct:.1f}",
+                "Giriş Gerekçesi": giris_nedeni[:60]
             })
             
         st.markdown("#### 📋 Detaylı Tablo")
