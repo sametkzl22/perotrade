@@ -333,13 +333,14 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
             btc_trend = ai_engine.btc_trendi_analiz_et(exchange)
             
             # Dinamik Olarak Coin Seç (Portföyde olsa da olmasa da yeni fırsat tara, portföyde varsa durumunu ekle)
-            top_coinler = ai_engine.top_coinleri_tara(exchange, limit=30)
+            top_coinler = ai_engine.top_coinleri_tara(exchange, limit=100)
             tarama_sonucu = ai_engine.anormallik_tara_ve_sec(exchange, top_coinler, preset["sma_kisa"], preset["sma_uzun"])
             
             secilen_sembol = tarama_sonucu["secilen_sembol"] or "BTC/USDT"
             secilen_pazar = tarama_sonucu.get("secilen_pazar", {})
             secilen_sma = tarama_sonucu.get("secilen_sma", "BEKLE")
             is_breakout = tarama_sonucu.get("secilen_breakout", False)
+            karar_raporu = tarama_sonucu.get("karar_raporu", "")
             
             with lock:
                 state["taranan_coinler"] = tarama_sonucu.get("taranan_liste", [])
@@ -349,6 +350,11 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
                     state["bot_durumu"] = "🚨 Breakout Modu!"
                     log_ekle(f"🔥 HACİM PATLAMASI: {secilen_sembol} (Hız 5s->2s)", state, is_breakout=True)
                 else: state["bot_durumu"] = "Çalışıyor"
+                
+                # Şeffaf Karar Raporu Logla
+                if karar_raporu:
+                    for rapor_satiri in karar_raporu.split('\n'):
+                        log_ekle(f"📊 {rapor_satiri}", state)
             
             try:
                 ticker = exchange.fetch_ticker(secilen_sembol)
@@ -380,9 +386,14 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
                 sure_orani = gecen_saat / state["hedef_sure_saat"]
                 
                 hedef_farki_pct = (state["hedef_bakiye"] - state["bakiye"]) / state["hedef_bakiye"]
-                # Hedef sürenin %50'sinden fazlası geçti ve hala uzaksak (%50 ve altı süre kaldıysa)
+                # Hedef sürenin %50'sinden fazlası geçti
                 if sure_orani >= 0.50 and hedef_farki_pct > 0.05:
-                    zaman_baski_carpani = 2.0 # Agresif modda 2x çarpanı (ai_engine'de oran %40 max kısıtlıdır)
+                    zaman_baski_carpani = 2.0
+                    if sure_orani >= 0.70 and hedef_farki_pct > 0.30:
+                        # FINAL HUNTER MODU: Sürenin %70'i geçmiş ve hedefe çok uzak
+                        zaman_baski_carpani = 3.0   # 3x çarpanı (20x -> 50x kaldıraç sınırına kadar)
+                        with lock:
+                            log_ekle(f"🎯 FINAL HUNTER MODU AKTİF! Süre: %{sure_orani*100:.0f} geçti. Hedefe Uzaklık: %{hedef_farki_pct*100:.0f}. Kaldıraç 3x çarpanı!", state)
                 elif sure_orani > 0.30 and hedef_farki_pct > 0:
                     zaman_baski_carpani = 1.0 + (sure_orani * hedef_farki_pct * 2.0)
                     
@@ -416,6 +427,10 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
                 
                 if not pozisyonu_kapat:
                     log_ekle(f"🎯 {secilen_sembol} Analizi: {karar_paketi['dusunce']}", state, is_breakout=is_breakout)
+                    # Karar loguna KARAR satırı ekle
+                    sinyal_k = karar_paketi["karar"]
+                    if sinyal_k in ["LONG", "SHORT"]:
+                        log_ekle(f"📝 KARAR: {sinyal_k} - Sebep: {karar_paketi['dusunce'][:80]}...", state)
                 
                 sinyal = karar_paketi["karar"]
                 zaman = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -440,7 +455,9 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
                             "kademeli_tp_yapildi": False,
                             "ts_aktif": False,
                             "trailing_stop_fiyat": 0.0,
-                            "acilis_zamani": time.time()
+                            "acilis_zamani": time.time(),
+                            "giris_nedeni": karar_paketi["dusunce"][:120],
+                            "beklenen_hedef": karar_paketi.get("expected_growth", 0.0)
                         }
                         state["aktif_pozisyonlar"][secilen_sembol] = yeni_poz
                         state["bakiye"] -= margin
@@ -577,9 +594,8 @@ with tab_dash:
     if not st.session_state.aktif_pozisyonlar:
         st.info("Açık Pozisyon Bulunmuyor.")
     else:
-        # Anlık Durum Kartları (Canlı Finans Paneli)
+        # Anlık Durum Kartları (Şık Card UI - Giriş Nedeni + Beklenen Hedef + Anlık PNL)
         st.markdown("#### ⚡ Anlık Durum Kartları")
-        poz_cols = st.columns(min(len(st.session_state.aktif_pozisyonlar), 4))
         
         poz_liste = []
         for idx, (s, p) in enumerate(st.session_state.aktif_pozisyonlar.items()):
@@ -588,12 +604,31 @@ with tab_dash:
             aktif_toplam_pnl += anlik_pnl
             
             pnl_pct = (anlik_pnl / p['islem_margin']) * 100 if p['islem_margin'] > 0 else 0
+            pnl_renk = "#00ff88" if anlik_pnl >= 0 else "#ff4444"
+            beklenen = p.get('beklenen_hedef', 0)
+            giris_nedeni = p.get('giris_nedeni', 'Otonom AI Kararı')
+            liq_risk_pct = abs((guncel_fiyat - p['likidasyon_fiyati']) / guncel_fiyat * 100) if guncel_fiyat > 0 else 0
             
-            with poz_cols[idx % len(poz_cols)]:
-                st.metric(label=f"{s} ({p['pozisyon']} {p['islem_kaldirac']}x)", 
-                          value=f"${guncel_fiyat:.4f}", 
-                          delta=f"{anlik_pnl:+.2f} USDT ({pnl_pct:+.2f}%)",
-                          delta_color="normal")
+            st.markdown(f"""
+            <div style='background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 16px; margin-bottom: 12px; border-left: 4px solid {pnl_renk};'>
+                <div style='display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;'>
+                    <span style='font-size: 18px; font-weight: 700; color: #66fcf1;'>{s} ({p['pozisyon']} {p['islem_kaldirac']}x)</span>
+                    <span style='font-size: 20px; font-weight: 800; color: {pnl_renk};'>{anlik_pnl:+.2f} USDT ({pnl_pct:+.1f}%)</span>
+                </div>
+                <div style='display: flex; gap: 24px; color: #c5c6c7; font-size: 13px; margin-bottom: 6px;'>
+                    <span>💰 Giriş: <b>${p['giris_fiyati']:.4f}</b></span>
+                    <span>📊 Anlık: <b>${guncel_fiyat:.4f}</b></span>
+                    <span>🛡️ Margin: <b>${p['islem_margin']:.2f}</b></span>
+                    <span>💣 Liq Riski: <b>%{liq_risk_pct:.1f}</b></span>
+                </div>
+                <div style='color: #45a29e; font-size: 12px; margin-top: 4px;'>
+                    <b>📝 Giriş Nedeni:</b> {giris_nedeni}
+                </div>
+                <div style='color: #888; font-size: 11px; margin-top: 2px;'>
+                    <b>🎯 Beklenen Hedef:</b> %{beklenen:+.1f} büyüme
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
             
             poz_liste.append({
                 "Sembol": s, 
@@ -601,7 +636,8 @@ with tab_dash:
                 "Kaldıraç": f"{p['islem_kaldirac']}x", 
                 "Kullanılan Margin": f"${p['islem_margin']:.2f}",
                 "Anlık Kar/Zarar ($)": f"{anlik_pnl:+.2f} USDT",
-                "ROE (%)": f"{pnl_pct:+.2f}%"
+                "ROE (%)": f"{pnl_pct:+.2f}%",
+                "Liq Riski (%)": f"{liq_risk_pct:.1f}%"
             })
             
         st.markdown("#### 📋 Detaylı Tablo")

@@ -121,10 +121,50 @@ def trend_analizi_yap() -> list:
         "Whale wallets accumulating large amounts of BTC",
         "Global tension rises as new border conflict emerges",
         "Fed signals unexpected rate hike amid inflation fears",
-        "Severe economic sanctions heavily impacting markets"
+        "Severe economic sanctions heavily impacting markets",
+        "Major exchange announces new listing for trending coin",
+        "Elon Musk tweets about crypto causing market volatility"
     ]
     haberler.extend(random.sample(mock_trends, 3))
     return haberler
+
+def haber_anahtar_kelime_puanla(haberler: list) -> dict:
+    """Haberlerdeki anahtar kelimelere ağırlıklı puan verir."""
+    kelime_agirliklari = {
+        # Jeopolitik Risk (Negatif)
+        "war": -0.8, "conflict": -0.7, "sanctions": -0.6, "missile": -0.9, "strike": -0.5, "tension": -0.4,
+        "savaş": -0.8, "çatışma": -0.7, "yaptırım": -0.6,
+        # Makro Ekonomi
+        "fed rate": -0.5, "rate hike": -0.6, "inflation": -0.4, "recession": -0.7,
+        "rate cut": 0.5, "stimulus": 0.6,
+        # Kripto Pozitif
+        "listing": 0.7, "elon": 0.4, "adoption": 0.5, "etf": 0.6, "approval": 0.5,
+        "surge": 0.4, "bull": 0.3, "breakout": 0.5, "accumulate": 0.3,
+        # Kripto Negatif
+        "sec": -0.3, "hack": -0.8, "exploit": -0.7, "ban": -0.5, "crash": -0.6,
+        "liquidation": -0.4, "delisting": -0.6
+    }
+    
+    toplam_puan = 0.0
+    tetiklenen_kelimeler = []
+    
+    for haber in haberler:
+        hl = haber.lower()
+        for kelime, agirlik in kelime_agirliklari.items():
+            if kelime in hl:
+                toplam_puan += agirlik
+                if kelime not in [k for k, _ in tetiklenen_kelimeler]:
+                    tetiklenen_kelimeler.append((kelime, agirlik))
+    
+    # En etkili 3 kelimeyi raporla
+    tetiklenen_kelimeler.sort(key=lambda x: abs(x[1]), reverse=True)
+    top_3 = tetiklenen_kelimeler[:3]
+    
+    return {
+        "toplam_puan": max(-1.0, min(1.0, toplam_puan)),
+        "tetiklenen": top_3,
+        "risk_seviyesi": "Yüksek Risk" if toplam_puan < -0.5 else "Orta Risk" if toplam_puan < 0 else "Stabil" if toplam_puan < 0.3 else "Fırsat"
+    }
 
 def makro_analiz_yap(haberler: list) -> dict:
     risk_off_kelimeler = ["war", "conflict", "sanctions", "strike", "missile", "tension", "fed", "inflation", "crash", "emergency", "savaş", "çatışma", "yaptırım"]
@@ -195,7 +235,7 @@ def fear_and_greed_simulasyonu() -> dict:
 # ─────────────────────────────────────────────
 def top_coinleri_tara(exchange, limit=100) -> list:
     standart_liste = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT"]
-    yasakli_kelimeler = ["USDC", "FDUSD", "TUSD", "DAI", "EUR", "GBP", "BUSD", "USDP", "TRUE"]
+    yasakli_kelimeler = ["USDC", "FDUSD", "TUSD", "DAI", "EUR", "GBP", "BUSD", "USDP", "TRUE", "PAXG", "USDD", "PYUSD"]
     try:
         if exchange.has['fetchTickers']:
             tickers = exchange.fetch_tickers()
@@ -220,11 +260,13 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
     secilen_pazar = None
     secilen_sma = None
     secilen_breakout = False
+    secilen_rapor = ""
     
     taranan_liste = []
     haberler = trend_analizi_yap()
+    haber_puanlari = haber_anahtar_kelime_puanla(haberler)
 
-    for coin in top_coinler[:15]: # Ilk 15 coin uzerinde detayli analiz yapiyoruz islem hizini korumak adina
+    for coin in top_coinler[:15]:
         try:
             df = mum_verisi_cek(exchange, coin, "1h", limit=sma_uzun+5)
             twitter_verisi = twitter_etkisi_puanla(coin)
@@ -237,9 +279,13 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
             ortalama_hacim = df['volume'].iloc[-14:-1].mean()
             son_mum = df.iloc[-1]
             fiyat_farki_pct = ((son_mum['high'] - son_mum['low']) / son_mum['low']) * 100
+            hacim_artis_pct = ((son_hacim - ortalama_hacim) / ortalama_hacim * 100) if ortalama_hacim > 0 else 0
             
-            if son_hacim > (ortalama_hacim * 1.5) and fiyat_farki_pct < 3.0:
+            # Son 1 saatteki hacim, 24 saatlik ortalamanın en az %200 üzerinde olmalı
+            if hacim_artis_pct >= 200 and fiyat_farki_pct < 3.0:
                 is_breakout = True
+            elif son_hacim > (ortalama_hacim * 1.5) and fiyat_farki_pct < 3.0:
+                is_breakout = True  # Daha düşük hacim artışı ama yine de dikkat çekici
             pazar['is_breakout'] = is_breakout
                 
             skor = kompozit_skor_hesapla(pazar, sma_sinyal)
@@ -249,6 +295,7 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
                 "Fiyat": pazar["fiyat"], 
                 "Skor": round(skor,1),
                 "Volatilite": round(pazar["volatilite"], 2),
+                "Hacim Artışı": f"%{hacim_artis_pct:.0f}",
                 "Breakout": "🔥 EVET" if is_breakout else "HAYIR"
             })
             
@@ -257,12 +304,25 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
             if is_breakout: mutlak_guc += 50
             if pazar["volatilite"] < 0.5: mutlak_guc -= 100 # Sabit coin cezası
             
+            # Haber puanını da ekle
+            mutlak_guc += abs(haber_puanlari["toplam_puan"]) * 10
+            
             if mutlak_guc > en_baskın_mutlak_skor:
                 en_baskın_mutlak_skor = mutlak_guc
                 secilen_sembol = coin
                 secilen_pazar = pazar
                 secilen_sma = sma_sinyal
                 secilen_breakout = is_breakout
+                
+                # Şeffaf Karar Raporu Oluştur
+                tw_durum = f"Twitter: {pazar['twitter']['yazar']} ({pazar['twitter']['skor']:+.1f})" if pazar.get('twitter', {}).get('aktif') else "Twitter: Etkisiz"
+                haber_ozet = ", ".join([f"{k.upper()}({a:+.1f})" for k, a in haber_puanlari["tetiklenen"]]) if haber_puanlari["tetiklenen"] else "Belirgin gündem yok"
+                secilen_rapor = (
+                    f"SEÇİLEN COİN: {coin}\n"
+                    f"TEKNİK: RSI: {pazar['rsi']:.1f}, Hacim Artışı: %{hacim_artis_pct:.0f}, Breakout: {'Evet' if is_breakout else 'Hayır'}\n"
+                    f"GÜNDEM: {haber_ozet}. {tw_durum}. Duyarlılık: {pazar['duyarlilik']:+.2f}\n"
+                    f"MAKRO: {pazar['makro']['durum']} - {pazar['makro']['neden']}"
+                )
                 
         except Exception:
             continue
@@ -272,7 +332,9 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
         "secilen_pazar": secilen_pazar,
         "secilen_sma": secilen_sma,
         "secilen_breakout": secilen_breakout,
-        "taranan_liste": taranan_liste
+        "taranan_liste": taranan_liste,
+        "karar_raporu": secilen_rapor,
+        "haber_puanlari": haber_puanlari
     }
 
 
