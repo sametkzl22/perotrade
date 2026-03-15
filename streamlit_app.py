@@ -289,11 +289,11 @@ def ws_fiyat_dinleyici(state, lock, dur_sinyali):
                                         
                                     # 4. Stagnation Switch (Fırsat Maliyeti / Yatay Seyir)
                                     gecen_dk = (time.time() - poz.get("acilis_zamani", time.time())) / 60.0
-                                    # Eger 15 dk gecmis ve fiyat yerinden (±%0.2) neredeyse hic oynamamis ise
-                                    if gecen_dk >= 15.0 and abs(pnl_pct) < 0.2:
+                                    # Eger 10 dk gecmis ve fiyat yerinden (±%0.2) neredeyse hic oynamamis ise
+                                    if gecen_dk >= 10.0 and abs(pnl_pct) < 0.2:
                                         if p_sembol not in kapanacak_semboller:
                                             kapanacak_semboller.append(p_sembol)
-                                            poz["kapat_nedeni"] = "Fırsat Maliyeti: Yetersiz Volatilite (Daha hacimli coine geçiliyor)"
+                                            poz["kapat_nedeni"] = "Zaman Maliyeti: Yetersiz Volatilite (Daha hacimli coine geçiliyor)"
                             
                             for ks in kapanacak_semboller:
                                 f_ks = guncel_fiyatlar.get(ks, state["aktif_pozisyonlar"][ks]["giris_fiyati"])
@@ -380,10 +380,10 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
                 sure_orani = gecen_saat / state["hedef_sure_saat"]
                 
                 hedef_farki_pct = (state["hedef_bakiye"] - state["bakiye"]) / state["hedef_bakiye"]
-                # Hedef sürenin %70'inden fazlası geçti ve hala uzaksak (%30 ve altı süre kaldıysa)
-                if sure_orani >= 0.70 and hedef_farki_pct > 0.05:
+                # Hedef sürenin %50'sinden fazlası geçti ve hala uzaksak (%50 ve altı süre kaldıysa)
+                if sure_orani >= 0.50 and hedef_farki_pct > 0.05:
                     zaman_baski_carpani = 2.0 # Agresif modda 2x çarpanı (ai_engine'de oran %40 max kısıtlıdır)
-                elif sure_orani > 0.50 and hedef_farki_pct > 0:
+                elif sure_orani > 0.30 and hedef_farki_pct > 0:
                     zaman_baski_carpani = 1.0 + (sure_orani * hedef_farki_pct * 2.0)
                     
             karar_paketi = {"karar": "BEKLE", "dusunce": kapat_sinyali_nedeni, "aralik_sn": 5}

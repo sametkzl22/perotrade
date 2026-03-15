@@ -193,12 +193,20 @@ def fear_and_greed_simulasyonu() -> dict:
 # ─────────────────────────────────────────────
 # 4) Dinamik Coin Seçimi (Top 20 + Breakout Scanner)
 # ─────────────────────────────────────────────
-def top_coinleri_tara(exchange, limit=30) -> list:
+def top_coinleri_tara(exchange, limit=100) -> list:
     standart_liste = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT"]
+    yasakli_kelimeler = ["USDC", "FDUSD", "TUSD", "DAI", "EUR", "GBP", "BUSD", "USDP", "TRUE"]
     try:
         if exchange.has['fetchTickers']:
             tickers = exchange.fetch_tickers()
-            usdt_tickers = {k: v for k, v in tickers.items() if '/USDT' in k and v.get('quoteVolume', 0) > 0}
+            usdt_tickers = {}
+            for k, v in tickers.items():
+                if '/USDT' in k and v.get('quoteVolume', 0) > 0:
+                    # Stablecoin ve Fiat filtresi
+                    is_yasakli = any(yasak in k for yasak in yasakli_kelimeler)
+                    if not is_yasakli:
+                        usdt_tickers[k] = v
+            # Hacme göre sırala
             sirali = sorted(usdt_tickers.items(), key=lambda x: x[1]['quoteVolume'], reverse=True)
             return [k for k, v in sirali[:limit]]
         else:
@@ -216,7 +224,7 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
     taranan_liste = []
     haberler = trend_analizi_yap()
 
-    for coin in top_coinler[:8]:
+    for coin in top_coinler[:15]: # Ilk 15 coin uzerinde detayli analiz yapiyoruz islem hizini korumak adina
         try:
             df = mum_verisi_cek(exchange, coin, "1h", limit=sma_uzun+5)
             twitter_verisi = twitter_etkisi_puanla(coin)
@@ -230,7 +238,7 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
             son_mum = df.iloc[-1]
             fiyat_farki_pct = ((son_mum['high'] - son_mum['low']) / son_mum['low']) * 100
             
-            if son_hacim > (ortalama_hacim * 2) and fiyat_farki_pct < 2.0:
+            if son_hacim > (ortalama_hacim * 1.5) and fiyat_farki_pct < 3.0:
                 is_breakout = True
             pazar['is_breakout'] = is_breakout
                 
@@ -239,12 +247,15 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
             taranan_liste.append({
                 "Sembol": coin, 
                 "Fiyat": pazar["fiyat"], 
-                "Skor": round(skor,1), 
+                "Skor": round(skor,1),
+                "Volatilite": round(pazar["volatilite"], 2),
                 "Breakout": "🔥 EVET" if is_breakout else "HAYIR"
             })
             
-            mutlak_guc = abs(skor)
+            # Volatilite * Breakout puanı (Hacimli ama ölü USDC gibi coinleri eler)
+            mutlak_guc = abs(skor) + (pazar["volatilite"] * 2) 
             if is_breakout: mutlak_guc += 50
+            if pazar["volatilite"] < 0.5: mutlak_guc -= 100 # Sabit coin cezası
             
             if mutlak_guc > en_baskın_mutlak_skor:
                 en_baskın_mutlak_skor = mutlak_guc
