@@ -98,6 +98,8 @@ def session_state_baslat():
         
         "lock": threading.Lock(),
         "dur_sinyali": threading.Event(),
+        "analiz_tetikleyici": threading.Event(),
+        "son_fiyat_tick": 0.0,
     }
     for k, v in default_state.items():
         if k not in st.session_state: st.session_state[k] = v
@@ -176,7 +178,12 @@ def ws_fiyat_dinleyici(state, lock, dur_sinyali):
                         hacim = ticker.get("quoteVolume", state["hacim_24s"])
                         state["fiyat"] = fiyat
                         if degisim: state["degisim_24s"] = degisim
-                        if hacim: state["hacim_24s"] = hacim
+                        # --- SIFIR GECİKME (ZERO-LATENCY) TETİKLEME KONTROLÜ ---
+                        if state["son_fiyat_tick"] > 0 and fiyat != state["son_fiyat_tick"]:
+                            degisim_tick = abs((fiyat - state["son_fiyat_tick"]) / state["son_fiyat_tick"]) * 100
+                            if degisim_tick >= 0.3: # %0.3 anlık kırılım
+                                state["analiz_tetikleyici"].set()
+                        state["son_fiyat_tick"] = fiyat
                         
                         # --- ANLIK RİSK & POZİSYON KONTROLÜ (WS TICK) ---
                         if state["pozisyon"] != "YOK" and state["islem_margin"] > 0:
@@ -378,14 +385,20 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
                     dur_sinyali.set()
                     break
 
-            # --- 5. AŞAMA: BEKLEME ---
+            # --- 5. AŞAMA: BEKLEME (EVENT-DRIVEN SIFIR GECİKME) ---
             bekleme_suresi = int(karar_paketi["aralik_sn"])
             if not is_breakout: bekleme_suresi = int(bekleme_suresi * preset["aralik_carpan"])
             with lock: state["sonraki_analiz_sn"] = bekleme_suresi
             
+            state["analiz_tetikleyici"].clear()
             for _ in range(bekleme_suresi):
                 if dur_sinyali.is_set(): return
-                time.sleep(1)
+                tetiklendi = state["analiz_tetikleyici"].wait(timeout=1.0)
+                if tetiklendi:
+                    with lock:
+                        log_ekle("⚡ SIFIR GECİKME: Anlık Hacim/Fiyat Patlaması tetiklendi! Bekleme iptal edildi.", state, is_breakout=True)
+                        state["sonraki_analiz_sn"] = 0
+                    break
                 with lock: state["sonraki_analiz_sn"] -= 1
 
         except Exception as e:

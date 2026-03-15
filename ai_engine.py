@@ -118,10 +118,30 @@ def trend_analizi_yap() -> list:
         "Meme coins experiencing massive liquidations",
         "DePIN sector gaining huge traction with recent funding",
         "SEC approves new exchange traded vehicle",
-        "Whale wallets accumulating large amounts of BTC"
+        "Whale wallets accumulating large amounts of BTC",
+        "Global tension rises as new border conflict emerges",
+        "Fed signals unexpected rate hike amid inflation fears",
+        "Severe economic sanctions heavily impacting markets"
     ]
-    haberler.extend(random.sample(mock_trends, 2))
+    haberler.extend(random.sample(mock_trends, 3))
     return haberler
+
+def makro_analiz_yap(haberler: list) -> dict:
+    risk_off_kelimeler = ["war", "conflict", "sanctions", "strike", "missile", "tension", "fed", "inflation", "crash", "emergency", "savaş", "çatışma", "yaptırım"]
+    
+    risk_off = False
+    tetikleyen = ""
+    for h in haberler:
+        hl = h.lower()
+        for rk in risk_off_kelimeler:
+            if rk in hl:
+                risk_off = True
+                tetikleyen = rk
+                break
+        if risk_off: break
+        
+    if risk_off: return {"durum": "Risk-Off", "neden": f"Makro Risk Algılandı ({tetikleyen.upper()})"}
+    return {"durum": "Normal", "neden": "Küresel piyasalar stabil"}
 
 def twitter_etkisi_puanla(sembol: str) -> dict:
     coin_adi = sembol.split('/')[0]
@@ -258,6 +278,7 @@ def pazar_durumu_cikar(df: pd.DataFrame, sembol: str, pre_fetched_news=None, twi
     haberler = pre_fetched_news if pre_fetched_news else trend_analizi_yap()
     tw_veri = twitter_verisi if twitter_verisi else twitter_etkisi_puanla(sembol)
     duyarlilik = duyarlilik_puanla(haberler, sembol, tw_veri["skor"])
+    makro = makro_analiz_yap(haberler)
     
     return {
         "rsi": rsi,
@@ -267,7 +288,8 @@ def pazar_durumu_cikar(df: pd.DataFrame, sembol: str, pre_fetched_news=None, twi
         "twitter": tw_veri,
         "fiyat": df['close'].iloc[-1],
         "is_breakout": False,
-        "fg_index": fear_and_greed_simulasyonu()
+        "fg_index": fear_and_greed_simulasyonu(),
+        "makro": makro
     }
 
 def kompozit_skor_hesapla(pazar: dict, sma_sinyal: str) -> float:
@@ -308,8 +330,18 @@ def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon:
     twitter_msg = f" 🐦 [{pazar['twitter']['yazar']}: {pazar['twitter']['skor']:+.1f} Etki]" if pazar.get("twitter", {}).get("aktif") else ""
     fg = pazar.get("fg_index", {"deger": 50, "durum": "Neutral"})
     fg_korku_var_mi = fg["durum"] in ["Fear", "Extreme Fear"]
+    makro = pazar.get("makro", {"durum": "Normal", "neden": ""})
 
-    if pazar.get("is_breakout") and fg_korku_var_mi and acik_pozisyon != "LONG" and not (btc_trendi == "AŞAĞI"):
+    if makro["durum"] == "Risk-Off":
+        if acik_pozisyon == "LONG":
+            karar = "KAPAT"
+            neden = f"🚨 ACİL (Risk-Off): {makro['neden']}. Güvenli limana geçiş, LONG pozisyon hemen kapatılıyor."
+        elif acik_pozisyon == "YOK" and kompozit_skor < -10:
+            karar = "SHORT"
+            neden = f"🚨 MAKRO FIRSAT: {makro['neden']} tespit edildi + zayıf trend. Küresel panik kaynaklı güçlü SHORT!"
+        elif acik_pozisyon == "SHORT":
+            neden = f"🚨 Makro gerginlik ({makro['neden']}) SHORT pozisyonumuz için lehimize. Tutmaya devam ediyoruz."
+    elif pazar.get("is_breakout") and fg_korku_var_mi and acik_pozisyon != "LONG" and not (btc_trendi == "AŞAĞI"):
         karar = "LONG"
         neden = f"🚀 KORKUYU SATIN AL: Piyasada Aşırı Korku ({fg['deger']} - {fg['durum']}) varken hacim patlaması (Breakout) yakalandı! Güçlü AL sinyali."
     elif kompozit_skor > 40:
@@ -362,21 +394,25 @@ def llm_karar(sembol: str, pazar: dict, sma_sinyal: str, api_key: str, acik_pozi
     breakout_str = "EVET" if pazar.get("is_breakout") else "HAYIR"
     tw_str = pazar.get('twitter', {}).get('tweet', 'Yok')
     
+    makro = pazar.get("makro", {"durum": "Normal", "neden": ""})
+    
     prompt = f"""
     Sen usta bir kripto Furtures (Vadeli İşlem) botusun.
     Mevcut Açık Pozisyon: {acik_pozisyon} ("YOK", "LONG", veya "SHORT" olabilir).
     BTC Genel Trendi: {btc_trendi} (Ana piyasa yönü, buna göre risk al).
     Fonlama Oranı Risk Durumu: {fonlama['risk']} (Oran: {fonlama['oran']:.3f}%)
     Fear & Greed Index: {pazar.get('fg_index', {}).get('durum', 'Neutral')} ({pazar.get('fg_index', {}).get('deger', 50)})
+    Makro Risk Durumu: {makro['durum']} (Sebep: {makro['neden']})
     
     {sembol} coini için 'LONG', 'SHORT', 'KAPAT' veya 'BEKLE' kararı ver.
     Veriler: Fiyat: {pazar['fiyat']}, SMA Sinyali: {sma_sinyal}, RSI: {pazar['rsi']:.2f}, Vol: %{pazar['volatilite']:.2f}, Trend: {pazar['hacim_trend']}, Breakout: {breakout_str}
     Sosyal Trend Skoru: {pazar['duyarlilik']:.2f}
     Eğer piyasa aşırı korkuda ('Fear' veya 'Extreme Fear') ve Breakout 'EVET' ise, bunu çok güçlü bir 'LONG' sinyali olarak değerlendir.
+    Eğer Makro Risk Durumu 'Risk-Off' ise ('War', 'Sanctions' vb. sebeplerle), güvenli limana kaçış vardır, LONG kesinlikle kapatılmalı ve gerekirse SHORT açılmalıdır.
     
     YANIT FORMATI:
     Karar: [LONG/SHORT/KAPAT/BEKLE]
-    Neden: [1 cümle net açıklırma]
+    Neden: [1 cümle net açıklırma - Makro ve teknik gerekçeleri birleştirerek yaz]
     """
     
     try:
