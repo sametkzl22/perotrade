@@ -87,6 +87,7 @@ def session_state_baslat():
         "ai_modu": "Mock AI",
         "openai_key": "",
         "global_risk_seviyesi": "Normal",
+        "kaldirac": 10, # Sadece eski kodun çökmemesi için geçici/yedek tutulur, pratikte tavsiye_kaldirac kullanılır.
         
         "lock": threading.Lock(),
         "dur_sinyali": threading.Event(),
@@ -311,7 +312,6 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
     while not dur_sinyali.is_set():
         try:
             preset = MOD_PRESETLERI[state["mod"]]
-            kaldirac = state["kaldirac"]
             
             # --- 1. AŞAMA: TARA VE CANLI VERİ ENTEGRASYONU ---
             with lock:
