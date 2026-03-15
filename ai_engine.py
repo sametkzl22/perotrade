@@ -320,10 +320,30 @@ def ai_metrikler(pazar: dict, kompozit_skor: float) -> tuple:
     if pazar.get("is_breakout"): beklenen *= 2.5
     if kompozit_skor < 0: beklenen = -beklenen
     
-    return guven, beklenen
+    # Smart Leverage (Akıllı Kaldıraç) ve Otonom Pozisyon Büyüklüğü (Auto-Size)
+    tavsiye_kaldirac = 10  # Varsayılan
+    tavsiye_oran = 0.10    # %10 varsayılan bakiye kullanımı
+    
+    if guven > 90:
+        tavsiye_kaldirac = random.randint(30, 50)
+        tavsiye_oran = 0.50 # %50 Bakiye
+    elif guven > 75:
+        tavsiye_kaldirac = random.randint(20, 30)
+        tavsiye_oran = 0.25 # %25 Bakiye
+    elif guven > 60:
+        tavsiye_kaldirac = random.randint(10, 20)
+        tavsiye_oran = 0.10 # %10 Bakiye
+    else:
+        tavsiye_kaldirac = random.randint(2, 10)
+        tavsiye_oran = 0.05 # Çok düşük güven, minik test
+        
+    # Volatilite çok yüksekse kaldıracı bastır
+    if pazar["volatilite"] > 10.0: tavsiye_kaldirac = min(tavsiye_kaldirac, 10)
+    
+    return guven, beklenen, tavsiye_kaldirac, tavsiye_oran
 
 def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon: str, btc_trendi: str, fonlama: dict) -> dict:
-    guven, beklenen_artis = ai_metrikler(pazar, kompozit_skor)
+    guven, beklenen_artis, kaldirac, oran = ai_metrikler(pazar, kompozit_skor)
     
     karar = "BEKLE"
     neden = f"Piyasa kararsız (Skor: {kompozit_skor:.1f}). Kesin kırılım yok."
@@ -382,6 +402,8 @@ def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon:
         "aralik_sn": sonraki_sn,
         "guven_skoru": guven,
         "expected_growth": beklenen_artis,
+        "tavsiye_kaldirac": kaldirac,
+        "tavsiye_oran": oran,
         "ozet": f"BTC: {btc_trendi} | Fonlama: {fonlama['oran']:.3f}%"
     }
 
@@ -390,7 +412,7 @@ def llm_karar(sembol: str, pazar: dict, sma_sinyal: str, api_key: str, acik_pozi
     client = openai.OpenAI(api_key=api_key)
     
     komp_skor = kompozit_skor_hesapla(pazar, sma_sinyal)
-    guven, beklenen_artis = ai_metrikler(pazar, komp_skor)
+    guven, beklenen_artis, kaldirac, oran = ai_metrikler(pazar, komp_skor)
     breakout_str = "EVET" if pazar.get("is_breakout") else "HAYIR"
     tw_str = pazar.get('twitter', {}).get('tweet', 'Yok')
     
@@ -412,6 +434,8 @@ def llm_karar(sembol: str, pazar: dict, sma_sinyal: str, api_key: str, acik_pozi
     
     YANIT FORMATI:
     Karar: [LONG/SHORT/KAPAT/BEKLE]
+    Kaldirac: [Beklenen kaldirac 1-50]
+    Oran: [Beklenen risk orani 0.05-0.50]
     Neden: [1 cümle net açıklırma - Makro ve teknik gerekçeleri birleştirerek yaz]
     """
     
@@ -419,13 +443,15 @@ def llm_karar(sembol: str, pazar: dict, sma_sinyal: str, api_key: str, acik_pozi
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=150,
+            max_tokens=200,
             temperature=0.3
         )
         cevap = response.choices[0].message.content
         lines = cevap.strip().split('\n')
         karar = "BEKLE"
         neden = cevap
+        llm_kaldirac = kaldirac
+        llm_oran = oran
         
         for l in lines:
             if l.startswith("Karar:"):
@@ -433,6 +459,12 @@ def llm_karar(sembol: str, pazar: dict, sma_sinyal: str, api_key: str, acik_pozi
                 if "LONG" in k: karar = "LONG"
                 elif "SHORT" in k: karar = "SHORT"
                 elif "KAPAT" in k: karar = "KAPAT"
+            if l.startswith("Kaldirac:"):
+                try: llm_kaldirac = int(l.split("Kaldirac:")[1].strip())
+                except: pass
+            if l.startswith("Oran:"):
+                try: llm_oran = float(l.split("Oran:")[1].strip())
+                except: pass
             if l.startswith("Neden:"):
                 neden = l.split("Neden:")[1].strip()
                 
@@ -446,6 +478,8 @@ def llm_karar(sembol: str, pazar: dict, sma_sinyal: str, api_key: str, acik_pozi
             "aralik_sn": sonraki_sn,
             "guven_skoru": guven,
             "expected_growth": beklenen_artis,
+            "tavsiye_kaldirac": llm_kaldirac,
+            "tavsiye_oran": llm_oran,
             "ozet": f"LLM | BTC: {btc_trendi} | Fonlama: {fonlama['risk']}"
         }
     except Exception as e:

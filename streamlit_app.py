@@ -62,17 +62,9 @@ def session_state_baslat():
         "bakiye": 10.0,
         "baslangic_bakiye": 10.0,
         "hedef_bakiye": 100.0,
-        "pozisyon": "YOK",
-        "coin_miktar": 0.0, 
-        "giris_fiyati": 0.0, 
-        "likidasyon_fiyati": 0.0,
-        "islem_margin": 0.0,
-        "islem_kaldirac": 1,
-        "kademeli_tp_yapildi": False,
+        "aktif_pozisyonlar": {}, # { sembol: { 'pozisyon': 'LONG/SHORT', 'coin_miktar': ..., 'giris_fiyati': ..., 'likidasyon_fiyati': ..., 'islem_margin': ..., 'islem_kaldirac': ..., 'kademeli_tp_yapildi': bool, 'ts_aktif': bool, 'trailing_stop_fiyat': ... } }
         "pik_bakiye": 10.0,
         "max_drawdown": 0.0,
-        "ts_aktif": False,              # Trailing Stop
-        "trailing_stop_fiyat": 0.0,     # Trailing Stop Level
         "aktif_sembol": "Bekleniyor...",
         "is_breakout": False,
         "islem_gecmisi": [],
@@ -94,7 +86,7 @@ def session_state_baslat():
         "mod": "⚡ Agresif Mod",
         "ai_modu": "Mock AI",
         "openai_key": "",
-        "kaldirac": 1,
+        "global_risk_seviyesi": "Normal",
         
         "lock": threading.Lock(),
         "dur_sinyali": threading.Event(),
@@ -135,125 +127,175 @@ def likidasyon_hesapla(pozisyon, giris, kaldirac) -> float:
 # ─────────────────────────────────────────────
 # AI Bot Engine & WebSocket Dinleyici
 # ─────────────────────────────────────────────
-def islem_kapat(state, fiyat, neden, is_breakout=False, is_liq=False):
-    eski_poz = state["pozisyon"]
-    if eski_poz == "YOK": return
+def pnl_hesapla_coklu(pozlar, guncel_fiyatlar: dict) -> float:
+    toplam_pnl = 0.0
+    for sembol, poz in pozlar.items():
+        anlik = guncel_fiyatlar.get(sembol, poz["giris_fiyati"])
+        p_pnl = pnl_hesapla(poz["pozisyon"], poz["giris_fiyati"], anlik, poz["islem_margin"] * poz["islem_kaldirac"], poz["islem_kaldirac"])
+        toplam_pnl += p_pnl
+    return toplam_pnl
 
-    margin = state["islem_margin"]
-    kaldirac = state["islem_kaldirac"]
-    aktif_pnl = pnl_hesapla(eski_poz, state["giris_fiyati"], fiyat, margin * kaldirac, kaldirac)
+def aktif_margin_toplami(pozisyonlar: dict) -> float:
+    return sum(p["islem_margin"] for p in pozisyonlar.values())
+
+def islem_kapat(state, sembol, fiyat, neden, is_breakout=False, is_liq=False):
+    poz = state["aktif_pozisyonlar"].get(sembol)
+    if not poz: return
+    
+    eski_poz = poz["pozisyon"]
+    margin = poz["islem_margin"]
+    kaldirac = poz["islem_kaldirac"]
+    aktif_pnl = pnl_hesapla(eski_poz, poz["giris_fiyati"], fiyat, margin * kaldirac, kaldirac)
 
     reel_getiri = margin + aktif_pnl
     state["bakiye"] += reel_getiri
     
-    state["pozisyon"] = "YOK"
-    state["coin_miktar"] = state["giris_fiyati"] = state["likidasyon_fiyati"] = state["ts_aktif"] = state["trailing_stop_fiyat"] = state["islem_margin"] = 0.0
-    state["kademeli_tp_yapildi"] = False
+    del state["aktif_pozisyonlar"][sembol]
     
     kz_str = f"{aktif_pnl:+.2f} USDT"
     icon = "☠️" if is_liq else "🛡️" if "TS" in neden else "🔴"
     
     zaman = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     state["islem_gecmisi"].append({
-        "zaman": zaman, "sembol": state["aktif_sembol"], "sinyal": f"{icon} KAPAT: {eski_poz}", 
+        "zaman": zaman, "sembol": sembol, "sinyal": f"{icon} KAPAT: {eski_poz}", 
         "fiyat": round(fiyat, 4), "kaldirac": f"{kaldirac}x", "poz_buyukluk": 0, 
         "bakiye_usdt": round(state["bakiye"], 2), "kar_zarar": kz_str, "ai_notu": neden
     })
-    log_ekle(f"{icon} POZİSYON KAPATILDI: {state['aktif_sembol']} {eski_poz}. PNL: {kz_str}", state, is_breakout, is_liq)
+    log_ekle(f"{icon} POZİSYON KAPATILDI: {sembol} {eski_poz}. PNL: {kz_str}", state, is_breakout, is_liq)
 
 def ws_fiyat_dinleyici(state, lock, dur_sinyali):
     async def dinle():
         try: exchange = getattr(ccxtpro, state["exchange_adi"])({"enableRateLimit": True})
         except: return
             
+        guncel_fiyatlar = {}
+            
         while not dur_sinyali.is_set():
             try:
+                # 1. Taranan Breakout Coinini Dinle
                 sembol = state["aktif_sembol"]
                 fiyat_eski = state["fiyat"]
                 if sembol and sembol != "Bekleniyor...":
-                    ticker = await asyncio.wait_for(exchange.watch_ticker(sembol), timeout=5.0)
-                    with lock:
-                        fiyat = ticker.get("last", state["fiyat"])
-                        degisim = ticker.get("percentage", state["degisim_24s"])
-                        hacim = ticker.get("quoteVolume", state["hacim_24s"])
-                        state["fiyat"] = fiyat
-                        if degisim: state["degisim_24s"] = degisim
-                        # --- SIFIR GECİKME (ZERO-LATENCY) TETİKLEME KONTROLÜ ---
-                        if state["son_fiyat_tick"] > 0 and fiyat != state["son_fiyat_tick"]:
-                            degisim_tick = abs((fiyat - state["son_fiyat_tick"]) / state["son_fiyat_tick"]) * 100
-                            if degisim_tick >= 0.3: # %0.3 anlık kırılım
-                                state["analiz_tetikleyici"].set()
-                        state["son_fiyat_tick"] = fiyat
+                    ticker_tsk = asyncio.create_task(exchange.watch_ticker(sembol))
+                    # 2. Aktif pozisyonu olan diğer coinleri de dinle
+                    poz_tasks = []
+                    diger_semboller = [s for s in state["aktif_pozisyonlar"].keys() if s != sembol]
+                    for s in diger_semboller: poz_tasks.append(exchange.watch_ticker(s))
+                    
+                    try:
+                        res = await asyncio.wait_for(asyncio.gather(ticker_tsk, *poz_tasks, return_exceptions=True), timeout=5.0)
                         
-                        # --- ANLIK RİSK & POZİSYON KONTROLÜ (WS TICK) ---
-                        if state["pozisyon"] != "YOK" and state["islem_margin"] > 0:
-                            is_long = state["pozisyon"] == "LONG"
-                            is_short = state["pozisyon"] == "SHORT"
-                            liq_price = state["likidasyon_fiyati"]
+                        breakout_ticker = res[0]
+                        if isinstance(breakout_ticker, dict):
+                            with lock:
+                                f = breakout_ticker.get("last", state["fiyat"])
+                                deg = breakout_ticker.get("percentage", state["degisim_24s"])
+                                hac = breakout_ticker.get("quoteVolume", state["hacim_24s"])
+                                state["fiyat"] = f
+                                if deg: state["degisim_24s"] = deg
+                                if hac: state["hacim_24s"] = hac
+                                guncel_fiyatlar[sembol] = f
+                                
+                                # --- SIFIR GECİKME (ZERO-LATENCY) TETİKLEME KONTROLÜ ---
+                                if state["son_fiyat_tick"] > 0 and f != state["son_fiyat_tick"]:
+                                    degisim_tick = abs((f - state["son_fiyat_tick"]) / state["son_fiyat_tick"]) * 100
+                                    if degisim_tick >= 0.3: state["analiz_tetikleyici"].set()
+                                state["son_fiyat_tick"] = f
+                                
+                        for i, s in enumerate(diger_semboller):
+                            tck = res[i+1]
+                            if isinstance(tck, dict): guncel_fiyatlar[s] = tck.get("last", guncel_fiyatlar.get(s, 0))
+                                
+                        with lock:
+                            # Taranan breakout pozisyon fiyati lazim degil, anlik fiyati update ettik.
                             
-                            aktif_pnl = pnl_hesapla(state["pozisyon"], state["giris_fiyati"], fiyat, state["islem_margin"] * state["islem_kaldirac"], state["islem_kaldirac"])
-                            pnl_pct = (aktif_pnl / state["islem_margin"]) * 100
+                            # Global Stop-Loss Korumasi (>%20 Total Account Risk)
+                            toplam_margin = aktif_margin_toplami(state["aktif_pozisyonlar"])
+                            top_pnl_anlik = pnl_hesapla_coklu(state["aktif_pozisyonlar"], guncel_fiyatlar)
+                            anlik_varlik = state["bakiye"] + toplam_margin + top_pnl_anlik
+                            max_izin_verilir_risk = anlik_varlik * 0.20
                             
-                            # 1. Likidasyon Kontrolü
-                            if (is_long and fiyat <= liq_price) or (is_short and fiyat >= liq_price):
-                                islem_kapat(state, fiyat, "Liquidation", is_liq=True)
-                                if state["bakiye"] <= 0:
-                                    state["bot_durumu"] = "💀 İflas"
-                                    state["bot_calisiyor"] = False
-                                    dur_sinyali.set()
+                            if top_pnl_anlik < 0 and abs(top_pnl_anlik) >= max_izin_verilir_risk:
+                                # Panik kapat
+                                acik_syms = list(state["aktif_pozisyonlar"].keys())
+                                for s in acik_syms:
+                                    f_s = guncel_fiyatlar.get(s, state["aktif_pozisyonlar"][s]["giris_fiyati"])
+                                    islem_kapat(state, s, f_s, "🚨 GLOBAL STOP-LOSS TETİKLENDİ! Toplam zarar %20'yi aştı.")
+                                log_ekle("🚨 GLOBAL STOP-LOSS TETİKLENDİ! Toplam Bakiye Korundu.", state, is_breakout=True)
+                                
+                            # --- ANLIK RİSK & POZİSYON KONTROLÜ (WS TICK) ---
+                            kapanacak_semboller = []
+                            for p_sembol, poz in list(state["aktif_pozisyonlar"].items()):
+                                f_s = guncel_fiyatlar.get(p_sembol, poz["giris_fiyati"])
+                                if f_s == 0: continue
+                                
+                                is_long = poz["pozisyon"] == "LONG"
+                                is_short = poz["pozisyon"] == "SHORT"
+                                liq_price = poz["likidasyon_fiyati"]
                             
-                            elif state["pozisyon"] != "YOK": # Liq olmadıysa
-                                # 2. %10 Kademeli TP %50 Kapat ve TS Breakeven
-                                if pnl_pct >= 10.0 and not state.get("kademeli_tp_yapildi", False):
-                                    state["kademeli_tp_yapildi"] = True
-                                    real_pnl = aktif_pnl / 2
-                                    ret_margin = state["islem_margin"] / 2
-                                    state["bakiye"] += (ret_margin + real_pnl)
-                                    state["islem_margin"] /= 2
-                                    state["coin_miktar"] /= 2
-                                    
-                                    state["ts_aktif"] = True
-                                    state["trailing_stop_fiyat"] = state["giris_fiyati"]
-                                    
-                                    z = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-                                    state["islem_gecmisi"].append({
-                                        "zaman": z, "sembol": sembol, "sinyal": "💰 %50 TP", 
-                                        "fiyat": round(fiyat, 4), "kaldirac": f"{state['islem_kaldirac']}x", 
-                                        "poz_buyukluk": round(state["coin_miktar"], 2), 
-                                        "bakiye_usdt": round(state["bakiye"], 2), 
-                                        "kar_zarar": f"{real_pnl:+.2f} USDT", "ai_notu": "%10 ROE: %50 Kâr Alındı, TS Başabaş."
-                                    })
-                                    log_ekle(f"💰 %10 ROE Tespiti: {sembol} pozisyonun yarısı kapatıldı. TS giriş fiyatına çekildi.", state, is_breakout=True)
-                                    
-                                # 3. Normal TS Update
-                                if state["ts_aktif"]:
-                                    ts_hit = False
-                                    if is_long:
-                                        if pnl_pct >= 5.0 and not state.get("kademeli_tp_yapildi", False):
-                                            yeni_ts = fiyat * 0.98
-                                            if yeni_ts > state["trailing_stop_fiyat"]: state["trailing_stop_fiyat"] = yeni_ts
-                                        if fiyat <= state["trailing_stop_fiyat"]: ts_hit = True
-                                    else:
-                                        if pnl_pct >= 5.0 and not state.get("kademeli_tp_yapildi", False):
-                                            yeni_ts = fiyat * 1.02
-                                            if yeni_ts < state["trailing_stop_fiyat"]: state["trailing_stop_fiyat"] = yeni_ts
-                                        if fiyat >= state["trailing_stop_fiyat"]: ts_hit = True
+                                aktif_pnl = pnl_hesapla(poz["pozisyon"], poz["giris_fiyati"], f_s, poz["islem_margin"] * poz["islem_kaldirac"], poz["islem_kaldirac"])
+                                pnl_pct = (aktif_pnl / poz["islem_margin"]) * 100
+                            
+                                # 1. Likidasyon Kontrolü
+                                if (is_long and f_s <= liq_price) or (is_short and f_s >= liq_price):
+                                    islem_kapat(state, p_sembol, f_s, "Liquidation", is_liq=True)
+                                    if state["bakiye"] <= 0:
+                                        state["bot_durumu"] = "💀 İflas"
+                                        state["bot_calisiyor"] = False
+                                        dur_sinyali.set()
+                            
+                                else: # Liq olmadıysa
+                                    # 2. %10 Kademeli TP %50 Kapat ve TS Breakeven
+                                    if pnl_pct >= 10.0 and not poz.get("kademeli_tp_yapildi", False):
+                                        poz["kademeli_tp_yapildi"] = True
+                                        real_pnl = aktif_pnl / 2
+                                        ret_margin = poz["islem_margin"] / 2
+                                        state["bakiye"] += (ret_margin + real_pnl)
+                                        poz["islem_margin"] /= 2
+                                        poz["coin_miktar"] /= 2
                                         
-                                    if ts_hit:
-                                        islem_kapat(state, fiyat, "🛡️ TS KAPAT - İz Süren Stop")
-                        
-                        # --- DRAWDOWN TRACKER ---
-                        aktif = pnl_hesapla(state["pozisyon"], state["giris_fiyati"], fiyat, state["islem_margin"] * state["islem_kaldirac"] if state["pozisyon"] != "YOK" else 0, state["islem_kaldirac"])
-                        toplam = state["bakiye"] + (state["islem_margin"] if state["pozisyon"] != "YOK" else 0) + aktif
-                        
-                        if toplam > state["pik_bakiye"]: state["pik_bakiye"] = toplam
-                        elif state["pik_bakiye"] > 0:
-                            dd = (state["pik_bakiye"] - toplam) / state["pik_bakiye"] * 100
-                            if dd > state["max_drawdown"]: state["max_drawdown"] = dd
+                                        poz["ts_aktif"] = True
+                                        poz["trailing_stop_fiyat"] = poz["giris_fiyati"]
+                                        
+                                        z = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                                        state["islem_gecmisi"].append({
+                                            "zaman": z, "sembol": p_sembol, "sinyal": "💰 %50 TP", 
+                                            "fiyat": round(f_s, 4), "kaldirac": f"{poz['islem_kaldirac']}x", 
+                                            "poz_buyukluk": round(poz["coin_miktar"], 2), 
+                                            "bakiye_usdt": round(state["bakiye"], 2), 
+                                            "kar_zarar": f"{real_pnl:+.2f} USDT", "ai_notu": "%10 ROE: %50 Kâr Alındı, TS Başabaş."
+                                        })
+                                        log_ekle(f"💰 %10 ROE Tespiti: {p_sembol} pozisyonun yarısı kapatıldı. TS giriş fiyatına çekildi.", state, is_breakout=True)
+                                        
+                                    # 3. Normal TS Update
+                                    if poz["ts_aktif"]:
+                                        ts_hit = False
+                                        if is_long:
+                                            if pnl_pct >= 5.0 and not poz.get("kademeli_tp_yapildi", False):
+                                                yeni_ts = f_s * 0.98
+                                                if yeni_ts > poz["trailing_stop_fiyat"]: poz["trailing_stop_fiyat"] = yeni_ts
+                                            if f_s <= poz["trailing_stop_fiyat"]: ts_hit = True
+                                        else:
+                                            if pnl_pct >= 5.0 and not poz.get("kademeli_tp_yapildi", False):
+                                                yeni_ts = f_s * 1.02
+                                                if yeni_ts < poz["trailing_stop_fiyat"]: poz["trailing_stop_fiyat"] = yeni_ts
+                                            if f_s >= poz["trailing_stop_fiyat"]: ts_hit = True
+                                            
+                                        if ts_hit: kapanacak_semboller.append(p_sembol)
+                            
+                            for ks in kapanacak_semboller:
+                                f_ks = guncel_fiyatlar.get(ks, state["aktif_pozisyonlar"][ks]["giris_fiyati"])
+                                islem_kapat(state, ks, f_ks, "🛡️ TS KAPAT - İz Süren Stop")
+                            
+                            # --- DRAWDOWN TRACKER ---
+                            anlik_v = state["bakiye"] + aktif_margin_toplami(state["aktif_pozisyonlar"]) + pnl_hesapla_coklu(state["aktif_pozisyonlar"], guncel_fiyatlar)
+                            if anlik_v > state["pik_bakiye"]: state["pik_bakiye"] = anlik_v
+                            elif state["pik_bakiye"] > 0:
+                                dd = (state["pik_bakiye"] - anlik_v) / state["pik_bakiye"] * 100
+                                if dd > state["max_drawdown"]: state["max_drawdown"] = dd
 
-                else:
-                    await asyncio.sleep(0.5)
-            except asyncio.TimeoutError: pass
+                    except asyncio.TimeoutError: pass
+                else: await asyncio.sleep(0.5)
             except Exception as e:
                 await asyncio.sleep(1)
         try: await exchange.close()
@@ -273,34 +315,28 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
             
             # --- 1. AŞAMA: TARA VE CANLI VERİ ENTEGRASYONU ---
             with lock:
-                poz = state["pozisyon"]
-                if poz == "YOK": log_ekle("🔍 Live Test: Breakout, BTC Trendi ve Fonlama verileri sentezleniyor...", state)
+                acik_poz_var_mi = len(state["aktif_pozisyonlar"]) > 0
+                if not acik_poz_var_mi: log_ekle("🔍 Live Test: Breakout, BTC Trendi ve Fonlama verileri sentezleniyor...", state)
             
             btc_trend = ai_engine.btc_trendi_analiz_et(exchange)
             
-            if poz == "YOK":
-                top_coinler = ai_engine.top_coinleri_tara(exchange, limit=30)
-                tarama_sonucu = ai_engine.anormallik_tara_ve_sec(exchange, top_coinler, preset["sma_kisa"], preset["sma_uzun"])
-                
-                secilen_sembol = tarama_sonucu["secilen_sembol"] or "BTC/USDT"
-                secilen_pazar = tarama_sonucu.get("secilen_pazar", {})
-                secilen_sma = tarama_sonucu.get("secilen_sma", "BEKLE")
-                is_breakout = tarama_sonucu.get("secilen_breakout", False)
-                
-                with lock:
-                    state["taranan_coinler"] = tarama_sonucu.get("taranan_liste", [])
-                    state["aktif_sembol"] = secilen_sembol
-                    state["is_breakout"] = is_breakout
-                    if is_breakout:
-                        state["bot_durumu"] = "🚨 Breakout Modu!"
-                        log_ekle(f"🔥 HACİM PATLAMASI: {secilen_sembol} (Hız 5s->2s)", state, is_breakout=True)
-                    else: state["bot_durumu"] = "Çalışıyor"
-            else:
-                secilen_sembol = state["aktif_sembol"]
-                df = ai_engine.mum_verisi_cek(exchange, secilen_sembol, "1h", limit=preset["sma_uzun"]+5)
-                secilen_pazar = ai_engine.pazar_durumu_cikar(df, secilen_sembol)
-                secilen_sma = ai_engine.sinyal_uret(df, preset["sma_kisa"], preset["sma_uzun"])
-                is_breakout = False 
+            # Dinamik Olarak Coin Seç (Portföyde olsa da olmasa da yeni fırsat tara, portföyde varsa durumunu ekle)
+            top_coinler = ai_engine.top_coinleri_tara(exchange, limit=30)
+            tarama_sonucu = ai_engine.anormallik_tara_ve_sec(exchange, top_coinler, preset["sma_kisa"], preset["sma_uzun"])
+            
+            secilen_sembol = tarama_sonucu["secilen_sembol"] or "BTC/USDT"
+            secilen_pazar = tarama_sonucu.get("secilen_pazar", {})
+            secilen_sma = tarama_sonucu.get("secilen_sma", "BEKLE")
+            is_breakout = tarama_sonucu.get("secilen_breakout", False)
+            
+            with lock:
+                state["taranan_coinler"] = tarama_sonucu.get("taranan_liste", [])
+                state["aktif_sembol"] = secilen_sembol
+                state["is_breakout"] = is_breakout
+                if is_breakout:
+                    state["bot_durumu"] = "🚨 Breakout Modu!"
+                    log_ekle(f"🔥 HACİM PATLAMASI: {secilen_sembol} (Hız 5s->2s)", state, is_breakout=True)
+                else: state["bot_durumu"] = "Çalışıyor"
             
             try:
                 ticker = exchange.fetch_ticker(secilen_sembol)
@@ -322,14 +358,16 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
             if dur_sinyali.is_set(): break
 
             # --- 3. AŞAMA: YAPAY ZEKA TAHMİNİ ---
-            # Eger trailing stop vurduysa LLM beklemeden direk kapatsin
+            # Mevcut poz var mi secili coin icin?
+            with lock: poz_durumu = state["aktif_pozisyonlar"].get(secilen_sembol, {}).get("pozisyon", "YOK")
+                
             karar_paketi = {"karar": "BEKLE", "dusunce": kapat_sinyali_nedeni, "aralik_sn": 5}
             if not pozisyonu_kapat:
                 if state["ai_modu"] == "OpenAI LLM" and state["openai_key"]:
-                    karar_paketi = ai_engine.llm_karar(secilen_sembol, secilen_pazar, secilen_sma, state["openai_key"], state["pozisyon"], btc_trend, fonlama)
+                    karar_paketi = ai_engine.llm_karar(secilen_sembol, secilen_pazar, secilen_sma, state["openai_key"], poz_durumu, btc_trend, fonlama)
                 else:
                     skor = ai_engine.kompozit_skor_hesapla(secilen_pazar, secilen_sma)
-                    karar_paketi = ai_engine.mock_ai_karar(secilen_sembol, secilen_pazar, skor, state["pozisyon"], btc_trend, fonlama)
+                    karar_paketi = ai_engine.mock_ai_karar(secilen_sembol, secilen_pazar, skor, poz_durumu, btc_trend, fonlama)
             else:
                 karar_paketi["karar"] = "KAPAT"
                 
@@ -342,42 +380,60 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
                 state["ai_beklenen_artis"] = karar_paketi.get("expected_growth", 0.0)
                 state["ai_analiz_ozeti"] = karar_paketi.get("ozet", kapat_sinyali_nedeni)
                 
+                # Global Risk Hesabi gostergesi
+                total_kullanilan = aktif_margin_toplami(state["aktif_pozisyonlar"])
+                top_v = state["bakiye"] + total_kullanilan
+                if top_v > 0: risk_pct = (total_kullanilan / top_v)*100
+                else: risk_pct = 0
+                if risk_pct > 15: state["global_risk_seviyesi"] = "🔴 Yüksek Risk"
+                elif risk_pct > 5: state["global_risk_seviyesi"] = "🟡 Orta Risk"
+                else: state["global_risk_seviyesi"] = "🟢 Düşük Risk"
+                
                 if not pozisyonu_kapat:
                     log_ekle(f"🎯 {secilen_sembol} Analizi: {karar_paketi['dusunce']}", state, is_breakout=is_breakout)
                 
                 sinyal = karar_paketi["karar"]
                 zaman = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
                 
-                if (sinyal == "LONG" or sinyal == "SHORT") and state["pozisyon"] == "YOK":
-                    margin = state["bakiye"] * preset["risk"]
-                    buyukluk_usdt = margin * kaldirac
+                if (sinyal == "LONG" or sinyal == "SHORT") and secilen_sembol not in state["aktif_pozisyonlar"]:
+                    tavsiye_kaldirac = karar_paketi.get("tavsiye_kaldirac", 10)
+                    tavsiye_oran = karar_paketi.get("tavsiye_oran", 0.10)
                     
-                    state["islem_margin"] = margin
-                    state["islem_kaldirac"] = kaldirac
-                    state["kademeli_tp_yapildi"] = False
+                    # Maximum %20 limit checker inside bot
+                    kullanilabilir_max = min(tavsiye_oran, 0.20 - (risk_pct/100.0))
+                    if kullanilabilir_max > 0:
+                        margin = state["bakiye"] * kullanilabilir_max
+                        buyukluk_usdt = margin * tavsiye_kaldirac
                     
-                    state["coin_miktar"] = buyukluk_usdt
-                    state["bakiye"] -= margin
-                    state["pozisyon"] = sinyal
-                    state["giris_fiyati"] = fiyat
-                    state["likidasyon_fiyati"] = likidasyon_hesapla(sinyal, fiyat, kaldirac)
+                        yeni_poz = {
+                            "pozisyon": sinyal,
+                            "coin_miktar": buyukluk_usdt,
+                            "giris_fiyati": fiyat,
+                            "likidasyon_fiyati": likidasyon_hesapla(sinyal, fiyat, tavsiye_kaldirac),
+                            "islem_margin": margin,
+                            "islem_kaldirac": tavsiye_kaldirac,
+                            "kademeli_tp_yapildi": False,
+                            "ts_aktif": False,
+                            "trailing_stop_fiyat": 0.0
+                        }
+                        state["aktif_pozisyonlar"][secilen_sembol] = yeni_poz
+                        state["bakiye"] -= margin
+                        
+                        state["islem_gecmisi"].append({
+                            "zaman": zaman, "sembol": secilen_sembol, "sinyal": f"🟢 AÇ: {sinyal}", 
+                            "fiyat": round(fiyat, 4), "kaldirac": f"{tavsiye_kaldirac}x", "poz_buyukluk": round(buyukluk_usdt, 2), 
+                            "bakiye_usdt": round(state["bakiye"] + margin, 2), "kar_zarar": "—", "ai_notu": karar_paketi["dusunce"]
+                        })
+                        log_ekle(f"💰 {tavsiye_kaldirac}x {sinyal} POZİSYON AÇILDI: {secilen_sembol}. Giriş: {fiyat:.4f}, Liq: {yeni_poz['likidasyon_fiyati']:.4f}", state, is_breakout)
+                    else:
+                        log_ekle(f"🛡️ {secilen_sembol} Fırsatı Boş Geçildi: Global Risk Limiti (%20) Dolu.", state)
                     
-                    state["islem_gecmisi"].append({
-                        "zaman": zaman, "sembol": secilen_sembol, "sinyal": f"🟢 AÇ: {sinyal}", 
-                        "fiyat": round(fiyat, 4), "kaldirac": f"{kaldirac}x", "poz_buyukluk": round(buyukluk_usdt, 2), 
-                        "bakiye_usdt": round(state["bakiye"] + margin, 2), "kar_zarar": "—", "ai_notu": karar_paketi["dusunce"]
-                    })
-                    log_ekle(f"💰 {kaldirac}x {sinyal} POZİSYON AÇILDI: {secilen_sembol}. Giriş: {fiyat:.4f}, Liq: {state['likidasyon_fiyati']:.4f}", state, is_breakout)
-                    
-                elif sinyal == "KAPAT" and state["pozisyon"] != "YOK":
-                    islem_kapat(state, fiyat, karar_paketi["dusunce"])
+                elif sinyal == "KAPAT" and secilen_sembol in state["aktif_pozisyonlar"]:
+                    islem_kapat(state, secilen_sembol, fiyat, karar_paketi["dusunce"])
                 
-                if state["pozisyon"] != "YOK":
-                    aktif_pnl = pnl_hesapla(state["pozisyon"], state["giris_fiyati"], fiyat, state["islem_margin"] * state["islem_kaldirac"], state["islem_kaldirac"])
-                    toplam_varlik = state["bakiye"] + state["islem_margin"] + aktif_pnl
-                else: toplam_varlik = state["bakiye"]
-                
-                if toplam_varlik >= state["hedef_bakiye"]:
+                # Hedef sarti (Tum acik pozisyonlarin guncel anlik degerini sonradan ekleyebiliriz WS'da yapiyoruz)
+                # Basit bir check:
+                if state["pik_bakiye"] >= state["hedef_bakiye"]:
                     state["bot_durumu"] = "🎯 Hedefi Ulaştı!"
                     state["bot_calisiyor"] = False
                     log_ekle("🏆 HEDEF ULAŞILDI! Bot durduruluyor.", state)
@@ -432,7 +488,7 @@ def durdur():
 
 
 with st.sidebar:
-    st.title("🎛️ AI v4 (Pro Live)")
+    st.title("🎛️ AI v4 (Otonom Fon Yöneticisi)")
     st.session_state.exchange_adi = st.selectbox("🏦 Borsa", ["binance", "gateio"], disabled=st.session_state.bot_calisiyor)
     ai_mod = st.radio("🧠 Zeka Modeli", ["Mock AI", "OpenAI LLM"], disabled=st.session_state.bot_calisiyor)
     st.session_state.ai_modu = ai_mod
@@ -441,7 +497,7 @@ with st.sidebar:
     st.markdown("---")
     st.session_state.baslangic_bakiye = st.number_input("Başlangıç (USDT)", min_value=1.0, value=st.session_state.baslangic_bakiye, disabled=st.session_state.bot_calisiyor)
     st.session_state.hedef_bakiye = st.number_input("Hedef (USDT)", min_value=2.0, value=st.session_state.hedef_bakiye, disabled=st.session_state.bot_calisiyor)
-    st.session_state.kaldirac = st.slider("Kaldıraç (Leverage)", min_value=1, max_value=50, value=st.session_state.kaldirac, step=1, disabled=st.session_state.bot_calisiyor)
+    # Akıllı Kaldıraç sayesinde manual kaldıraç slider eklentisi kaldırıldı.
     
     if not st.session_state.bot_calisiyor: st.session_state.bakiye = st.session_state.baslangic_bakiye
 
@@ -468,62 +524,27 @@ if st.session_state.bot_calisiyor: status_class = "status-breakout" if st.sessio
 elif "Hedef" in st.session_state.bot_durumu: status_class = "status-target"
     
 col_durum.markdown(f"<div style='text-align:right; margin-top:20px;'><span class='status-badge {status_class}'>Durum: {st.session_state.bot_durumu}</span></div>", unsafe_allow_html=True)
-st.markdown(f"<div class='dashboard-header'><b>🎯 Odaklanılan Coin: {st.session_state.aktif_sembol}</b> — Sonraki Analiz: {st.session_state.sonraki_analiz_sn}s</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='dashboard-header'><b>🎯 Odaklanılan Ticker: {st.session_state.aktif_sembol}</b> — Risk Barometresi: {st.session_state.global_risk_seviyesi}</div>", unsafe_allow_html=True)
 
 # ─ AI Strateji Paneli ─
-st.markdown("### 📊 Vadeli İşlemler ve AI Stratejisi")
-m1, m2, m3, m4 = st.columns(4)
+st.markdown("### 📊 Aktif Pozisyonlar Paneli")
+if not st.session_state.aktif_pozisyonlar:
+    st.info("Açık Pozisyon Bulunmuyor.")
+else:
+    poz_liste = []
+    for s, p in st.session_state.aktif_pozisyonlar.items():
+        anlik_pnl = pnl_hesapla(p['pozisyon'], p['giris_fiyati'], st.session_state.fiyat if s == st.session_state.aktif_sembol else p['giris_fiyati'], p['islem_margin'] * p['islem_kaldirac'], p['islem_kaldirac']) # Fiyat ws'den dogrudan dict'e yazilabiliyor o yuzden netlesmesi icin
+        poz_liste.append({
+            "Sembol": s, "Tip": p["pozisyon"], "Kaldıraç": f"{p['islem_kaldirac']}x", 
+            "Giriş": f"${p['giris_fiyati']:.4f}", "Liq": f"${p['likidasyon_fiyati']:.4f}",
+            "Margin": f"${p['islem_margin']:.2f}",
+            "Tahmini PNL": f"{anlik_pnl:+.2f} USDT",
+            "Sıfır Risk(TS)": "Evet" if p['ts_aktif'] else "Hayır"
+        })
+    st.dataframe(pd.DataFrame(poz_liste), use_container_width=True, hide_index=True)
 
-with m1:
-    poz = st.session_state.pozisyon
-    if poz == "LONG": renk, gorsel = "#96c93d", "🟢 LONG"
-    elif poz == "SHORT": renk, gorsel = "#FF416C", "🔴 SHORT"
-    else: renk, gorsel = "#c5c6c7", "⚪ YOK"
-    st.markdown(f"""
-    <div class="metric-card">
-        <h3>Açık Pozisyon</h3><h1 style="color: {renk}; font-size:1.8rem;">{gorsel}</h1>
-        <p>{st.session_state.kaldirac}x Kaldıraçlı</p>
-    </div>""", unsafe_allow_html=True)
+## ARTIK BU KARTLAR OMOJERLEDI. KALDIRIYORUZ.
 
-with m2:
-    liq = st.session_state.likidasyon_fiyati
-    liq_str = f"${liq:,.4f}" if liq > 0 else "—"
-    ts_durum = f"(<span style='color:#66fcf1;'>TS Aktif: ${st.session_state.trailing_stop_fiyat:.4f}</span>)" if st.session_state.ts_aktif else ""
-    st.markdown(f"""
-    <div class="metric-card">
-        <h3>Likidasyon (Liq)</h3><h1 style="color: #f7971e; font-size:1.8rem;">{liq_str}</h1>
-        <p>Giriş: {"$"+str(round(st.session_state.giris_fiyati,4)) if st.session_state.giris_fiyati else "—"} <br> {ts_durum}</p>
-    </div>""", unsafe_allow_html=True)
-
-with m3:
-    if st.session_state.pozisyon != "YOK" and st.session_state.islem_margin > 0:
-        aktif_pnl = pnl_hesapla(st.session_state.pozisyon, st.session_state.giris_fiyati, st.session_state.fiyat, st.session_state.islem_margin * st.session_state.islem_kaldirac, st.session_state.islem_kaldirac)
-        pnl_pct = (aktif_pnl / st.session_state.islem_margin) * 100
-        pnl_renk = "#96c93d" if aktif_pnl >= 0 else "#FF416C"
-        pnl_isaret = "+" if aktif_pnl >= 0 else ""
-        st.markdown(f"""
-        <div class="metric-card">
-            <h3>Canlı PNL</h3><h1 style="color: {pnl_renk}; font-size:1.8rem;">{pnl_isaret}{aktif_pnl:.2f} $</h1>
-            <p style="color: {pnl_renk}; margin-bottom: 0;">{pnl_isaret}%{pnl_pct:.2f} ROE</p>
-            <p style="color: #a4a5a6; font-size: 0.75rem; margin-top:2px;">Maks Drawdown: -%{st.session_state.max_drawdown:.2f}</p>
-        </div>""", unsafe_allow_html=True)
-    else:
-        st.markdown(f"""<div class="metric-card"><h3>Canlı PNL</h3><h1 style="color: #66fcf1; font-size:1.8rem;">$0.00</h1><p style="margin-bottom: 0;">İşlem Bekleniyor</p><p style="color: #a4a5a6; font-size: 0.75rem; margin-top:2px;">Maks Drawdown: -%{st.session_state.max_drawdown:.2f}</p></div>""", unsafe_allow_html=True)
-
-with m4:
-    btc_tr = st.session_state.btc_trendi
-    btc_c = "#96c93d" if btc_tr == "YUKARI" else "#FF416C" if btc_tr == "AŞAĞI" else "#f7971e"
-    fon_riski = st.session_state.fonlama_riski
-    fon_c = "#FF416C" if "Riskli" in fon_riski else "#66fcf1"
-    
-    st.markdown(f"""
-    <div class="metric-card" style="padding-top: 15px; padding-bottom: 5px;">
-        <h3 style="margin-bottom: 5px; color:#c5c6c7;">📋 Live Analiz Raporu</h3>
-        <p style="margin:2px;"><b>BTC Trend:</b> <span style="color:{btc_c}">{btc_tr}</span></p>
-        <p style="margin:2px;"><b>Fonlama Oranı:</b> <span style="color:{fon_c}">{st.session_state.fonlama_orani:.3f}% ({fon_riski})</span></p>
-        <span style="font-size: 0.8rem; color: #a4a5a6;">{st.session_state.ai_analiz_ozeti}</span>
-    </div>""", unsafe_allow_html=True)
-    
 st.markdown("---")
 
 # ─ Finansal Metrikler ─
@@ -535,15 +556,13 @@ with k2:
     st.metric("24s Hacim", hacim_str)
     
 bakiye = st.session_state.bakiye
-if st.session_state.pozisyon != "YOK":
-    aktif_pnl = pnl_hesapla(st.session_state.pozisyon, st.session_state.giris_fiyati, st.session_state.fiyat, st.session_state.islem_margin * st.session_state.islem_kaldirac, st.session_state.islem_kaldirac)
-    toplam = bakiye + st.session_state.islem_margin + aktif_pnl
-else: toplam = bakiye
-
+# TAHMINI toplam fon varliklari: O anki bos bakiye + tum posizyonlardaki aktif pnl
+# Tam isabet icin gerceklestirilmedigi surece bu gorsel sadece fikir verir.
+toplam = bakiye + aktif_margin_toplami(st.session_state.aktif_pozisyonlar)
 kar_yuzde = ((toplam - st.session_state.baslangic_bakiye) / st.session_state.baslangic_bakiye * 100) if st.session_state.baslangic_bakiye else 0
 
-with k3: st.metric("Toplam Varlık", f"${toplam:,.2f}", f"%{kar_yuzde:+.2f}")
-with k4: st.metric("Boşta USDT (Teta)", f"${bakiye:,.2f}")
+with k3: st.metric("Toplam Varlık (Tahmini)", f"${toplam:,.2f}", f"%{kar_yuzde:+.2f}")
+with k4: st.metric("Maks Drawdown", f"-%{st.session_state.max_drawdown:.2f}")
 
 st.progress(min(toplam / st.session_state.hedef_bakiye, 1.0) if st.session_state.hedef_bakiye else 0.0)
 st.markdown("---")
