@@ -293,8 +293,7 @@ def ws_fiyat_dinleyici(state, lock, dur_sinyali):
                                     if gecen_dk >= 30.0 and abs(pnl_pct) < 2.0:
                                         if p_sembol not in kapanacak_semboller:
                                             kapanacak_semboller.append(p_sembol)
-                                            # Nedenini islem_kapat da belirtebilmek icin hack yapmiyoruz, direkt asagida dondurcez.
-                                            poz["kapat_nedeni"] = "Fırsat Maliyeti: Yetersiz Volatilite (Stagnation)"
+                                            poz["kapat_nedeni"] = "Fırsat Maliyeti: Yetersiz Volatilite (Daha hacimli coine geçiliyor)"
                             
                             for ks in kapanacak_semboller:
                                 f_ks = guncel_fiyatlar.get(ks, state["aktif_pozisyonlar"][ks]["giris_fiyati"])
@@ -381,7 +380,10 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
                 sure_orani = gecen_saat / state["hedef_sure_saat"]
                 
                 hedef_farki_pct = (state["hedef_bakiye"] - state["bakiye"]) / state["hedef_bakiye"]
-                if sure_orani > 0.5 and hedef_farki_pct > 0:
+                # 70% of time elapsed and still away from target -> Hard Aggression
+                if sure_orani > 0.70 and hedef_farki_pct > 0.10: # Hedeften en az %10 uzaksak
+                    zaman_baski_carpani = 2.0 # 2x kaldıraç, 2x margin oranı
+                elif sure_orani > 0.5 and hedef_farki_pct > 0:
                     zaman_baski_carpani = 1.0 + (sure_orani * hedef_farki_pct * 2.0)
                     
             karar_paketi = {"karar": "BEKLE", "dusunce": kapat_sinyali_nedeni, "aralik_sn": 5}
@@ -569,14 +571,30 @@ st.markdown(f"<div class='dashboard-header'><b>🎯 Odaklanılan Ticker: {st.ses
 tab_dash, tab_tv = st.tabs(["📊 Dashboard", "📈 Grafikler (TradingView)"])
 
 with tab_dash:
-    # ─ AI Strateji Paneli ─
     st.markdown("### 📊 Aktif Pozisyonlar Paneli")
+    aktif_toplam_pnl = 0.0
+    
     if not st.session_state.aktif_pozisyonlar:
         st.info("Açık Pozisyon Bulunmuyor.")
     else:
+        # Anlık Durum Kartları (Canlı Finans Paneli)
+        st.markdown("#### ⚡ Anlık Durum Kartları")
+        poz_cols = st.columns(min(len(st.session_state.aktif_pozisyonlar), 4))
+        
         poz_liste = []
-        for s, p in st.session_state.aktif_pozisyonlar.items():
-            anlik_pnl = pnl_hesapla(p['pozisyon'], p['giris_fiyati'], st.session_state.fiyat if s == st.session_state.aktif_sembol else p['giris_fiyati'], p['islem_margin'] * p['islem_kaldirac'], p['islem_kaldirac']) # Fiyat ws'den dogrudan dict'e yazilabiliyor o yuzden netlesmesi icin
+        for idx, (s, p) in enumerate(st.session_state.aktif_pozisyonlar.items()):
+            guncel_fiyat = st.session_state.fiyat if s == st.session_state.aktif_sembol else p['giris_fiyati']
+            anlik_pnl = pnl_hesapla(p['pozisyon'], p['giris_fiyati'], guncel_fiyat, p['islem_margin'] * p['islem_kaldirac'], p['islem_kaldirac'])
+            aktif_toplam_pnl += anlik_pnl
+            
+            pnl_pct = (anlik_pnl / p['islem_margin']) * 100 if p['islem_margin'] > 0 else 0
+            
+            with poz_cols[idx % len(poz_cols)]:
+                st.metric(label=f"{s} ({p['pozisyon']} {p['islem_kaldirac']}x)", 
+                          value=f"${guncel_fiyat:.4f}", 
+                          delta=f"{anlik_pnl:+.2f} USDT ({pnl_pct:+.2f}%)",
+                          delta_color="normal")
+            
             poz_liste.append({
                 "Sembol": s, "Tip": p["pozisyon"], "Kaldıraç": f"{p['islem_kaldirac']}x", 
                 "Giriş": f"${p['giris_fiyati']:.4f}", "Liq": f"${p['likidasyon_fiyati']:.4f}",
@@ -584,6 +602,8 @@ with tab_dash:
                 "Tahmini PNL": f"{anlik_pnl:+.2f} USDT",
                 "Sıfır Risk(TS)": "Evet" if p['ts_aktif'] else "Hayır"
             })
+            
+        st.markdown("#### 📋 Detaylı Tablo")
         st.dataframe(pd.DataFrame(poz_liste), use_container_width=True, hide_index=True)
     
     st.markdown("---")
@@ -597,7 +617,8 @@ with tab_dash:
         st.metric("24s Hacim", hacim_str)
         
     bakiye = st.session_state.bakiye
-    toplam = bakiye + aktif_margin_toplami(st.session_state.aktif_pozisyonlar)
+    # Toplam Varlık = Boşta Bakiye + Kullanılan Marginler + Tüm Canlı PNL'ler
+    toplam = bakiye + aktif_margin_toplami(st.session_state.aktif_pozisyonlar) + aktif_toplam_pnl
     kar_yuzde = ((toplam - st.session_state.baslangic_bakiye) / st.session_state.baslangic_bakiye * 100) if st.session_state.baslangic_bakiye else 0
     
     with k3: st.metric("Toplam Varlık (Tahmini)", f"${toplam:,.2f}", f"%{kar_yuzde:+.2f}")
