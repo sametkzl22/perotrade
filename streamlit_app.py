@@ -17,6 +17,7 @@ import ccxt
 import pandas as pd
 import numpy as np
 import streamlit as st
+from streamlit.runtime.scriptrunner import add_script_run_ctx
 
 
 # ─────────────────────────────────────────────
@@ -399,6 +400,7 @@ def botu_baslat():
         args=(shared, shared.lock, shared.dur_sinyali),
         daemon=True,
     )
+    add_script_run_ctx(t)
     t.start()
     st.session_state.bot_thread = t
 
