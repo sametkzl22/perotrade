@@ -1,9 +1,10 @@
 """
-AI Karar Motoru (AI Decision Engine) v3
+AI Karar Motoru (AI Decision Engine) v4
 ========================================
 Breakout Tarayıcı, Hacim Anormallikleri, Trend/Web Simülasyonu,
 Twitter (X) Duyarlılık Analizi, Güven Skoru & Beklenen Artış,
-ve Vadeli İşlemler (Long/Short) stratejisi.
+Vadeli İşlemler (Long/Short) stratejisi ve *Live Test Optimizasyonları*
+(BTC Korelasyonu, Fonlama Oranı, 2s Breakout Taraması).
 """
 
 import math
@@ -33,8 +34,8 @@ def sinyal_uret(df: pd.DataFrame, sma_kisa: int, sma_uzun: int) -> str:
     if df["sma_k"].isna().iloc[-1] or df["sma_u"].isna().iloc[-1]: return "BEKLE"
 
     onceki, son = df.iloc[-2], df.iloc[-1]
-    if onceki["sma_k"] <= onceki["sma_u"] and son["sma_k"] > son["sma_u"]: return "AL"   # Potansiyel LONG sinyali
-    if onceki["sma_k"] >= onceki["sma_u"] and son["sma_k"] < son["sma_u"]: return "SAT"  # Potansiyel SHORT sinyali
+    if onceki["sma_k"] <= onceki["sma_u"] and son["sma_k"] > son["sma_u"]: return "AL"
+    if onceki["sma_k"] >= onceki["sma_u"] and son["sma_k"] < son["sma_u"]: return "SAT"
     return "BEKLE"
 
 def rsi_hesapla(df: pd.DataFrame, period: int = 14) -> float:
@@ -55,7 +56,8 @@ def volatilite_hesapla(df: pd.DataFrame) -> float:
     return float(volatility) if not np.isnan(volatility) else 0.0
 
 def dinamik_analiz_araligi(volatilite: float, is_breakout: bool = False) -> int:
-    if is_breakout: return 5
+    """ Breakout varsa ultra-hızlı 2 saniye reaksiyon süresi. """
+    if is_breakout: return 2
     if volatilite > 5.0: return 30
     elif volatilite > 2.0: return 120
     elif volatilite > 0.5: return 300
@@ -63,7 +65,44 @@ def dinamik_analiz_araligi(volatilite: float, is_breakout: bool = False) -> int:
 
 
 # ─────────────────────────────────────────────
-# 2) Sosyal & Web Duyarlılık (News + Twitter)
+# 2) Piyasa Lideri (BTC) ve Fonlama Oranı (PRO)
+# ─────────────────────────────────────────────
+def btc_trendi_analiz_et(exchange) -> str:
+    """ Genel piyasa sağlığını (BTC yönünü) analiz eder. """
+    try:
+        df = mum_verisi_cek(exchange, "BTC/USDT", "1h", limit=15)
+        sma_k = sma_hesapla(df['close'], 7).iloc[-1]
+        sma_u = sma_hesapla(df['close'], 14).iloc[-1]
+        rsi = rsi_hesapla(df, 7)
+        
+        if sma_k > sma_u and rsi > 55: return "YUKARI"
+        elif sma_k < sma_u and rsi < 45: return "AŞAĞI"
+        else: return "YATAY"
+    except:
+        return "BİLİNMİYOR"
+
+def fonlama_orani_getir(exchange, symbol: str) -> dict:
+    """ Fonlama oranını simüle ederek / çekerek aşırı riskli yönü bulur. """
+    try:
+        if exchange.has.get('fetchFundingRate'):
+            res = exchange.fetch_funding_rate(symbol)
+            oran = float(res.get('fundingRate', 0.0)) * 100
+            risk = "Yok"
+            if oran > 0.05: risk = "Uzun(Long) Riskli"
+            elif oran < -0.05: risk = "Kısa(Short) Riskli"
+            return {"oran": oran, "risk": risk}
+    except Exception:
+        pass
+        
+    s_oran = random.uniform(-0.06, 0.08)
+    risk = "Yok"
+    if s_oran > 0.05: risk = "Uzun(Long) Riskli"
+    elif s_oran < -0.05: risk = "Kısa(Short) Riskli"
+    return {"oran": s_oran, "risk": risk}
+
+
+# ─────────────────────────────────────────────
+# 3) Sosyal & Web Duyarlılık (News + Twitter)
 # ─────────────────────────────────────────────
 def trend_analizi_yap() -> list:
     haberler = []
@@ -85,18 +124,14 @@ def trend_analizi_yap() -> list:
     return haberler
 
 def twitter_etkisi_puanla(sembol: str) -> dict:
-    """Mock Twitter (X) Duyarlılık Simülasyonu"""
     coin_adi = sembol.split('/')[0]
     influencer_tweettleri = [
         {"yazar": "Elon Musk", "tweet": f"Thinking about buying more {coin_adi} 🚀. To the moon!", "skor": 0.5},
         {"yazar": "Elon Musk", "tweet": f"{coin_adi} seems overvalued right now. Be careful. 📉", "skor": -0.5},
         {"yazar": "Michael Saylor", "tweet": f"{coin_adi} is digital energy. HODL forever.", "skor": 0.4},
-        {"yazar": "Michael Saylor", "tweet": "Stick to BTC, drop the altcoins.", "skor": -0.3 if coin_adi != "BTC" else 0.4},
-        {"yazar": "Whale Alert", "tweet": f"🚨 10,000,000 {coin_adi} transferred to unknown wallet.", "skor": 0.3}, # Bullish accumulation
-        {"yazar": "Whale Alert", "tweet": f"🚨 50,000,000 {coin_adi} transferred to Binance.", "skor": -0.4}, # Bearish dump
+        {"yazar": "Whale Alert", "tweet": f"🚨 10,000,000 {coin_adi} transferred to unknown wallet.", "skor": 0.3},
+        {"yazar": "Whale Alert", "tweet": f"🚨 50,000,000 {coin_adi} transferred to Binance.", "skor": -0.4},
     ]
-    
-    # Sisteme %30 ihtimalle bir influencer tweet'i tetiklensin
     if random.random() < 0.30: 
         secilen_tweet = random.choice(influencer_tweettleri)
         return {"aktif": True, "yazar": secilen_tweet["yazar"], "skor": secilen_tweet["skor"]}
@@ -123,15 +158,12 @@ def duyarlilik_puanla(haberler: list, sembol: str, twitter_skoru: float) -> floa
                 if n in h: skor -= 0.3
 
     if "ai" in coin_adi and any("ai" in h for h in haberler): skor += 0.2
-    
-    # Twitter skorunu doğrudan ekle (max +-0.5 etkisi var)
     skor += twitter_skoru  
-
     return max(-1.0, min(1.0, skor))
 
 
 # ─────────────────────────────────────────────
-# 3) Dinamik Coin Seçimi (Top 20 + Breakout Scanner)
+# 4) Dinamik Coin Seçimi (Top 20 + Breakout Scanner)
 # ─────────────────────────────────────────────
 def top_coinleri_tara(exchange, limit=30) -> list:
     standart_liste = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT"]
@@ -148,7 +180,7 @@ def top_coinleri_tara(exchange, limit=30) -> list:
 
 def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
     secilen_sembol = None
-    en_baskın_mutlak_skor = -1 # Yön farketmeksizin en güçlü sinyali bul (Long veya Short)
+    en_baskın_mutlak_skor = -1
     secilen_pazar = None
     secilen_sma = None
     secilen_breakout = False
@@ -183,7 +215,6 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
                 "Breakout": "🔥 EVET" if is_breakout else "HAYIR"
             })
             
-            # Futures botu hem aşağı hem yukarıyı arar. Modeline (mutlak değerine) bakıyoruz.
             mutlak_guc = abs(skor)
             if is_breakout: mutlak_guc += 50
             
@@ -207,7 +238,7 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
 
 
 # ─────────────────────────────────────────────
-# 4) Komplike Karar Motoru & Yapay Zeka
+# 5) Komplike Karar Motoru & Yapay Zeka
 # ─────────────────────────────────────────────
 def pazar_durumu_cikar(df: pd.DataFrame, sembol: str, pre_fetched_news=None, twitter_verisi=None) -> dict:
     rsi = rsi_hesapla(df)
@@ -218,7 +249,6 @@ def pazar_durumu_cikar(df: pd.DataFrame, sembol: str, pre_fetched_news=None, twi
     
     haberler = pre_fetched_news if pre_fetched_news else trend_analizi_yap()
     tw_veri = twitter_verisi if twitter_verisi else twitter_etkisi_puanla(sembol)
-    
     duyarlilik = duyarlilik_puanla(haberler, sembol, tw_veri["skor"])
     
     return {
@@ -242,15 +272,12 @@ def kompozit_skor_hesapla(pazar: dict, sma_sinyal: str) -> float:
     else: skor -= 5
         
     skor += (pazar["duyarlilik"] * 20)
-    
-    if pazar["hacim_trend"] == "Artıyor":
-        skor += 15 if skor > 0 else -15
+    if pazar["hacim_trend"] == "Artıyor": skor += 15 if skor > 0 else -15
         
     vol_etki = min(pazar["volatilite"], 5.0) * 2
     skor += vol_etki if skor > 0 else -vol_etki
     
-    if pazar.get("is_breakout"):
-        skor += 20 if skor > 0 else -20 # Breakout trend yönünde fırlatır
+    if pazar.get("is_breakout"): skor += 20 if skor > 0 else -20
         
     return max(-100.0, min(100.0, skor))
 
@@ -260,17 +287,15 @@ def ai_metrikler(pazar: dict, kompozit_skor: float) -> tuple:
     
     beklenen = pazar["volatilite"] * 1.5
     if pazar.get("is_breakout"): beklenen *= 2.5
-    if kompozit_skor < 0: beklenen = -beklenen # Düşüş beklentisi (-)
+    if kompozit_skor < 0: beklenen = -beklenen
     
     return guven, beklenen
 
-def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon: str) -> dict:
+def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon: str, btc_trendi: str, fonlama: dict) -> dict:
     guven, beklenen_artis = ai_metrikler(pazar, kompozit_skor)
     
-    # Futures Karar Ağacı
     karar = "BEKLE"
     neden = f"Piyasa kararsız (Skor: {kompozit_skor:.1f}). Kesin kırılım yok."
-    
     twitter_msg = f" 🐦 [{pazar['twitter']['yazar']}: {pazar['twitter']['skor']:+.1f} Etki]" if pazar.get("twitter", {}).get("aktif") else ""
 
     if kompozit_skor > 40:
@@ -278,22 +303,31 @@ def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon:
             karar = "KAPAT"
             neden = f"Trend YUKARI döndü! SHORT pozisyon riske girdi, acil kapatılıyor (Skor: {kompozit_skor:.1f})."
         else:
-            karar = "LONG"
-            neden = f"Güçlü YÜKSELİŞ Beklentisi! {sembol} kompozit skoru {kompozit_skor:.1f}. RSI ({pazar['rsi']:.1f}).{twitter_msg}"
-            if pazar.get("is_breakout"): neden = "🚀 ACİL LONG (BREAKOUT)! Hacim patlaması tespit edildi. " + neden
+            if btc_trendi == "AŞAĞI":
+                neden = f"LONG fırsatı vardı fakt BTC Trendi AŞAĞI olduğu için İPTAL edildi. Güvenlik öncelikli."
+            elif "Uzun" in fonlama["risk"]:
+                neden = f"LONG fırsatı vardı fakat Fonlama Oranı aşırı yüksek ({fonlama['oran']:.2f}%). Likidasyon/Maliyet riski nedeniyle işlem askıda."
+            else:
+                karar = "LONG"
+                neden = f"Güçlü YÜKSELİŞ Beklentisi! {sembol} kompozit skoru {kompozit_skor:.1f}. RSI ({pazar['rsi']:.1f}).{twitter_msg}"
+                if pazar.get("is_breakout"): neden = "🚀 ACİL LONG (BREAKOUT)! Hacim patlaması tespit edildi. " + neden
             
     elif kompozit_skor < -40:
         if acik_pozisyon == "LONG":
             karar = "KAPAT"
             neden = f"Trend AŞAĞI döndü! LONG pozisyon terse düştü, acil kapatılıyor (Skor: {kompozit_skor:.1f})."
         else:
-            karar = "SHORT"
-            neden = f"Güçlü DÜŞÜŞ Beklentisi! {sembol} zayıflık gösteriyor (Skor: {kompozit_skor:.1f}). Hacim '{pazar['hacim_trend']}'.{twitter_msg}"
-            if pazar.get("is_breakout"): neden = "📉 ACİL SHORT (CRASH)! Aşağı yönlü hacim patlaması tespit edildi. " + neden
+            if btc_trendi == "YUKARI":
+                neden = f"SHORT fırsatı vardı fakat BTC Trendi YUKARI olduğu için İPTAL edildi. Güvenlik öncelikli."
+            elif "Kısa" in fonlama["risk"]:
+                neden = f"SHORT fırsatı vardı fakat negatif Fonlama Oranı aşırı yüksek ({fonlama['oran']:.2f}%). Pozisyon açılmadı."
+            else:
+                karar = "SHORT"
+                neden = f"Güçlü DÜŞÜŞ Beklentisi! {sembol} zayıflık gösteriyor (Skor: {kompozit_skor:.1f}).{twitter_msg}"
+                if pazar.get("is_breakout"): neden = "📉 ACİL SHORT (CRASH)! Aşağı yönlü hacim patlaması tespit edildi. " + neden
 
     sonraki_sn = dinamik_analiz_araligi(pazar["volatilite"], pazar.get("is_breakout", False))
     
-    # Ters pozisyonda veya pozisyon kararsızsa güven skorunu ayarla
     return {
         "sembol": sembol,
         "karar": karar,
@@ -302,10 +336,10 @@ def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon:
         "aralik_sn": sonraki_sn,
         "guven_skoru": guven,
         "expected_growth": beklenen_artis,
-        "ozet": f"RSI: {pazar['rsi']:.1f} | Trend: {pazar['hacim_trend']} | Sosyal Puan: {pazar['duyarlilik']:+.1f}"
+        "ozet": f"BTC: {btc_trendi} | Fonlama: {fonlama['oran']:.3f}%"
     }
 
-def llm_karar(sembol: str, pazar: dict, sma_sinyal: str, api_key: str, acik_pozisyon: str) -> dict:
+def llm_karar(sembol: str, pazar: dict, sma_sinyal: str, api_key: str, acik_pozisyon: str, btc_trendi: str, fonlama: dict) -> dict:
     import openai
     client = openai.OpenAI(api_key=api_key)
     
@@ -317,12 +351,12 @@ def llm_karar(sembol: str, pazar: dict, sma_sinyal: str, api_key: str, acik_pozi
     prompt = f"""
     Sen usta bir kripto Furtures (Vadeli İşlem) botusun.
     Mevcut Açık Pozisyon: {acik_pozisyon} ("YOK", "LONG", veya "SHORT" olabilir).
-    {sembol} coini için 'LONG', 'SHORT', 'KAPAT' veya 'BEKLE' kararı ver.
-    Eğer pozisyonun tersine güçlü bir trend varsa 'KAPAT' demelisin.
+    BTC Genel Trendi: {btc_trendi} (Ana piyasa yönü, buna göre risk al).
+    Fonlama Oranı Risk Durumu: {fonlama['risk']} (Oran: {fonlama['oran']:.3f}%)
     
+    {sembol} coini için 'LONG', 'SHORT', 'KAPAT' veya 'BEKLE' kararı ver.
     Veriler: Fiyat: {pazar['fiyat']}, SMA Sinyali: {sma_sinyal}, RSI: {pazar['rsi']:.2f}, Vol: %{pazar['volatilite']:.2f}, Trend: {pazar['hacim_trend']}, Breakout: {breakout_str}
     Sosyal Trend Skoru: {pazar['duyarlilik']:.2f}
-    Güncel Influencer Tweeti: {tw_str}
     
     YANIT FORMATI:
     Karar: [LONG/SHORT/KAPAT/BEKLE]
@@ -360,8 +394,8 @@ def llm_karar(sembol: str, pazar: dict, sma_sinyal: str, api_key: str, acik_pozi
             "aralik_sn": sonraki_sn,
             "guven_skoru": guven,
             "expected_growth": beklenen_artis,
-            "ozet": f"LLM Futures: RSI {pazar['rsi']:.1f} | Soc {pazar['duyarlilik']:+.1f}"
+            "ozet": f"LLM | BTC: {btc_trendi} | Fonlama: {fonlama['risk']}"
         }
     except Exception as e:
         print(f"LLM hatası: {e}. Mock AI'ye dönülüyor.")
-        return mock_ai_karar(sembol, pazar, komp_skor, acik_pozisyon)
+        return mock_ai_karar(sembol, pazar, komp_skor, acik_pozisyon, btc_trendi, fonlama)
