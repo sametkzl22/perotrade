@@ -19,10 +19,17 @@ from datetime import datetime, timezone
 # ─────────────────────────────────────────────
 def mum_verisi_cek(exchange, symbol, timeframe="1h", limit=55):
     try:
+        if exchange is None or not symbol:
+            return pd.DataFrame()
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-        if not ohlcv: return pd.DataFrame()
+        if not ohlcv or not isinstance(ohlcv, list):
+            return pd.DataFrame()
         df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        if df.empty:
+            return pd.DataFrame()
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        # NaN/None temizliği
+        df = df.dropna(subset=["close", "volume"])
         return df
     except Exception:
         return pd.DataFrame()
@@ -43,21 +50,31 @@ def sinyal_uret(df: pd.DataFrame, sma_kisa: int, sma_uzun: int) -> str:
     return "BEKLE"
 
 def rsi_hesapla(df: pd.DataFrame, period: int = 14) -> float:
-    if len(df) < period + 1: return 50.0
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    rs = rs.replace([np.inf, -np.inf], 100)
-    rsi = 100 - (100 / (1 + rs))
-    val = rsi.iloc[-1]
-    return float(val) if not np.isnan(val) else 50.0
+    if df is None or df.empty or len(df) < period + 1:
+        return 50.0
+    try:
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        rs = gain / loss
+        rs = rs.replace([np.inf, -np.inf], 100)
+        rsi = 100 - (100 / (1 + rs))
+        val = rsi.iloc[-1]
+        return float(val) if not np.isnan(val) else 50.0
+    except Exception:
+        return 50.0
 
 def volatilite_hesapla(df: pd.DataFrame) -> float:
-    if len(df) < 14: return 0.0
-    returns = df['close'].pct_change().dropna()
-    volatility = returns.std() * 100
-    return float(volatility) if not np.isnan(volatility) else 0.0
+    if df is None or df.empty or len(df) < 14:
+        return 0.0
+    try:
+        returns = df['close'].pct_change().dropna()
+        if returns.empty:
+            return 0.0
+        volatility = returns.std() * 100
+        return float(volatility) if not np.isnan(volatility) else 0.0
+    except Exception:
+        return 0.0
 
 def dinamik_analiz_araligi(volatilite: float, is_breakout: bool = False) -> int:
     """ Breakout varsa ultra-hızlı 2 saniye reaksiyon süresi. """
@@ -74,27 +91,35 @@ def dinamik_analiz_araligi(volatilite: float, is_breakout: bool = False) -> int:
 def btc_trendi_analiz_et(exchange) -> str:
     """ Genel piyasa sağlığını (BTC yönünü) analiz eder. """
     try:
+        if exchange is None:
+            return "BİLİNMİYOR"
         df = mum_verisi_cek(exchange, "BTC/USDT", "1h", limit=15)
+        if df is None or df.empty or len(df) < 14:
+            return "BİLİNMİYOR"
         sma_k = sma_hesapla(df['close'], 7).iloc[-1]
         sma_u = sma_hesapla(df['close'], 14).iloc[-1]
+        if pd.isna(sma_k) or pd.isna(sma_u):
+            return "YATAY"
         rsi = rsi_hesapla(df, 7)
         
         if sma_k > sma_u and rsi > 55: return "YUKARI"
         elif sma_k < sma_u and rsi < 45: return "AŞAĞI"
         else: return "YATAY"
-    except:
+    except Exception:
         return "BİLİNMİYOR"
 
 def fonlama_orani_getir(exchange, symbol: str) -> dict:
     """ Fonlama oranını simüle ederek / çekerek aşırı riskli yönü bulur. """
     try:
-        if exchange.has.get('fetchFundingRate'):
-            res = exchange.fetch_funding_rate(symbol)
-            oran = float(res.get('fundingRate', 0.0)) * 100
-            risk = "Yok"
-            if oran > 0.05: risk = "Uzun(Long) Riskli"
-            elif oran < -0.05: risk = "Kısa(Short) Riskli"
-            return {"oran": oran, "risk": risk}
+        if exchange is not None and hasattr(exchange, 'has') and isinstance(exchange.has, dict):
+            if exchange.has.get('fetchFundingRate'):
+                res = exchange.fetch_funding_rate(symbol)
+                if isinstance(res, dict):
+                    oran = float(res.get('fundingRate', 0.0) or 0.0) * 100
+                    risk = "Yok"
+                    if oran > 0.05: risk = "Uzun(Long) Riskli"
+                    elif oran < -0.05: risk = "Kısa(Short) Riskli"
+                    return {"oran": oran, "risk": risk}
     except Exception:
         pass
         
@@ -241,23 +266,31 @@ def top_coinleri_tara(exchange, limit=100) -> list:
     standart_liste = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT"]
     yasakli_kelimeler = ["USDC", "FDUSD", "TUSD", "DAI", "EUR", "GBP", "BUSD", "USDP", "TRUE", "PAXG", "USDD", "PYUSD"]
     try:
-        if exchange.has.get('fetchTickers'):
-            tickers = exchange.fetch_tickers()
-            if not tickers: return standart_liste
-            usdt_tickers = {}
-            for k, v in tickers.items():
-                if v is None: continue
-                if '/USDT' in k and v.get('quoteVolume', 0) > 0:
-                    # Stablecoin ve Fiat filtresi
-                    is_yasakli = any(yasak in k for yasak in yasakli_kelimeler)
-                    if not is_yasakli:
-                        usdt_tickers[k] = v
-            # Hacme göre sırala
-            sirali = sorted(usdt_tickers.items(), key=lambda x: x[1].get('quoteVolume', 0), reverse=True)
-            if not sirali: return standart_liste
-            return [k for k, v in sirali[:limit]]
-        else:
+        if exchange is None:
             return standart_liste
+        if not isinstance(getattr(exchange, 'has', None), dict) or not exchange.has.get('fetchTickers'):
+            return standart_liste
+            
+        tickers = exchange.fetch_tickers()
+        if not tickers or not isinstance(tickers, dict):
+            return standart_liste
+            
+        usdt_tickers = {}
+        for k, v in tickers.items():
+            if v is None or not isinstance(v, dict):
+                continue
+            vol = v.get('quoteVolume', 0)
+            if vol is None:
+                vol = 0
+            if '/USDT' in k and vol > 0:
+                is_yasakli = any(yasak in k for yasak in yasakli_kelimeler)
+                if not is_yasakli:
+                    usdt_tickers[k] = v
+        # Hacme göre sırala
+        sirali = sorted(usdt_tickers.items(), key=lambda x: (x[1].get('quoteVolume', 0) or 0), reverse=True)
+        if not sirali:
+            return standart_liste
+        return [k for k, v in sirali[:limit]]
     except Exception:
         return standart_liste
 
@@ -353,28 +386,39 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
 # 5) Komplike Karar Motoru & Yapay Zeka
 # ─────────────────────────────────────────────
 def pazar_durumu_cikar(df: pd.DataFrame, sembol: str, pre_fetched_news=None, twitter_verisi=None) -> dict:
-    rsi = rsi_hesapla(df)
-    vol_pct = volatilite_hesapla(df)
-    kisa_hacim = df['volume'].iloc[-3:].mean()
-    uzun_hacim = df['volume'].iloc[-14:].mean()
-    hacim_artiyor = kisa_hacim > uzun_hacim
-    
-    haberler = pre_fetched_news if pre_fetched_news else trend_analizi_yap()
-    tw_veri = twitter_verisi if twitter_verisi else twitter_etkisi_puanla(sembol)
-    duyarlilik = duyarlilik_puanla(haberler, sembol, tw_veri["skor"])
-    makro = makro_analiz_yap(haberler)
-    
-    return {
-        "rsi": rsi,
-        "volatilite": vol_pct,
-        "hacim_trend": "Artıyor" if hacim_artiyor else "Düşüyor",
-        "duyarlilik": duyarlilik,
-        "twitter": tw_veri,
-        "fiyat": df['close'].iloc[-1],
-        "is_breakout": False,
-        "fg_index": fear_and_greed_simulasyonu(),
-        "makro": makro
-    }
+    if df is None or df.empty or len(df) < 3:
+        return None
+    try:
+        rsi = rsi_hesapla(df)
+        vol_pct = volatilite_hesapla(df)
+        kisa_hacim = df['volume'].iloc[-3:].mean()
+        uzun_hacim = df['volume'].iloc[-14:].mean() if len(df) >= 14 else kisa_hacim
+        hacim_artiyor = kisa_hacim > uzun_hacim
+        
+        haberler = pre_fetched_news if pre_fetched_news else trend_analizi_yap()
+        tw_veri = twitter_verisi if twitter_verisi else twitter_etkisi_puanla(sembol)
+        if not isinstance(tw_veri, dict):
+            tw_veri = {"aktif": False, "skor": 0.0}
+        duyarlilik = duyarlilik_puanla(haberler, sembol, tw_veri.get("skor", 0.0))
+        makro = makro_analiz_yap(haberler)
+        
+        son_fiyat = df['close'].iloc[-1]
+        if pd.isna(son_fiyat) or son_fiyat is None:
+            return None
+        
+        return {
+            "rsi": rsi,
+            "volatilite": vol_pct,
+            "hacim_trend": "Artıyor" if hacim_artiyor else "Düşüyor",
+            "duyarlilik": duyarlilik,
+            "twitter": tw_veri,
+            "fiyat": float(son_fiyat),
+            "is_breakout": False,
+            "fg_index": fear_and_greed_simulasyonu(),
+            "makro": makro
+        }
+    except Exception:
+        return None
 
 def kompozit_skor_hesapla(pazar: dict, sma_sinyal: str) -> float:
     skor = 0.0
@@ -588,32 +632,38 @@ def llm_karar(sembol: str, pazar: dict, sma_sinyal: str, api_key: str, acik_pozi
 # ─────────────────────────────────────────────
 def grid_destek_direnc(df: pd.DataFrame) -> dict:
     """Son 24 mumdan destek/direnç seviyelerini hesaplar."""
-    son_24 = df.iloc[-24:] if len(df) >= 24 else df
-    destek = float(son_24['low'].min())
-    direnc = float(son_24['high'].max())
-    fiyat = float(df['close'].iloc[-1])
-    aralik = direnc - destek
-    
-    # Piyasa yatay mı? (Aralık fiyatın %5'inden azsa yatay = Grid uygun)
-    yatay_mi = (aralik / fiyat * 100) < 5.0 if fiyat > 0 else False
-    
-    # Grid seviyeleri hesapla (5 kademe)
-    grid_seviyeleri = []
-    if aralik > 0:
-        adim = aralik / 6
-        for i in range(1, 6):
-            seviye = destek + (adim * i)
-            tip = "AL" if seviye < fiyat else "SAT"
-            grid_seviyeleri.append({"fiyat": round(seviye, 4), "tip": tip})
-    
-    return {
-        "destek": round(destek, 4),
-        "direnc": round(direnc, 4),
-        "aralik_pct": round(aralik / fiyat * 100, 2) if fiyat > 0 else 0,
-        "yatay_mi": yatay_mi,
-        "grid_seviyeleri": grid_seviyeleri,
-        "grid_uygun": yatay_mi and aralik > 0
-    }
+    bos_grid = {"destek": 0, "direnc": 0, "aralik_pct": 0, "yatay_mi": False, "grid_seviyeleri": [], "grid_uygun": False}
+    if df is None or df.empty or len(df) < 2:
+        return bos_grid
+    try:
+        son_24 = df.iloc[-24:] if len(df) >= 24 else df
+        destek = float(son_24['low'].min())
+        direnc = float(son_24['high'].max())
+        fiyat = float(df['close'].iloc[-1])
+        if pd.isna(fiyat) or fiyat <= 0:
+            return bos_grid
+        aralik = direnc - destek
+        
+        yatay_mi = (aralik / fiyat * 100) < 5.0 if fiyat > 0 else False
+        
+        grid_seviyeleri = []
+        if aralik > 0:
+            adim = aralik / 6
+            for i in range(1, 6):
+                seviye = destek + (adim * i)
+                tip = "AL" if seviye < fiyat else "SAT"
+                grid_seviyeleri.append({"fiyat": round(seviye, 4), "tip": tip})
+        
+        return {
+            "destek": round(destek, 4),
+            "direnc": round(direnc, 4),
+            "aralik_pct": round(aralik / fiyat * 100, 2) if fiyat > 0 else 0,
+            "yatay_mi": yatay_mi,
+            "grid_seviyeleri": grid_seviyeleri,
+            "grid_uygun": yatay_mi and aralik > 0
+        }
+    except Exception:
+        return bos_grid
 
 
 # ─────────────────────────────────────────────
@@ -621,19 +671,23 @@ def grid_destek_direnc(df: pd.DataFrame) -> dict:
 # ─────────────────────────────────────────────
 def multi_timeframe_analiz(exchange, sembol: str) -> dict:
     """3 zaman dilimini sentezleyerek güçlü sinyal üretir."""
+    varsayilan = {"rsi": 50.0, "volatilite": 0.0, "sinyal": "BEKLE"}
     sonuclar = {}
     for tf, label in [("5m", "5dk"), ("15m", "15dk"), ("1h", "1s")]:
         try:
             df = mum_verisi_cek(exchange, sembol, tf, limit=30)
+            if df is None or df.empty or len(df) < 15:
+                sonuclar[label] = varsayilan.copy()
+                continue
             rsi = rsi_hesapla(df)
             vol = volatilite_hesapla(df)
             sinyal = sinyal_uret(df, 7, 14)
             sonuclar[label] = {"rsi": round(rsi, 1), "volatilite": round(vol, 2), "sinyal": sinyal}
-        except:
-            sonuclar[label] = {"rsi": 50.0, "volatilite": 0.0, "sinyal": "BEKLE"}
+        except Exception:
+            sonuclar[label] = varsayilan.copy()
     
     # Konsensüs hesapla
-    sinyaller = [v["sinyal"] for v in sonuclar.values()]
+    sinyaller = [v.get("sinyal", "BEKLE") for v in sonuclar.values()]
     al_sayisi = sinyaller.count("AL")
     sat_sayisi = sinyaller.count("SAT")
     
@@ -644,13 +698,14 @@ def multi_timeframe_analiz(exchange, sembol: str) -> dict:
     else: konsensus = "KARARSIZ"
     
     # Ortalama RSI
-    ort_rsi = sum(v["rsi"] for v in sonuclar.values()) / 3
+    rsi_listesi = [v.get("rsi", 50.0) for v in sonuclar.values()]
+    ort_rsi = sum(rsi_listesi) / max(len(rsi_listesi), 1)
     
     return {
         "detay": sonuclar,
         "konsensus": konsensus,
         "ortalama_rsi": round(ort_rsi, 1),
-        "guc": al_sayisi - sat_sayisi  # +3 = çok güçlü AL, -3 = çok güçlü SAT
+        "guc": al_sayisi - sat_sayisi
     }
 
 

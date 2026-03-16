@@ -24,6 +24,18 @@ import ai_engine
 import config as cfg
 import persistent_state as ps
 
+
+def safe_state_kaydet(state):
+    """threading.Lock, Event gibi serialize edilemeyen nesneleri temizleyerek kaydet."""
+    try:
+        temiz = {}
+        for k, v in (state.items() if isinstance(state, dict) else []):
+            if isinstance(v, (str, int, float, bool, list, dict, type(None))):
+                temiz[k] = v
+        ps.state_kaydet(temiz)
+    except Exception as e:
+        print(f"⚠️ safe_state_kaydet hata: {e}")
+
 def get_app_path():
     """PyInstaller EXE uyumluluğu: Çalışma dizinini bulur."""
     if getattr(sys, 'frozen', False):
@@ -115,9 +127,13 @@ def session_state_baslat():
     
     # Persistent state'den yükle (ilk açılışta)
     if "_persistent_loaded" not in st.session_state:
-        loaded = ps.state_yukle(ps.STATE_FILE)
-        if loaded.get("bakiye", 0) > 0:
-            st.session_state.bakiye = loaded["bakiye"]
+        try:
+            loaded = ps.state_yukle(ps.STATE_FILE)
+        except Exception as e:
+            print(f"⚠️ state_yukle hata: {e}")
+            loaded = ps.DEFAULT_STATE.copy()
+        if isinstance(loaded, dict) and loaded.get("bakiye", 0) > 0:
+            st.session_state.bakiye = loaded.get("bakiye", cfg.INITIAL_BALANCE)
             st.session_state.baslangic_bakiye = loaded.get("baslangic_bakiye", cfg.INITIAL_BALANCE)
             st.session_state.gun_baslangic_bakiye = loaded.get("gun_baslangic_bakiye", st.session_state.bakiye)
             st.session_state.aktif_pozisyonlar = loaded.get("aktif_pozisyonlar", {})
@@ -408,22 +424,35 @@ def ws_fiyat_dinleyici(state, lock, dur_sinyali):
     loop.run_until_complete(dinle())
 
 def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
-    exchange = getattr(ccxt, state["exchange_adi"])({"enableRateLimit": True})
+    try:
+        exchange = getattr(ccxt, state["exchange_adi"])({"enableRateLimit": True})
+    except Exception as e:
+        with lock: log_ekle(f"❌ Exchange bağlantı hatası: {e}", state)
+        return
     
     while not dur_sinyali.is_set():
         try:
-            preset = MOD_PRESETLERI[state["mod"]]
+            preset = MOD_PRESETLERI.get(state.get("mod", "⚡ Agresif Mod"), MOD_PRESETLERI["⚡ Agresif Mod"])
             
             # --- 1. AŞAMA: TARA VE CANLI VERİ ENTEGRASYONU ---
             with lock:
-                acik_poz_var_mi = len(state["aktif_pozisyonlar"]) > 0
+                acik_poz_var_mi = len(state.get("aktif_pozisyonlar", {})) > 0
                 if not acik_poz_var_mi: log_ekle("🔍 Live Test: Breakout, BTC Trendi ve Fonlama verileri sentezleniyor...", state)
             
-            btc_trend = ai_engine.btc_trendi_analiz_et(exchange)
+            try:
+                btc_trend = ai_engine.btc_trendi_analiz_et(exchange)
+            except Exception:
+                btc_trend = "BİLİNMİYOR"
             
-            # Dinamik Olarak Coin Seç (Portföyde olsa da olmasa da yeni fırsat tara, portföyde varsa durumunu ekle)
-            top_coinler = ai_engine.top_coinleri_tara(exchange, limit=100)
-            tarama_sonucu = ai_engine.anormallik_tara_ve_sec(exchange, top_coinler, preset["sma_kisa"], preset["sma_uzun"])
+            try:
+                top_coinler = ai_engine.top_coinleri_tara(exchange, limit=100)
+            except Exception:
+                top_coinler = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+                
+            try:
+                tarama_sonucu = ai_engine.anormallik_tara_ve_sec(exchange, top_coinler, preset["sma_kisa"], preset["sma_uzun"])
+            except Exception:
+                tarama_sonucu = {"secilen_sembol": "BTC/USDT", "secilen_pazar": {}, "secilen_sma": "BEKLE", "secilen_breakout": False, "taranan_liste": [], "karar_raporu": "", "haber_puanlari": {}}
             
             secilen_sembol = tarama_sonucu["secilen_sembol"] or "BTC/USDT"
             secilen_pazar = tarama_sonucu.get("secilen_pazar", {})
@@ -447,10 +476,15 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
             
             try:
                 ticker = exchange.fetch_ticker(secilen_sembol)
-                if not isinstance(ticker, dict): raise ValueError("Empty Ticker")
-                fiyat, degisim, hacim = ticker.get("last", secilen_pazar.get("fiyat", 0)), ticker.get("percentage", 0), ticker.get("quoteVolume", 0)
+                if isinstance(ticker, dict):
+                    fiyat = ticker.get("last", 0) or secilen_pazar.get("fiyat", 0) if secilen_pazar else 0
+                    degisim = ticker.get("percentage", 0) or 0
+                    hacim = ticker.get("quoteVolume", 0) or 0
+                else:
+                    raise ValueError("Ticker is not a dict")
             except Exception:
-                fiyat, degisim, hacim = secilen_pazar.get("fiyat", 0), 0, 0
+                fiyat = secilen_pazar.get("fiyat", 0) if isinstance(secilen_pazar, dict) else 0
+                degisim, hacim = 0, 0
                 
             fonlama = ai_engine.fonlama_orani_getir(exchange, secilen_sembol)
             
@@ -655,12 +689,12 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
                     state["bot_calisiyor"] = False
                     log_ekle("🏆 HEDEF ULAŞILDI! Bot durduruluyor.", state)
                     islem_gecmisi_kaydet(state["islem_gecmisi"])
-                    ps.state_kaydet(state)
+                    safe_state_kaydet(state)
                     dur_sinyali.set()
                     break
             
-            # Persistent State Kaydet (Her döngü sonu)
-            ps.state_kaydet(state)
+            # Persistent State Kaydet (Her döngü sonu — serialize-safe)
+            safe_state_kaydet(state)
 
             # --- 5. AŞAMA: BEKLEME (EVENT-DRIVEN SIFIR GECİKME) ---
             bekleme_suresi = int(karar_paketi["aralik_sn"])
@@ -679,7 +713,9 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
                 with lock: state["sonraki_analiz_sn"] -= 1
 
         except Exception as e:
-            with lock: log_ekle(f"❌ Hata: {str(e)}", state)
+            with lock:
+                log_ekle(f"❌ Döngü Hatası (devam ediyor): {str(e)[:100]}", state)
+                print(f"⚠️ bot_engine döngü hatası: {e}")
             time.sleep(5)
 
 
@@ -713,7 +749,7 @@ def durdur():
     st.session_state.dur_sinyali.set()
     st.session_state.bot_calisiyor = False
     st.session_state.bot_durumu = "Durduruldu"
-    ps.state_kaydet(st.session_state)
+    safe_state_kaydet(st.session_state)
 
 
 with st.sidebar:
@@ -726,7 +762,7 @@ with st.sidebar:
                         disabled=st.session_state.bot_calisiyor)
                         
     if yeni_mod != cur_mod_str:
-        ps.state_kaydet(st.session_state) # Eski modu kaydet
+        safe_state_kaydet(st.session_state)  # Eski modu kaydet
         st.session_state.use_real_api = (yeni_mod == "💰 Real (Binance API)")
         if "_persistent_loaded" in st.session_state:
             del st.session_state["_persistent_loaded"]
