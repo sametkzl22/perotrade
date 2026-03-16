@@ -718,9 +718,18 @@ def durdur():
 with st.sidebar:
     st.markdown("## ⚙️ Kontrol Paneli")
     
-    # API Modu Uyarı
-    api_mod_str = "🔶 Gerçek Bakiye (API)" if st.session_state.use_real_api else "🎮 Sanal Bakiye (Paper)"
-    st.write(f"**Mod:** {api_mod_str}")
+    # ÇALIŞMA MODU SEÇİCİ
+    cur_mod_str = "💰 Real (Binance API)" if st.session_state.use_real_api else "🎮 Demo (Sanal Para)"
+    yeni_mod = st.radio("🕹️ Çalışma Modu", ["🎮 Demo (Sanal Para)", "💰 Real (Binance API)"], 
+                        index=1 if st.session_state.use_real_api else 0, 
+                        disabled=st.session_state.bot_calisiyor)
+                        
+    if yeni_mod != cur_mod_str:
+        ps.state_kaydet(st.session_state) # Eski modu kaydet
+        st.session_state.use_real_api = (yeni_mod == "💰 Real (Binance API)")
+        if "_persistent_loaded" in st.session_state:
+            del st.session_state["_persistent_loaded"]
+        st.rerun()
     
     st.markdown("---")
     # GÖRÜNÜM MODU SEÇİCİ (DUAL-VIEW)
@@ -733,11 +742,9 @@ with st.sidebar:
     
     st.title("🎛️ AI v4 (Otonom Fon Yöneticisi)")
     
-    # API Key Onboarding
-    st.markdown("### 🔑 API Anahtarları")
-    st.session_state.use_real_api = st.checkbox("Gerçek Borsa API'si Kullan (Riskli!)", value=st.session_state.use_real_api, disabled=st.session_state.bot_calisiyor)
-    
+    # DEMO/API ONBOARDING UI
     if st.session_state.use_real_api:
+        st.markdown("### 🔑 API Anahtarları")
         api_key_input = st.text_input("API Key", type="password", value=ps.decode_key(st.session_state.api_key_enc), disabled=st.session_state.bot_calisiyor)
         api_secret_input = st.text_input("Secret Key", type="password", value=ps.decode_key(st.session_state.api_secret_enc), disabled=st.session_state.bot_calisiyor)
         
@@ -745,13 +752,13 @@ with st.sidebar:
         if api_secret_input: st.session_state.api_secret_enc = ps.encode_key(api_secret_input)
         
         if not api_key_input or not api_secret_input:
-            st.warning("Gerçek API kullanmak için API Key ve Secret Key girmelisiniz.")
+            st.warning("Gerçek API kullanmak için anahtarlar girilmelidir.")
             st.session_state.can_start_bot = False
         else:
             st.session_state.can_start_bot = True
     else:
         st.session_state.can_start_bot = True # Sanal modda her zaman başlatılabilir
-        st.info("Sanal bakiye ile işlem yapacaksınız. Gerçek para riski yoktur.")
+        st.info("Sanal bakiye ile limitsiz risksiz test.")
 
     st.session_state.exchange_adi = st.selectbox("🏦 Borsa", ["binance", "gateio"], disabled=st.session_state.bot_calisiyor)
     ai_mod = st.radio("🧠 Zeka Modeli", ["Mock AI", "OpenAI LLM"], disabled=st.session_state.bot_calisiyor)
@@ -854,7 +861,36 @@ with st.sidebar:
         chart_data = pd.DataFrame(st.session_state.cuzdan_gecmisi)
         st.line_chart(chart_data.set_index("zaman")["deger"], use_container_width=True, color="#66fcf1")
 
-# ─ Ana Ekran ─
+    # ─ 2 GÜNLÜK DEMO TAKİBİ ─
+    if not st.session_state.use_real_api:
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### ⏳ 48 Saatlik Demo Testi")
+        gecen_saniye = (time.time() - st.session_state.baslangic_zamani) if st.session_state.baslangic_zamani > 0 else 0
+        kalan_saniye = max(0, (48 * 3600) - gecen_saniye)
+        saat = int(kalan_saniye // 3600)
+        dakika = int((kalan_saniye % 3600) // 60)
+        ilerleme_pct = min(1.0, gecen_saniye / (48 * 3600))
+        
+        if kalan_saniye == 0 and st.session_state.bot_calisiyor:
+            st.session_state.bot_durumu = "🎯 Test Bitti"
+            st.session_state.bot_calisiyor = False
+            
+        st.sidebar.progress(ilerleme_pct)
+        st.sidebar.markdown(f"**Kalan Süre:** {saat}s {dakika}d")
+        if st.session_state.baslangic_zamani > 0 and kalan_saniye == 0:
+            kapanan_islemler = [i for i in st.session_state.islem_gecmisi if "KAPAT" in i.get("sinyal", "")]
+            pozitifler = [i for i in kapanan_islemler if isinstance(i.get("kar_zarar"), (int, float)) and float(i["kar_zarar"]) > 0]
+            basari_orani = (len(pozitifler) / len(kapanan_islemler) * 100) if kapanan_islemler else 0
+            
+            st.sidebar.success(f"🎉 **2 Günlük Demo Tamamlandı!**\n\n"
+                               f"📊 **Toplam İşlem:** {len(kapanan_islemler)}\n"
+                               f"🎯 **Başarı Oranı:** %{basari_orani:.1f}\n"
+                               f"💰 **Toplam Kâr:** ${st.session_state.bakiye - 100.0:.2f}")
+
+# ─ Ana Ekran (DUAL-VIEW MANTIĞI) ─
+if not st.session_state.use_real_api:
+    st.markdown("<div style='background: #ff4b4b; color: white; padding: 10px; text-align: center; border-radius: 8px; font-weight: bold; margin-bottom: 20px;'>⚠️ DEMO MODU AKTİF - İşlemler Sanal Para İle Simüle Ediliyor</div>", unsafe_allow_html=True)
+
 col_baslik, col_durum = st.columns([3, 1])
 col_baslik.markdown("<h1 style='color: #66fcf1; font-weight: 800; margin-bottom: 0;'>🚀 PeroTrade Pro AI (Live)</h1>", unsafe_allow_html=True)
 

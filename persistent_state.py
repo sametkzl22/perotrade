@@ -50,7 +50,17 @@ DEFAULT_STATE = {
     "gun_sayaci": 0,  # Kaç gündür çalışıyor
     "api_key_enc": "",    # Base64 şifreli API Key
     "api_secret_enc": "", # Base64 şifreli Secret Key
-    "use_real_api": False
+    "use_real_api": False,
+    
+    # --- DEMO MODU DEĞİŞKENLERİ ---
+    "Demo_Bakiye": 100.0,
+    "demo_aktif_pozisyonlar": {},
+    "demo_islem_gecmisi": [],
+    "demo_baslangic_zamani": 0.0,
+    "demo_gun_baslangic": 100.0,
+    "demo_pik_bakiye": 100.0,
+    "demo_cuzdan_gecmisi": [],
+    "demo_max_drawdown": 0.0,
 }
 
 
@@ -60,20 +70,31 @@ def state_yukle(dosya: str = STATE_FILE) -> dict:
         try:
             with open(dosya, "r", encoding="utf-8") as f:
                 state = json.load(f)
-            print(f"✅ Kalıcı hafıza yüklendi: {dosya} (Bakiye: ${state.get('bakiye', 0):.2f})")
+            
+            # --- DEMO MODU YÖNLENDİRMESİ ---
+            # Eğer sahte (demo) modundaysak, ana motorun çökmemesi için Demo değerlerini genel anahtarlara aktar.
+            if not state.get("use_real_api", False):
+                state["bakiye"] = state.get("Demo_Bakiye", 100.0)
+                state["baslangic_bakiye"] = 100.0 # Demo baslangic
+                state["gun_baslangic_bakiye"] = state.get("demo_gun_baslangic", 100.0)
+                state["aktif_pozisyonlar"] = state.get("demo_aktif_pozisyonlar", {})
+                state["islem_gecmisi"] = state.get("demo_islem_gecmisi", [])
+                state["cuzdan_gecmisi"] = state.get("demo_cuzdan_gecmisi", [])
+                state["max_drawdown"] = state.get("demo_max_drawdown", 0.0)
+                state["pik_bakiye"] = state.get("demo_pik_bakiye", 100.0)
+                state["baslangic_zamani"] = state.get("demo_baslangic_zamani", 0.0)
+                print(f"🎮 DEMO Modu Yüklendi! (Sanal Bakiye: ${state.get('bakiye'):.2f})")
+            else:
+                print(f"💰 REAL Mod Yüklendi! (Bakiye: ${state.get('bakiye', 0):.2f})")
             
             # Yeni gün kontrolü (Compounding)
             bugun = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             if state.get("son_gun", "") != bugun:
                 eski_gun = state.get("son_gun", "İlk Gün")
-                # Bileşik faiz: Dünün bakiyesini bugünün başlangıcı yap
-                mevcut_bakiye = state.get("bakiye", 10.0)
+                mevcut_bakiye = state.get("bakiye", 100.0)
                 state["gun_baslangic_bakiye"] = mevcut_bakiye
                 state["son_gun"] = bugun
                 state["gun_sayaci"] = state.get("gun_sayaci", 0) + 1
-                print(f"📅 Yeni gün başladı! ({eski_gun} → {bugun})")
-                print(f"💰 Bileşik Faiz: Bugünün başlangıç bakiyesi = ${mevcut_bakiye:.2f}")
-                print(f"🎯 Bugünün hedefi: ${mevcut_bakiye * 1.10:.2f} (+%10)")
                 state_kaydet(state, dosya)
             
             return state
@@ -84,18 +105,45 @@ def state_yukle(dosya: str = STATE_FILE) -> dict:
     state = DEFAULT_STATE.copy()
     state["son_gun"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     state_kaydet(state, dosya)
-    print(f"🆕 Yeni persistent state oluşturuldu: {dosya}")
     return state
 
 
 def state_kaydet(state: dict, dosya: str = STATE_FILE):
-    """State'i JSON dosyasına kaydeder."""
+    """State'i JSON dosyasına kaydeder. Demo ve Real verileri birbirini ezmemesi için korur."""
     try:
-        # Kaydetmeden önce serializable olmayan objeleri temizle
+        eski_kayit = {}
+        if os.path.exists(dosya):
+            with open(dosya, "r", encoding="utf-8") as f:
+                eski_kayit = json.load(f)
+                
+        # Serializables
         kayit = {}
         for k, v in state.items():
             if isinstance(v, (str, int, float, bool, list, dict, type(None))):
                 kayit[k] = v
+                
+        is_demo = not kayit.get("use_real_api", False)
+        
+        # DEMO modunda isek, memory'deki "bakiye" vb. aslında SANAL paradır.
+        if is_demo:
+            kayit["Demo_Bakiye"] = kayit.get("bakiye", 100.0)
+            kayit["demo_aktif_pozisyonlar"] = kayit.get("aktif_pozisyonlar", {})
+            kayit["demo_islem_gecmisi"] = kayit.get("islem_gecmisi", [])
+            kayit["demo_cuzdan_gecmisi"] = kayit.get("cuzdan_gecmisi", [])
+            kayit["demo_gun_baslangic"] = kayit.get("gun_baslangic_bakiye", 100.0)
+            kayit["demo_pik_bakiye"] = kayit.get("pik_bakiye", 100.0)
+            kayit["demo_max_drawdown"] = kayit.get("max_drawdown", 0.0)
+            kayit["demo_baslangic_zamani"] = kayit.get("baslangic_zamani", 0.0)
+            
+            # JSON'daki gerçek (Real) parayı memory'deki sanal parayla ezmemek için dosyadan geri yükle
+            for key in ["bakiye", "baslangic_bakiye", "gun_baslangic_bakiye", "aktif_pozisyonlar", "islem_gecmisi", "cuzdan_gecmisi", "max_drawdown", "pik_bakiye"]:
+                if key in eski_kayit:
+                    kayit[key] = eski_kayit[key]
+        else:
+            # REAL moddaysak, memory'deki veriler gerçektir. JSON'daki Demo verilerini koru.
+            for key in ["Demo_Bakiye", "demo_aktif_pozisyonlar", "demo_islem_gecmisi", "demo_cuzdan_gecmisi", "demo_gun_baslangic", "demo_pik_bakiye", "demo_max_drawdown", "demo_baslangic_zamani"]:
+                if key in eski_kayit:
+                    kayit[key] = eski_kayit[key]
         
         with open(dosya, "w", encoding="utf-8") as f:
             json.dump(kayit, f, indent=2, ensure_ascii=False)
