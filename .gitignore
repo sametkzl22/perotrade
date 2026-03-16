@@ -4,3 +4,7 @@ __pycache__/
 trade_history.csv
 venv/
 .venv/
+dist/
+build/
+*.spec
+persistent_state.json

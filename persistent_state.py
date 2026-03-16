@@ -12,6 +12,25 @@ import sys
 import base64
 from datetime import datetime, timezone
 
+# --- STREAMLIT CLOUD HAFIZASI ---
+try:
+    import streamlit as st
+    @st.cache_resource
+    def _get_cloud_memory():
+        return {}
+except ImportError:
+    st = None
+
+_local_memory = {}
+
+def get_memory():
+    if st is not None:
+        try:
+            return _get_cloud_memory()
+        except:
+            pass
+    return _local_memory
+
 def get_app_path():
     """PyInstaller EXE uyumluluğu: Çalışma dizinini bulur."""
     if getattr(sys, 'frozen', False):
@@ -65,7 +84,9 @@ DEFAULT_STATE = {
 
 
 def state_yukle(dosya: str = STATE_FILE) -> dict:
-    """JSON dosyasından state yükler. Yoksa default oluşturur."""
+    """JSON dosyasından state yükler. Yoksa default oluşturur. Bulut hafızasından kurtarmayı dener."""
+    memory = get_memory()
+    
     if os.path.exists(dosya):
         try:
             with open(dosya, "r", encoding="utf-8") as f:
@@ -97,9 +118,17 @@ def state_yukle(dosya: str = STATE_FILE) -> dict:
                 state["gun_sayaci"] = state.get("gun_sayaci", 0) + 1
                 state_kaydet(state, dosya)
             
+            memory["last_state"] = state
             return state
         except Exception as e:
             print(f"⚠️ State dosyası okunamadı: {e}. Varsayılan oluşturuluyor.")
+            
+    # Eğer dosya yoksa ama bulut (Global In-Memory) hafızasında varsa oradan kurtar
+    if "last_state" in memory:
+        print("☁️ Disk silinmiş ama Bulut Hafızası bulundu! Veriler kurtarıldı.")
+        kurtarilan = memory["last_state"]
+        state_kaydet(kurtarilan, dosya)
+        return kurtarilan
     
     # Yeni state oluştur
     state = DEFAULT_STATE.copy()
@@ -147,6 +176,11 @@ def state_kaydet(state: dict, dosya: str = STATE_FILE):
         
         with open(dosya, "w", encoding="utf-8") as f:
             json.dump(kayit, f, indent=2, ensure_ascii=False)
+            
+        # Aynı zamanda bulut (In-Memory) hafızasına yedekle
+        memory = get_memory()
+        memory["last_state"] = kayit
+        
     except Exception as e:
         print(f"❌ State kaydetme hatası: {e}")
 

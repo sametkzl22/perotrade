@@ -18,10 +18,14 @@ from datetime import datetime, timezone
 # 1) Teknik Analiz Göstergeleri & Veri Çekme
 # ─────────────────────────────────────────────
 def mum_verisi_cek(exchange, symbol, timeframe="1h", limit=55):
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-    df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-    return df
+    try:
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        if not ohlcv: return pd.DataFrame()
+        df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 def sma_hesapla(series: pd.Series, period: int) -> pd.Series:
     return series.rolling(window=period).mean()
@@ -237,17 +241,20 @@ def top_coinleri_tara(exchange, limit=100) -> list:
     standart_liste = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT"]
     yasakli_kelimeler = ["USDC", "FDUSD", "TUSD", "DAI", "EUR", "GBP", "BUSD", "USDP", "TRUE", "PAXG", "USDD", "PYUSD"]
     try:
-        if exchange.has['fetchTickers']:
+        if exchange.has.get('fetchTickers'):
             tickers = exchange.fetch_tickers()
+            if not tickers: return standart_liste
             usdt_tickers = {}
             for k, v in tickers.items():
+                if v is None: continue
                 if '/USDT' in k and v.get('quoteVolume', 0) > 0:
                     # Stablecoin ve Fiat filtresi
                     is_yasakli = any(yasak in k for yasak in yasakli_kelimeler)
                     if not is_yasakli:
                         usdt_tickers[k] = v
             # Hacme göre sırala
-            sirali = sorted(usdt_tickers.items(), key=lambda x: x[1]['quoteVolume'], reverse=True)
+            sirali = sorted(usdt_tickers.items(), key=lambda x: x[1].get('quoteVolume', 0), reverse=True)
+            if not sirali: return standart_liste
             return [k for k, v in sirali[:limit]]
         else:
             return standart_liste
@@ -269,8 +276,12 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
     for coin in top_coinler[:15]:
         try:
             df = mum_verisi_cek(exchange, coin, "1h", limit=sma_uzun+5)
+            if df.empty or len(df) < 15: continue
+            
             twitter_verisi = twitter_etkisi_puanla(coin)
             pazar = pazar_durumu_cikar(df, coin, pre_fetched_news=haberler, twitter_verisi=twitter_verisi)
+            if not pazar: continue
+            
             sma_sinyal = sinyal_uret(df, sma_kisa, sma_uzun)
             
             # Breakout Kontrolü (Hacim Patlaması & Konsolidasyon)

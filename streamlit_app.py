@@ -447,6 +447,7 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
             
             try:
                 ticker = exchange.fetch_ticker(secilen_sembol)
+                if not isinstance(ticker, dict): raise ValueError("Empty Ticker")
                 fiyat, degisim, hacim = ticker.get("last", secilen_pazar.get("fiyat", 0)), ticker.get("percentage", 0), ticker.get("quoteVolume", 0)
             except Exception:
                 fiyat, degisim, hacim = secilen_pazar.get("fiyat", 0), 0, 0
