@@ -570,3 +570,151 @@ def llm_karar(sembol: str, pazar: dict, sma_sinyal: str, api_key: str, acik_pozi
     except Exception as e:
         print(f"LLM hatası: {e}. Mock AI'ye dönülüyor.")
         return mock_ai_karar(sembol, pazar, komp_skor, acik_pozisyon, btc_trendi, fonlama)
+
+
+# ─────────────────────────────────────────────
+# 7) Grid Trading Modülü (Destek/Direnç Grid)
+# ─────────────────────────────────────────────
+def grid_destek_direnc(df: pd.DataFrame) -> dict:
+    """Son 24 mumdan destek/direnç seviyelerini hesaplar."""
+    son_24 = df.iloc[-24:] if len(df) >= 24 else df
+    destek = float(son_24['low'].min())
+    direnc = float(son_24['high'].max())
+    fiyat = float(df['close'].iloc[-1])
+    aralik = direnc - destek
+    
+    # Piyasa yatay mı? (Aralık fiyatın %5'inden azsa yatay = Grid uygun)
+    yatay_mi = (aralik / fiyat * 100) < 5.0 if fiyat > 0 else False
+    
+    # Grid seviyeleri hesapla (5 kademe)
+    grid_seviyeleri = []
+    if aralik > 0:
+        adim = aralik / 6
+        for i in range(1, 6):
+            seviye = destek + (adim * i)
+            tip = "AL" if seviye < fiyat else "SAT"
+            grid_seviyeleri.append({"fiyat": round(seviye, 4), "tip": tip})
+    
+    return {
+        "destek": round(destek, 4),
+        "direnc": round(direnc, 4),
+        "aralik_pct": round(aralik / fiyat * 100, 2) if fiyat > 0 else 0,
+        "yatay_mi": yatay_mi,
+        "grid_seviyeleri": grid_seviyeleri,
+        "grid_uygun": yatay_mi and aralik > 0
+    }
+
+
+# ─────────────────────────────────────────────
+# 8) Multi-Timeframe Analiz (5dk + 15dk + 1s)
+# ─────────────────────────────────────────────
+def multi_timeframe_analiz(exchange, sembol: str) -> dict:
+    """3 zaman dilimini sentezleyerek güçlü sinyal üretir."""
+    sonuclar = {}
+    for tf, label in [("5m", "5dk"), ("15m", "15dk"), ("1h", "1s")]:
+        try:
+            df = mum_verisi_cek(exchange, sembol, tf, limit=30)
+            rsi = rsi_hesapla(df)
+            vol = volatilite_hesapla(df)
+            sinyal = sinyal_uret(df, 7, 14)
+            sonuclar[label] = {"rsi": round(rsi, 1), "volatilite": round(vol, 2), "sinyal": sinyal}
+        except:
+            sonuclar[label] = {"rsi": 50.0, "volatilite": 0.0, "sinyal": "BEKLE"}
+    
+    # Konsensüs hesapla
+    sinyaller = [v["sinyal"] for v in sonuclar.values()]
+    al_sayisi = sinyaller.count("AL")
+    sat_sayisi = sinyaller.count("SAT")
+    
+    if al_sayisi >= 2: konsensus = "GÜÇLÜ AL"
+    elif sat_sayisi >= 2: konsensus = "GÜÇLÜ SAT"
+    elif al_sayisi == 1 and sat_sayisi == 0: konsensus = "ZAYIF AL"
+    elif sat_sayisi == 1 and al_sayisi == 0: konsensus = "ZAYIF SAT"
+    else: konsensus = "KARARSIZ"
+    
+    # Ortalama RSI
+    ort_rsi = sum(v["rsi"] for v in sonuclar.values()) / 3
+    
+    return {
+        "detay": sonuclar,
+        "konsensus": konsensus,
+        "ortalama_rsi": round(ort_rsi, 1),
+        "guc": al_sayisi - sat_sayisi  # +3 = çok güçlü AL, -3 = çok güçlü SAT
+    }
+
+
+# ─────────────────────────────────────────────
+# 9) Dinamik DCA (Dollar Cost Averaging)
+# ─────────────────────────────────────────────
+def dca_hesapla(pozisyon: dict, guncel_fiyat: float, bakiye: float) -> dict:
+    """Martingale DCA: Pozisyon terse düştüğünde kademeli artan miktarlarla ekleme."""
+    giris = pozisyon["giris_fiyati"]
+    margin = pozisyon["islem_margin"]
+    kaldirac = pozisyon["islem_kaldirac"]
+    liq = pozisyon["likidasyon_fiyati"]
+    tip = pozisyon["pozisyon"]
+    dca_sayisi = pozisyon.get("dca_sayisi", 0)
+    
+    # PNL hesapla
+    if tip == "LONG":
+        pnl_pct = ((guncel_fiyat - giris) / giris) * 100 * kaldirac
+        liq_uzaklik = ((guncel_fiyat - liq) / guncel_fiyat) * 100
+    else:
+        pnl_pct = ((giris - guncel_fiyat) / giris) * 100 * kaldirac
+        liq_uzaklik = ((liq - guncel_fiyat) / guncel_fiyat) * 100
+    
+    dca_onerisi = {"uygun": False, "ekleme_margin": 0, "yeni_ortalama": giris, "neden": "", "dca_sayisi": dca_sayisi}
+    
+    # DCA kuralı: %3-20 zarar, liq %5+ uzak, max 3 DCA
+    if -20 < pnl_pct < -3 and liq_uzaklik > 5.0 and dca_sayisi < 3:
+        # Martingale: Her DCA'da miktar 2 katına çıkar
+        martingale_carpan = 2 ** dca_sayisi  # 1x, 2x, 4x
+        temel_ekleme = min(bakiye * 0.08, margin * 0.3)
+        ekleme = temel_ekleme * martingale_carpan
+        ekleme = min(ekleme, bakiye * 0.30)  # Max bakiyenin %30'u tavan
+        
+        if ekleme > 0.3:
+            yeni_toplam_margin = margin + ekleme
+            yeni_ortalama = (giris * margin + guncel_fiyat * ekleme) / yeni_toplam_margin
+            # Hedef kâr revize: Yeni ortalamadan %10 yukarısı
+            hedef_kar_fiyat = yeni_ortalama * (1.10 if tip == "LONG" else 0.90)
+            dca_onerisi = {
+                "uygun": True,
+                "ekleme_margin": round(ekleme, 2),
+                "yeni_ortalama": round(yeni_ortalama, 4),
+                "dca_sayisi": dca_sayisi + 1,
+                "neden": f"DCA Yapıldı: Fiyat düşüşü %{abs(pnl_pct):.1f}, Giriş Fiyatı Revize: ${yeni_ortalama:.4f}, Hedef Kâr: ${hedef_kar_fiyat:.4f} (Martingale {martingale_carpan}x, DCA #{dca_sayisi+1})"
+            }
+    elif pnl_pct <= -20:
+        dca_onerisi["neden"] = f"Zarar çok derin (%{pnl_pct:.1f}). DCA riskli, pozisyon kapatılmalı."
+    elif dca_sayisi >= 3:
+        dca_onerisi["neden"] = f"Maksimum DCA sayısına ({dca_sayisi}) ulaşıldı."
+    else:
+        dca_onerisi["neden"] = "Pozisyon henüz DCA gerektirmiyor."
+    
+    return dca_onerisi
+
+
+# ─────────────────────────────────────────────
+# 10) Derin NLP Haber Veto Sistemi
+# ─────────────────────────────────────────────
+def haber_vetosu(haber_puanlari: dict, teknik_karar: str) -> dict:
+    """Haber analizi teknik AL sinyalini veto edebilir."""
+    puan = haber_puanlari.get("toplam_puan", 0)
+    risk = haber_puanlari.get("risk_seviyesi", "Stabil")
+    tetiklenenler = haber_puanlari.get("tetiklenen", [])
+    
+    veto = False
+    neden = ""
+    
+    # Haber çok negatifse ve teknik AL diyorsa → VETO
+    if teknik_karar in ["LONG", "AL"] and puan < -0.4:
+        veto = True
+        kelimeler = ", ".join([k.upper() for k, _ in tetiklenenler[:3]])
+        neden = f"🚫 HABER VETOSU: Teknik AL sinyali iptal edildi! Negatif gündem ({kelimeler}). Risk: {risk}."
+    
+    # Haber pozitifse ve teknik SAT diyorsa → Uyarı (ama veto etme)
+    elif teknik_karar in ["SHORT", "SAT"] and puan > 0.5:
+        neden = f"⚠️ Teknik SAT sinyali var ama haberler pozitif ({risk}). Dikkatli ol."
+    
+    return {"veto": veto, "neden": neden, "haber_skoru": puan, "risk_seviyesi": risk}

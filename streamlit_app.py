@@ -19,6 +19,8 @@ import streamlit.components.v1 as components
 from streamlit.runtime.scriptrunner import add_script_run_ctx
 
 import ai_engine
+import config as cfg
+import persistent_state as ps
 
 st.set_page_config(
     page_title="PeroTrade Pro AI v4",
@@ -96,11 +98,34 @@ def session_state_baslat():
         "dur_sinyali": threading.Event(),
         "analiz_tetikleyici": threading.Event(),
         "son_fiyat_tick": 0.0,
+        "cuzdan_gecmisi": [],
+        "gun_baslangic_bakiye": cfg.INITIAL_BALANCE,  # Bileşik faiz: günün başlangıç bakiyesi
     }
     for k, v in default_state.items():
         if k not in st.session_state: st.session_state[k] = v
+    
+    # Persistent state'den yükle (ilk açılışta)
+    if "_persistent_loaded" not in st.session_state:
+        loaded = ps.state_yukle(cfg.STATE_FILE)
+        if loaded.get("bakiye", 0) > 0:
+            st.session_state.bakiye = loaded["bakiye"]
+            st.session_state.baslangic_bakiye = loaded.get("baslangic_bakiye", cfg.INITIAL_BALANCE)
+            st.session_state.gun_baslangic_bakiye = loaded.get("gun_baslangic_bakiye", st.session_state.bakiye)
+            st.session_state.aktif_pozisyonlar = loaded.get("aktif_pozisyonlar", {})
+            st.session_state.islem_gecmisi = loaded.get("islem_gecmisi", [])
+            st.session_state.max_drawdown = loaded.get("max_drawdown", 0.0)
+            st.session_state.pik_bakiye = loaded.get("pik_bakiye", st.session_state.bakiye)
+            st.session_state.cuzdan_gecmisi = loaded.get("cuzdan_gecmisi", [])
+        st.session_state._persistent_loaded = True
 
 session_state_baslat()
+
+def gunluk_kar_hesapla(state):
+    """Bileşik faiz odaklı: Bugünkü kâr/zarar yüzdesini günün başlangıç bakiyesine göre hesaplar."""
+    gun_baslangic = state.get("gun_baslangic_bakiye", state.get("baslangic_bakiye", cfg.INITIAL_BALANCE))
+    if gun_baslangic <= 0: return 0.0
+    mevcut = state.get("bakiye", gun_baslangic) + aktif_margin_toplami(state.get("aktif_pozisyonlar", {}))
+    return ((mevcut - gun_baslangic) / gun_baslangic) * 100
 
 def islem_gecmisi_kaydet(gecmis: list, dosya="trade_history.csv"):
     if not gecmis: return
@@ -363,6 +388,35 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
                 fiyat, degisim, hacim = secilen_pazar.get("fiyat", 0), 0, 0
                 
             fonlama = ai_engine.fonlama_orani_getir(exchange, secilen_sembol)
+            
+            # --- Multi-Timeframe Analiz ---
+            try:
+                mtf = ai_engine.multi_timeframe_analiz(exchange, secilen_sembol)
+                with lock:
+                    state["mtf_konsensus"] = mtf["konsensus"]
+                    log_ekle(f"🔬 Multi-TF: 5dk={mtf['detay']['5dk']['sinyal']} | 15dk={mtf['detay']['15dk']['sinyal']} | 1s={mtf['detay']['1s']['sinyal']} → {mtf['konsensus']} (RSI Ort: {mtf['ortalama_rsi']})", state)
+            except:
+                mtf = {"konsensus": "KARARSIZ", "guc": 0}
+            
+            # --- Grid Analizi (Yatay piyasa algılama) ---
+            grid_trade_yapildi = False
+            try:
+                df_grid = ai_engine.mum_verisi_cek(exchange, secilen_sembol, "1h", limit=30)
+                grid_bilgi = ai_engine.grid_destek_direnc(df_grid)
+                if grid_bilgi["grid_uygun"] and secilen_sembol not in state.get("aktif_pozisyonlar", {}):
+                    with lock:
+                        log_ekle(f"📏 GRID MODU: {secilen_sembol} yatay seyirde. Destek: ${grid_bilgi['destek']}, Direnç: ${grid_bilgi['direnc']} (Aralık: %{grid_bilgi['aralik_pct']})", state)
+                        # Grid seviyesine göre LONG/SHORT belirle
+                        if fiyat <= grid_bilgi["destek"] * 1.01:  # Desteğe yakınsa LONG
+                            karar_override = "LONG"
+                            log_ekle(f"📏 GRID LONG: Fiyat (${fiyat:.4f}) destek seviyesine (${grid_bilgi['destek']}) yakın. Grid alım emirleri devrede.", state)
+                            grid_trade_yapildi = True
+                        elif fiyat >= grid_bilgi["direnc"] * 0.99:  # Direnci yakınsa SHORT
+                            karar_override = "SHORT"
+                            log_ekle(f"📏 GRID SHORT: Fiyat (${fiyat:.4f}) direnç seviyesine (${grid_bilgi['direnc']}) yakın. Grid satım emirleri devrede.", state)
+                            grid_trade_yapildi = True
+            except:
+                grid_bilgi = {"grid_uygun": False}
                 
             # --- 2. AŞAMA: DURUM KONTROLÜ (RİSK WS TARAFINDAN YÖNETİLİYOR) ---
             pozisyonu_kapat = False
@@ -410,6 +464,49 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
                 else:
                     skor = ai_engine.kompozit_skor_hesapla(secilen_pazar, secilen_sma)
                     karar_paketi = ai_engine.mock_ai_karar(secilen_sembol, secilen_pazar, skor, poz_durumu, btc_trend, fonlama, zaman_baski_carpani)
+                
+                # --- NLP HABER VETO SİSTEMİ ---
+                haber_puanlari = tarama_sonucu.get("haber_puanlari", {})
+                if haber_puanlari:
+                    veto_sonuc = ai_engine.haber_vetosu(haber_puanlari, karar_paketi["karar"])
+                    if veto_sonuc["veto"]:
+                        with lock: log_ekle(veto_sonuc["neden"], state)
+                        karar_paketi["karar"] = "BEKLE"
+                        karar_paketi["dusunce"] = veto_sonuc["neden"]
+                    elif veto_sonuc["neden"]:
+                        with lock: log_ekle(veto_sonuc["neden"], state)
+                
+                # --- GÜNLÜK RİSK BAROMETRESİ ---
+                gunluk_kar = gunluk_kar_hesapla(state)
+                if gunluk_kar >= 10.0:
+                    # GÜVENLİ MOD: Günlük %10 hedefe ulaşıldı
+                    karar_paketi["karar"] = "BEKLE"
+                    karar_paketi["dusunce"] = f"🛡️ GÜVENLİ MOD: Günlük kâr hedefi (%{gunluk_kar:.1f}) aşıldı! Yeni işlem açılmıyor."
+                    with lock:
+                        state["bot_durumu"] = "🛡️ Güvenli Mod"
+                        log_ekle(karar_paketi["dusunce"], state)
+                elif gunluk_kar <= -5.0:
+                    # PANİK KORUMASI: Günlük %5 kayıp
+                    with lock:
+                        state["bot_durumu"] = "🚨 Panik Koruması!"
+                        log_ekle(f"🚨 PANİK KORUMASI: Günlük kayıp %{gunluk_kar:.1f}! Tüm işlemler askıya alınıyor.", state)
+                    karar_paketi["karar"] = "BEKLE"
+                    karar_paketi["dusunce"] = f"Panik Koruması aktif. Günlük kayıp: %{gunluk_kar:.1f}"
+                
+                # --- DCA KONTROLÜ (Açık pozisyonlar için) ---
+                if secilen_sembol in state.get("aktif_pozisyonlar", {}):
+                    poz = state["aktif_pozisyonlar"][secilen_sembol]
+                    dca = ai_engine.dca_hesapla(poz, fiyat, state["bakiye"])
+                    if dca["uygun"]:
+                        with lock:
+                            log_ekle(f"💱 DCA ÖNERİ: {secilen_sembol} - {dca['neden']}", state)
+                            ekleme = dca["ekleme_margin"]
+                            if ekleme <= state["bakiye"]:
+                                state["aktif_pozisyonlar"][secilen_sembol]["islem_margin"] += ekleme
+                                state["aktif_pozisyonlar"][secilen_sembol]["giris_fiyati"] = dca["yeni_ortalama"]
+                                state["aktif_pozisyonlar"][secilen_sembol]["dca_sayisi"] = dca.get("dca_sayisi", 1)
+                                state["bakiye"] -= ekleme
+                                log_ekle(f"✅ DCA UYGULANDI: ${ekleme:.2f} eklendi. Yeni ortalama: ${dca['yeni_ortalama']}. {dca['neden']}", state)
             else:
                 karar_paketi["karar"] = "KAPAT"
                 
@@ -421,6 +518,11 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
                 state["ai_guven_skoru"] = karar_paketi.get("guven_skoru", 0.0)
                 state["ai_beklenen_artis"] = karar_paketi.get("expected_growth", 0.0)
                 state["ai_analiz_ozeti"] = karar_paketi.get("ozet", kapat_sinyali_nedeni)
+                
+                # Cüzdan değeri kaydı (zaman serisi)
+                toplam_varlik = state["bakiye"] + aktif_margin_toplami(state["aktif_pozisyonlar"])
+                state["cuzdan_gecmisi"].append({"zaman": datetime.now(timezone.utc).strftime("%H:%M:%S"), "deger": round(toplam_varlik, 2)})
+                if len(state["cuzdan_gecmisi"]) > 200: state["cuzdan_gecmisi"] = state["cuzdan_gecmisi"][-200:]  # Max 200 veri noktasi
                 
                 # Global Risk Hesabi gostergesi
                 total_kullanilan = aktif_margin_toplami(state["aktif_pozisyonlar"])
@@ -488,8 +590,12 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
                     state["bot_calisiyor"] = False
                     log_ekle("🏆 HEDEF ULAŞILDI! Bot durduruluyor.", state)
                     islem_gecmisi_kaydet(state["islem_gecmisi"])
+                    ps.state_kaydet(state)
                     dur_sinyali.set()
                     break
+            
+            # Persistent State Kaydet (Her döngü sonu)
+            ps.state_kaydet(state)
 
             # --- 5. AŞAMA: BEKLEME (EVENT-DRIVEN SIFIR GECİKME) ---
             bekleme_suresi = int(karar_paketi["aralik_sn"])
@@ -580,6 +686,49 @@ with st.sidebar:
     kalan_sure = max(0, st.session_state.hedef_sure_saat - gecen_sure)
     if st.session_state.bot_calisiyor:
         st.info(f"⏳ Kalan Hedef Süresi: {kalan_sure:.1f} Saat")
+    
+    st.markdown("---")
+    st.markdown("### 📈 Günlük Performans Takibi")
+    gunluk_pnl = gunluk_kar_hesapla(st.session_state)
+    hedef_pct = 10.0  # Günlük %10 hedef
+    
+    # Gauge benzeri görsel
+    gauge_pct = max(0.0, min(gunluk_pnl / hedef_pct, 1.0)) if hedef_pct > 0 else 0.0
+    if gunluk_pnl >= hedef_pct:
+        gauge_renk = "#00ff88"
+        gauge_emoji = "🏆"
+        gauge_durum = "HEDEF TAMAM!"
+    elif gunluk_pnl >= 0:
+        gauge_renk = "#66fcf1"
+        gauge_emoji = "📈"
+        gauge_durum = "Kârda"
+    else:
+        gauge_renk = "#ff4444"
+        gauge_emoji = "📉"
+        gauge_durum = "Zararda"
+    
+    st.markdown(f"""
+    <div style='background: rgba(31,40,51,0.8); border-radius: 12px; padding: 16px; border: 1px solid {gauge_renk};'>
+        <div style='display: flex; justify-content: space-between; align-items: center;'>
+            <span style='font-size: 14px; color: #c5c6c7;'>{gauge_emoji} Günlük Kâr/Zarar</span>
+            <span style='font-size: 20px; font-weight: 800; color: {gauge_renk};'>%{gunluk_pnl:+.2f}</span>
+        </div>
+        <div style='background: #1a1a2e; border-radius: 8px; height: 12px; margin-top: 8px; overflow: hidden;'>
+            <div style='background: {gauge_renk}; height: 100%; width: {gauge_pct*100:.0f}%; border-radius: 8px; transition: width 0.3s;'></div>
+        </div>
+        <div style='display: flex; justify-content: space-between; margin-top: 4px; font-size: 11px; color: #888;'>
+            <span>0%</span>
+            <span style='color: {gauge_renk}; font-weight: 600;'>{gauge_durum}</span>
+            <span>%{hedef_pct:.0f} Hedef</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Cüzdan Değeri Çizgi Grafiği
+    if st.session_state.cuzdan_gecmisi:
+        st.markdown("### 📉 Portföy Değeri (Anlık)")
+        chart_data = pd.DataFrame(st.session_state.cuzdan_gecmisi)
+        st.line_chart(chart_data.set_index("zaman")["deger"], use_container_width=True, color="#66fcf1")
 
 # ─ Ana Ekran ─
 col_baslik, col_durum = st.columns([3, 1])

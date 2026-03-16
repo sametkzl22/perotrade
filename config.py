@@ -1,29 +1,39 @@
 # ─────────────────────────────────────────────
-# Kripto Paper-Trading Bot — Konfigürasyon
+# PeroTrade Pro — Konfigürasyon v5
+# 7/24 Bileşik Faiz Sistemi + Binance API
 # ─────────────────────────────────────────────
 
-# Exchange ayarları (binance / gateio)
+# ───── Binance API (Gerçek İşlem İçin) ─────
+# Paper trading modunda boş bırakabilirsiniz.
+API_KEY = ""
+SECRET_KEY = ""
+
+# ───── Exchange ─────
 EXCHANGE_NAME = "binance"
+USE_REAL_API = False  # True = gerçek Binance Futures, False = paper trade
 
-# İşlem çifti
-SYMBOL = "BTC/USDT"
-
-# Mum periyodu
-TIMEFRAME = "1h"
-
-# Hareketli ortalama periyotları
-SHORT_MA = 7
-LONG_MA = 25
-
-# Paper-trade bakiye ayarları (USDT)
+# ───── Paper-Trade Bakiye ─────
 INITIAL_BALANCE = 10.0
 TARGET_BALANCE = 100.0
 
-# Risk oranı — bakiyenin yüzdesi (1.0 = %100)
-RISK_RATIO = 1.0
+# ───── Bileşik Faiz Hedefi ─────
+DAILY_TARGET_PCT = 10.0   # Günlük %10 kâr hedefi
+COMPOUNDING = True         # Her günün kârı ertesi günün bakiyesine eklenir
 
-# Ana döngü bekleme süresi (saniye)
-CHECK_INTERVAL = 300  # 5 dakika
+# ───── Risk Limitleri ─────
+DAILY_PROFIT_LOCK = 10.0   # %10 kâra ulaşınca -> Güvenli Mod (işlem durur)
+DAILY_LOSS_STOP = -5.0     # %5 kayıpta -> Panik Koruması (işlem durur)
+MAX_RISK_PER_TRADE = 0.20  # Normal modda Max %20 bakiye kullanımı
 
-# İşlem geçmişi dosyası
+# ───── Analiz Ayarları ─────
+SHORT_MA = 7
+LONG_MA = 25
+TIMEFRAME = "1h"
+
+# ───── Persistent State ─────
+STATE_FILE = "persistent_state.json"
 TRADE_LOG_FILE = "trade_history.csv"
+
+# ───── Headless Bot (bot.py) ─────
+HEADLESS_CHECK_INTERVAL = 60  # Saniye (eski PC için 60s yeterli)
+HEADLESS_COIN_SCAN_LIMIT = 50  # CPU dostu: 50 coin tara (100 yerine)
