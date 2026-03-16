@@ -1,0 +1,16 @@
+{
+  "bakiye": 10.0,
+  "baslangic_bakiye": 10.0,
+  "hedef_bakiye": 100.0,
+  "gun_baslangic_bakiye": 10.0,
+  "gunluk_hedef_pct": 10.0,
+  "son_gun": "2026-03-16",
+  "toplam_islem_sayisi": 0,
+  "toplam_kar": 0.0,
+  "aktif_pozisyonlar": {},
+  "islem_gecmisi": [],
+  "cuzdan_gecmisi": [],
+  "max_drawdown": 0.0,
+  "pik_bakiye": 10.0,
+  "gun_sayaci": 0
+}

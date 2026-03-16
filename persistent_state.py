@@ -8,9 +8,30 @@ Bileşik faiz (compounding) mantığını yönetir.
 
 import json
 import os
+import sys
+import base64
 from datetime import datetime, timezone
 
-STATE_FILE = "persistent_state.json"
+def get_app_path():
+    """PyInstaller EXE uyumluluğu: Çalışma dizinini bulur."""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+STATE_FILE = os.path.join(get_app_path(), "persistent_state.json")
+
+def encode_key(key: str) -> str:
+    """API anahtarlarını basit base64 ile şifreler (gizler)."""
+    if not key: return ""
+    return base64.b64encode(key.encode('utf-8')).decode('utf-8')
+
+def decode_key(encoded_key: str) -> str:
+    """Base64 şifreli API anahtarını çözer."""
+    if not encoded_key: return ""
+    try:
+        return base64.b64decode(encoded_key.encode('utf-8')).decode('utf-8')
+    except:
+        return ""
 
 DEFAULT_STATE = {
     "bakiye": 10.0,
@@ -27,6 +48,9 @@ DEFAULT_STATE = {
     "max_drawdown": 0.0,
     "pik_bakiye": 10.0,
     "gun_sayaci": 0,  # Kaç gündür çalışıyor
+    "api_key_enc": "",    # Base64 şifreli API Key
+    "api_secret_enc": "", # Base64 şifreli Secret Key
+    "use_real_api": False
 }
 
 

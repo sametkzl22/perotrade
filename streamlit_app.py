@@ -9,6 +9,8 @@ import threading
 import time
 import csv
 import asyncio
+import os
+import sys
 from datetime import datetime, timezone
 
 import ccxt
@@ -21,6 +23,12 @@ from streamlit.runtime.scriptrunner import add_script_run_ctx
 import ai_engine
 import config as cfg
 import persistent_state as ps
+
+def get_app_path():
+    """PyInstaller EXE uyumluluğu: Çalışma dizinini bulur."""
+    if getattr(sys, 'frozen', False):
+        return sys._MEIPASS
+    return os.path.dirname(os.path.abspath(__file__))
 
 st.set_page_config(
     page_title="PeroTrade Pro AI v4",
@@ -99,14 +107,15 @@ def session_state_baslat():
         "analiz_tetikleyici": threading.Event(),
         "son_fiyat_tick": 0.0,
         "cuzdan_gecmisi": [],
-        "gun_baslangic_bakiye": cfg.INITIAL_BALANCE,  # Bileşik faiz: günün başlangıç bakiyesi
+        "gun_baslangic_bakiye": cfg.INITIAL_BALANCE,
+        "view_mode": "📊 Profesyonel Dashboard"
     }
     for k, v in default_state.items():
         if k not in st.session_state: st.session_state[k] = v
     
     # Persistent state'den yükle (ilk açılışta)
     if "_persistent_loaded" not in st.session_state:
-        loaded = ps.state_yukle(cfg.STATE_FILE)
+        loaded = ps.state_yukle(ps.STATE_FILE)
         if loaded.get("bakiye", 0) > 0:
             st.session_state.bakiye = loaded["bakiye"]
             st.session_state.baslangic_bakiye = loaded.get("baslangic_bakiye", cfg.INITIAL_BALANCE)
@@ -116,9 +125,64 @@ def session_state_baslat():
             st.session_state.max_drawdown = loaded.get("max_drawdown", 0.0)
             st.session_state.pik_bakiye = loaded.get("pik_bakiye", st.session_state.bakiye)
             st.session_state.cuzdan_gecmisi = loaded.get("cuzdan_gecmisi", [])
+            st.session_state.api_key_enc = loaded.get("api_key_enc", "")
+            st.session_state.api_secret_enc = loaded.get("api_secret_enc", "")
+            st.session_state.use_real_api = loaded.get("use_real_api", False)
         st.session_state._persistent_loaded = True
 
 session_state_baslat()
+
+# ==========================================
+# 🚀 1. ONBOARDING (API KURULUM EKRANI)
+# ==========================================
+def api_kurulum_ekrani():
+    st.markdown("<h2 style='text-align: center; color: #f3ba2f;'>🔶 Binance API Kurulumu</h2>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #c5c6c7;'>Gerçek işlem yapmak istiyorsanız API bilgilerinizi girin. İstemiyorsanız doğrudan Paper Trading (Sanal Bakiye) moduna geçebilirsiniz.</p>", unsafe_allow_html=True)
+    
+    with st.container(border=True):
+        use_real = st.checkbox("Gerçek Bakiye (Real API) Kullan", value=False)
+        api_k = st.text_input("Binance API Key", type="password", disabled=not use_real)
+        sec_k = st.text_input("Binance Secret Key", type="password", disabled=not use_real)
+        
+        b1, b2, b3 = st.columns([1,2,1])
+        with b2:
+            if st.button("💾 Kaydet ve Başla", use_container_width=True, type="primary"):
+                # State'e şifreli kaydet
+                state_kur = ps.state_yukle()
+                state_kur["use_real_api"] = use_real
+                if use_real:
+                    state_kur["api_key_enc"] = ps.encode_key(api_k)
+                    state_kur["api_secret_enc"] = ps.encode_key(sec_k)
+                    st.session_state.api_key_enc = state_kur["api_key_enc"]
+                    st.session_state.api_secret_enc = state_kur["api_secret_enc"]
+                st.session_state.use_real_api = use_real
+                ps.state_kaydet(state_kur)
+                st.rerun()
+    st.stop()  # API kurulumu tamamlanana kadar uygulamayı durdur
+
+# Eğer gerçek API kullanmak isteniyorsa ama key yoksa, Kurulum ekranını göster
+if st.session_state.get("use_real_api", False) and not st.session_state.get("api_key_enc", ""):
+    api_kurulum_ekrani()
+elif "_onboarding_passed" not in st.session_state:
+    # İlk kez açılıyorsa (kullanıcıya sor)
+    if not st.session_state.get("use_real_api", False) and not st.session_state.get("api_key_enc", ""):
+        st.session_state["_onboarding_passed"] = False
+    else:
+        st.session_state["_onboarding_passed"] = True
+
+if not st.session_state.get("_onboarding_passed", True):
+    st.markdown("""<div style='text-align:center; padding: 20px;'><h3>🚀 PeroTrade Pro 7/24 AI Bot'a Hoş Geldiniz!</h3></div>""", unsafe_allow_html=True)
+    b1, b2 = st.columns(2)
+    with b1:
+        if st.button("🔑 Gerçek Binance API Kurulumu", use_container_width=True):
+            st.session_state.use_real_api = True
+            st.rerun()
+    with b2:
+        if st.button("🎮 Sanal Parayla (Paper Trading) Başla", use_container_width=True, type="primary"):
+            st.session_state._onboarding_passed = True
+            st.rerun()
+    st.stop()
+
 
 def gunluk_kar_hesapla(state):
     """Bileşik faiz odaklı: Bugünkü kâr/zarar yüzdesini günün başlangıç bakiyesine göre hesaplar."""
@@ -628,6 +692,14 @@ def baslat():
         st.session_state.bot_calisiyor = True
         st.session_state.bot_durumu = "Çalışıyor"
         
+        # API Entegrasyonu (Runtime'da Key'leri çözer)
+        if st.session_state.use_real_api:
+            cfg.USE_REAL_API = True
+            cfg.API_KEY = ps.decode_key(st.session_state.api_key_enc)
+            cfg.SECRET_KEY = ps.decode_key(st.session_state.api_secret_enc)
+        else:
+            cfg.USE_REAL_API = False
+        
         t1 = threading.Thread(target=ws_fiyat_dinleyici, args=(st.session_state, st.session_state.lock, st.session_state.dur_sinyali), daemon=True)
         add_script_run_ctx(t1)
         t1.start()
@@ -639,13 +711,48 @@ def baslat():
 def durdur():
     st.session_state.dur_sinyali.set()
     st.session_state.bot_calisiyor = False
-    if "Hedef" not in st.session_state.bot_durumu and "İflas" not in st.session_state.bot_durumu:
-        st.session_state.bot_durumu = "Duraklatıldı"
-    islem_gecmisi_kaydet(st.session_state.islem_gecmisi)
+    st.session_state.bot_durumu = "Durduruldu"
+    ps.state_kaydet(st.session_state)
 
 
 with st.sidebar:
+    st.markdown("## ⚙️ Kontrol Paneli")
+    
+    # API Modu Uyarı
+    api_mod_str = "🔶 Gerçek Bakiye (API)" if st.session_state.use_real_api else "🎮 Sanal Bakiye (Paper)"
+    st.write(f"**Mod:** {api_mod_str}")
+    
+    st.markdown("---")
+    # GÖRÜNÜM MODU SEÇİCİ (DUAL-VIEW)
+    st.session_state.view_mode = st.radio(
+        "👁️ Görünüm Modu", 
+        ["📊 Profesyonel Dashboard", "📜 Sadece İşlem Logları"],
+        help="Eski PC'lerde performans için 'Sadece İşlem Logları' modunu seçebilirsiniz."
+    )
+    st.markdown("---")
+    
     st.title("🎛️ AI v4 (Otonom Fon Yöneticisi)")
+    
+    # API Key Onboarding
+    st.markdown("### 🔑 API Anahtarları")
+    st.session_state.use_real_api = st.checkbox("Gerçek Borsa API'si Kullan (Riskli!)", value=st.session_state.use_real_api, disabled=st.session_state.bot_calisiyor)
+    
+    if st.session_state.use_real_api:
+        api_key_input = st.text_input("API Key", type="password", value=ps.decode_key(st.session_state.api_key_enc), disabled=st.session_state.bot_calisiyor)
+        api_secret_input = st.text_input("Secret Key", type="password", value=ps.decode_key(st.session_state.api_secret_enc), disabled=st.session_state.bot_calisiyor)
+        
+        if api_key_input: st.session_state.api_key_enc = ps.encode_key(api_key_input)
+        if api_secret_input: st.session_state.api_secret_enc = ps.encode_key(api_secret_input)
+        
+        if not api_key_input or not api_secret_input:
+            st.warning("Gerçek API kullanmak için API Key ve Secret Key girmelisiniz.")
+            st.session_state.can_start_bot = False
+        else:
+            st.session_state.can_start_bot = True
+    else:
+        st.session_state.can_start_bot = True # Sanal modda her zaman başlatılabilir
+        st.info("Sanal bakiye ile işlem yapacaksınız. Gerçek para riski yoktur.")
+
     st.session_state.exchange_adi = st.selectbox("🏦 Borsa", ["binance", "gateio"], disabled=st.session_state.bot_calisiyor)
     ai_mod = st.radio("🧠 Zeka Modeli", ["Mock AI", "OpenAI LLM"], disabled=st.session_state.bot_calisiyor)
     st.session_state.ai_modu = ai_mod
@@ -664,7 +771,7 @@ with st.sidebar:
     
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("▶️ Başlat", use_container_width=True, type="primary", disabled=st.session_state.bot_calisiyor):
+        if st.button("▶️ Başlat", use_container_width=True, type="primary", disabled=st.session_state.bot_calisiyor or not st.session_state.can_start_bot):
             baslat()
             st.rerun()
     with c2:
@@ -672,6 +779,23 @@ with st.sidebar:
             durdur()
             st.rerun()
             
+# ─ Günlük Bileşik Faiz ve Hedef ─
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 📈 Günlük Bileşik Faiz")
+    hedef_bakiye_gunluk = ps.bilesik_faiz_hedef(st.session_state)
+    gun_kapanis = st.session_state.bakiye
+    kalan_bakiye = hedef_bakiye_gunluk - gun_kapanis
+    gunluk_pnl = gunluk_kar_hesapla(st.session_state)
+
+    st.sidebar.metric("Bugünün Hedefi", f"${hedef_bakiye_gunluk:.2f}", f"+%{cfg.DAILY_TARGET_PCT} (Kalan: ${max(0, kalan_bakiye):.2f})")
+
+    # ─ Cüzdan Özeti ─
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 💼 Cüzdan Özeti")
+    state_bakiye = st.session_state.bakiye
+    margin_total = aktif_margin_toplami(st.session_state.aktif_pozisyonlar)
+    st.sidebar.markdown(f"**Toplam Varlık:** ${state_bakiye + margin_total:.2f}")
+    
     st.markdown("---")
     st.markdown("### 💼 Cüzdan & Sağlık")
     bky = st.session_state.bakiye
