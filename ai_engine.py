@@ -38,16 +38,21 @@ def sma_hesapla(series: pd.Series, period: int) -> pd.Series:
     return series.rolling(window=period).mean()
 
 def sinyal_uret(df: pd.DataFrame, sma_kisa: int, sma_uzun: int) -> str:
-    df = df.copy()
-    df["sma_k"] = sma_hesapla(df["close"], sma_kisa)
-    df["sma_u"] = sma_hesapla(df["close"], sma_uzun)
+    if df is None or df.empty or len(df) < max(sma_kisa, sma_uzun) + 1:
+        return "BEKLE"
+    try:
+        df = df.copy()
+        df["sma_k"] = sma_hesapla(df["close"], sma_kisa)
+        df["sma_u"] = sma_hesapla(df["close"], sma_uzun)
 
-    if df["sma_k"].isna().iloc[-1] or df["sma_u"].isna().iloc[-1]: return "BEKLE"
+        if df["sma_k"].isna().iloc[-1] or df["sma_u"].isna().iloc[-1]: return "BEKLE"
 
-    onceki, son = df.iloc[-2], df.iloc[-1]
-    if onceki["sma_k"] <= onceki["sma_u"] and son["sma_k"] > son["sma_u"]: return "AL"
-    if onceki["sma_k"] >= onceki["sma_u"] and son["sma_k"] < son["sma_u"]: return "SAT"
-    return "BEKLE"
+        onceki, son = df.iloc[-2], df.iloc[-1]
+        if onceki["sma_k"] <= onceki["sma_u"] and son["sma_k"] > son["sma_u"]: return "AL"
+        if onceki["sma_k"] >= onceki["sma_u"] and son["sma_k"] < son["sma_u"]: return "SAT"
+        return "BEKLE"
+    except Exception:
+        return "BEKLE"
 
 def rsi_hesapla(df: pd.DataFrame, period: int = 14) -> float:
     if df is None or df.empty or len(df) < period + 1:
@@ -159,17 +164,15 @@ def trend_analizi_yap() -> list:
 
 def haber_anahtar_kelime_puanla(haberler: list) -> dict:
     """Haberlerdeki anahtar kelimelere ağırlıklı puan verir."""
+    if not haberler or not isinstance(haberler, list):
+        return {"toplam_puan": 0.0, "tetiklenen": [], "risk_seviyesi": "Stabil"}
     kelime_agirliklari = {
-        # Jeopolitik Risk (Negatif)
         "war": -0.8, "conflict": -0.7, "sanctions": -0.6, "missile": -0.9, "strike": -0.5, "tension": -0.4,
         "savaş": -0.8, "çatışma": -0.7, "yaptırım": -0.6,
-        # Makro Ekonomi
         "fed rate": -0.5, "rate hike": -0.6, "inflation": -0.4, "recession": -0.7,
         "rate cut": 0.5, "stimulus": 0.6,
-        # Kripto Pozitif
         "listing": 0.7, "elon": 0.4, "adoption": 0.5, "etf": 0.6, "approval": 0.5,
         "surge": 0.4, "bull": 0.3, "breakout": 0.5, "accumulate": 0.3,
-        # Kripto Negatif
         "sec": -0.3, "hack": -0.8, "exploit": -0.7, "ban": -0.5, "crash": -0.6,
         "liquidation": -0.4, "delisting": -0.6
     }
@@ -178,6 +181,8 @@ def haber_anahtar_kelime_puanla(haberler: list) -> dict:
     tetiklenen_kelimeler = []
     
     for haber in haberler:
+        if not isinstance(haber, str):
+            continue
         hl = haber.lower()
         for kelime, agirlik in kelime_agirliklari.items():
             if kelime in hl:
@@ -185,7 +190,6 @@ def haber_anahtar_kelime_puanla(haberler: list) -> dict:
                 if kelime not in [k for k, _ in tetiklenen_kelimeler]:
                     tetiklenen_kelimeler.append((kelime, agirlik))
     
-    # En etkili 3 kelimeyi raporla
     tetiklenen_kelimeler.sort(key=lambda x: abs(x[1]), reverse=True)
     top_3 = tetiklenen_kelimeler[:3]
     
@@ -196,11 +200,15 @@ def haber_anahtar_kelime_puanla(haberler: list) -> dict:
     }
 
 def makro_analiz_yap(haberler: list) -> dict:
+    if not haberler or not isinstance(haberler, list):
+        return {"durum": "Normal", "neden": "Küresel piyasalar stabil"}
     risk_off_kelimeler = ["war", "conflict", "sanctions", "strike", "missile", "tension", "fed", "inflation", "crash", "emergency", "savaş", "çatışma", "yaptırım"]
     
     risk_off = False
     tetikleyen = ""
     for h in haberler:
+        if not isinstance(h, str):
+            continue
         hl = h.lower()
         for rk in risk_off_kelimeler:
             if rk in hl:
@@ -309,7 +317,7 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
     for coin in top_coinler[:15]:
         try:
             df = mum_verisi_cek(exchange, coin, "1h", limit=sma_uzun+5)
-            if df.empty or len(df) < 15: continue
+            if df is None or df.empty or len(df) < 15: continue
             
             twitter_verisi = twitter_etkisi_puanla(coin)
             pazar = pazar_durumu_cikar(df, coin, pre_fetched_news=haberler, twitter_verisi=twitter_verisi)
@@ -359,13 +367,16 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
                 secilen_breakout = is_breakout
                 
                 # Şeffaf Karar Raporu Oluştur
-                tw_durum = f"Twitter: {pazar['twitter']['yazar']} ({pazar['twitter']['skor']:+.1f})" if pazar.get('twitter', {}).get('aktif') else "Twitter: Etkisiz"
-                haber_ozet = ", ".join([f"{k.upper()}({a:+.1f})" for k, a in haber_puanlari["tetiklenen"]]) if haber_puanlari["tetiklenen"] else "Belirgin gündem yok"
+                tw_data = pazar.get('twitter', {}) or {}
+                tw_durum = f"Twitter: {tw_data.get('yazar', '?')} ({tw_data.get('skor', 0):+.1f})" if tw_data.get('aktif') else "Twitter: Etkisiz"
+                h_tetiklenen = haber_puanlari.get("tetiklenen", []) or []
+                haber_ozet = ", ".join([f"{k.upper()}({a:+.1f})" for k, a in h_tetiklenen]) if h_tetiklenen else "Belirgin gündem yok"
+                makro_data = pazar.get('makro', {}) or {}
                 secilen_rapor = (
                     f"SEÇİLEN COİN: {coin}\n"
-                    f"TEKNİK: RSI: {pazar['rsi']:.1f}, Hacim Artışı: %{hacim_artis_pct:.0f}, Breakout: {'Evet' if is_breakout else 'Hayır'}\n"
-                    f"GÜNDEM: {haber_ozet}. {tw_durum}. Duyarlılık: {pazar['duyarlilik']:+.2f}\n"
-                    f"MAKRO: {pazar['makro']['durum']} - {pazar['makro']['neden']}"
+                    f"TEKNİK: RSI: {pazar.get('rsi', 50):.1f}, Hacim Artışı: %{hacim_artis_pct:.0f}, Breakout: {'Evet' if is_breakout else 'Hayır'}\n"
+                    f"GÜNDEM: {haber_ozet}. {tw_durum}. Duyarlılık: {pazar.get('duyarlilik', 0):+.2f}\n"
+                    f"MAKRO: {makro_data.get('durum', 'Normal')} - {makro_data.get('neden', '')}"
                 )
                 
         except Exception:
@@ -421,19 +432,23 @@ def pazar_durumu_cikar(df: pd.DataFrame, sembol: str, pre_fetched_news=None, twi
         return None
 
 def kompozit_skor_hesapla(pazar: dict, sma_sinyal: str) -> float:
+    if not isinstance(pazar, dict):
+        return 0.0
     skor = 0.0
     if sma_sinyal == "AL": skor += 30
     elif sma_sinyal == "SAT": skor -= 30
     
-    if pazar["rsi"] < 30: skor += 25
-    elif pazar["rsi"] > 70: skor -= 25
-    elif pazar["rsi"] > 50: skor += 5
+    rsi = pazar.get("rsi", 50.0) or 50.0
+    if rsi < 30: skor += 25
+    elif rsi > 70: skor -= 25
+    elif rsi > 50: skor += 5
     else: skor -= 5
         
-    skor += (pazar["duyarlilik"] * 20)
-    if pazar["hacim_trend"] == "Artıyor": skor += 15 if skor > 0 else -15
+    skor += (pazar.get("duyarlilik", 0) or 0) * 20
+    if pazar.get("hacim_trend") == "Artıyor": skor += 15 if skor > 0 else -15
         
-    vol_etki = min(pazar["volatilite"], 5.0) * 2
+    vol = pazar.get("volatilite", 0) or 0
+    vol_etki = min(vol, 5.0) * 2
     skor += vol_etki if skor > 0 else -vol_etki
     
     if pazar.get("is_breakout"): skor += 20 if skor > 0 else -20
@@ -441,68 +456,71 @@ def kompozit_skor_hesapla(pazar: dict, sma_sinyal: str) -> float:
     return max(-100.0, min(100.0, skor))
 
 def ai_metrikler(pazar: dict, kompozit_skor: float, zaman_baski_carpani: float = 1.0) -> tuple:
-    guven = min(100.0, abs(kompozit_skor) * 0.8 + pazar["volatilite"] * 2)
+    if not isinstance(pazar, dict):
+        return 0.0, 0.0, 10, 0.10
+    vol = pazar.get("volatilite", 0) or 0
+    guven = min(100.0, abs(kompozit_skor) * 0.8 + vol * 2)
     if pazar.get("is_breakout"): guven = min(100.0, guven + 15)
     
-    beklenen = pazar["volatilite"] * 1.5
+    beklenen = vol * 1.5
     if pazar.get("is_breakout"): beklenen *= 2.5
     if kompozit_skor < 0: beklenen = -beklenen
     
-    # Smart Leverage (Akıllı Kaldıraç) ve Otonom Pozisyon Büyüklüğü (Auto-Size)
-    tavsiye_kaldirac = 10  # Varsayılan
-    tavsiye_oran = 0.10    # %10 varsayılan bakiye kullanımı
+    tavsiye_kaldirac = 10
+    tavsiye_oran = 0.10
     
     if guven > 90:
         tavsiye_kaldirac = random.randint(30, 50)
-        tavsiye_oran = 0.40 # %40 Bakiye (biraz geri çekildi zaman baskısı için yer bırakıldı)
+        tavsiye_oran = 0.40
     elif guven > 75:
         tavsiye_kaldirac = random.randint(20, 30)
-        tavsiye_oran = 0.20 # %20 Bakiye
+        tavsiye_oran = 0.20
     elif guven > 60:
         tavsiye_kaldirac = random.randint(10, 20)
-        tavsiye_oran = 0.10 # %10 Bakiye
+        tavsiye_oran = 0.10
     else:
         tavsiye_kaldirac = random.randint(2, 10)
-        tavsiye_oran = 0.05 # Çok düşük güven, minik test
+        tavsiye_oran = 0.05
         
-    # Zaman Baskısı (Time-Bound Aggression)
     if zaman_baski_carpani > 1.0:
-        # Örn çarpan 1.5 ise kaldıraç %50 artar
         tavsiye_kaldirac = int(tavsiye_kaldirac * zaman_baski_carpani)
         tavsiye_oran = tavsiye_oran * zaman_baski_carpani
         
-    tavsiye_kaldirac = min(tavsiye_kaldirac, 50) # Tavan 50x
-    # Berserker modda (4x carpan) %50'ye kadar, normal modda %40 tavan
+    tavsiye_kaldirac = min(tavsiye_kaldirac, 50)
     tavsiye_oran = min(tavsiye_oran, 0.50 if zaman_baski_carpani >= 4.0 else 0.40)
 
-    # Volatilite çok yüksekse kaldıracı bastır (Fakat zaman baskisi cok ekstremse biraz esnek)
-    if pazar["volatilite"] > 10.0 and zaman_baski_carpani <= 1.2: 
+    if vol > 10.0 and zaman_baski_carpani <= 1.2: 
         tavsiye_kaldirac = min(tavsiye_kaldirac, 10)
     
     return guven, beklenen, tavsiye_kaldirac, tavsiye_oran
 
 def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon: str, btc_trendi: str, fonlama: dict, zaman_baski_carpani: float = 1.0) -> dict:
+    if not isinstance(pazar, dict):
+        return {"sembol": sembol, "karar": "BEKLE", "skor": 0, "dusunce": "Pazar verisi yok", "aralik_sn": 30, "guven_skoru": 0, "expected_growth": 0, "tavsiye_kaldirac": 10, "tavsiye_oran": 0.10, "ozet": "Veri yok"}
+    if not isinstance(fonlama, dict):
+        fonlama = {"oran": 0.0, "risk": "Yok"}
     guven, beklenen_artis, kaldirac, oran = ai_metrikler(pazar, kompozit_skor, zaman_baski_carpani)
     
     karar = "BEKLE"
     neden = f"Piyasa kararsız (Skor: {kompozit_skor:.1f}). Kesin kırılım yok."
-    twitter_msg = f" 🐦 [{pazar['twitter']['yazar']}: {pazar['twitter']['skor']:+.1f} Etki]" if pazar.get("twitter", {}).get("aktif") else ""
-    fg = pazar.get("fg_index", {"deger": 50, "durum": "Neutral"})
-    fg_korku_var_mi = fg["durum"] in ["Fear", "Extreme Fear"]
-    makro = pazar.get("makro", {"durum": "Normal", "neden": ""})
+    tw_data = pazar.get('twitter', {}) or {}
+    twitter_msg = f" 🐦 [{tw_data.get('yazar', '?')}: {tw_data.get('skor', 0):+.1f} Etki]" if tw_data.get('aktif') else ""
+    fg = pazar.get("fg_index") or {"deger": 50, "durum": "Neutral"}
+    fg_korku_var_mi = fg.get("durum", "Neutral") in ["Fear", "Extreme Fear"]
+    makro = pazar.get("makro") or {"durum": "Normal", "neden": ""}
 
-    if makro["durum"] == "Risk-Off":
+    if makro.get("durum") == "Risk-Off":
         if acik_pozisyon == "LONG":
             karar = "KAPAT"
-            neden = f"🚨 ACİL (Risk-Off): {makro['neden']}. Güvenli limana geçiş, LONG pozisyon hemen kapatılıyor."
+            neden = f"🚨 ACİL (Risk-Off): {makro.get('neden', '')}. Güvenli limana geçiş, LONG pozisyon hemen kapatılıyor."
         elif acik_pozisyon == "YOK" and kompozit_skor < -10:
             karar = "SHORT"
-            neden = f"🚨 MAKRO FIRSAT: {makro['neden']} tespit edildi + zayıf trend. Küresel panik kaynaklı güçlü SHORT!"
+            neden = f"🚨 MAKRO FIRSAT: {makro.get('neden', '')} tespit edildi + zayıf trend. Küresel panik kaynaklı güçlü SHORT!"
         elif acik_pozisyon == "SHORT":
-            neden = f"🚨 Makro gerginlik ({makro['neden']}) SHORT pozisyonumuz için lehimize. Tutmaya devam ediyoruz."
+            neden = f"🚨 Makro gerginlik ({makro.get('neden', '')}) SHORT pozisyonumuz için lehimize. Tutmaya devam ediyoruz."
     elif pazar.get("is_breakout") and fg_korku_var_mi and acik_pozisyon != "LONG" and not (btc_trendi == "AŞAĞI"):
         karar = "LONG"
-        neden = f"🚀 KORKUYU SATIN AL: Piyasada Aşırı Korku ({fg['deger']} - {fg['durum']}) varken hacim patlaması (Breakout) yakalandı! Güçlü AL sinyali."
+        neden = f"🚀 KORKUYU SATIN AL: Piyasada Aşırı Korku ({fg.get('deger', 50)} - {fg.get('durum', 'N/A')}) varken hacim patlaması (Breakout) yakalandı! Güçlü AL sinyali."
     elif kompozit_skor > 40:
         if acik_pozisyon == "SHORT": 
             karar = "KAPAT"
@@ -510,11 +528,11 @@ def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon:
         else:
             if btc_trendi == "AŞAĞI":
                 neden = f"LONG fırsatı vardı fakt BTC Trendi AŞAĞI olduğu için İPTAL edildi. Güvenlik öncelikli."
-            elif "Uzun" in fonlama["risk"]:
-                neden = f"LONG fırsatı vardı fakat Fonlama Oranı aşırı yüksek ({fonlama['oran']:.2f}%). Likidasyon/Maliyet riski nedeniyle işlem askıda."
+            elif "Uzun" in fonlama.get("risk", ""):
+                neden = f"LONG fırsatı vardı fakat Fonlama Oranı aşırı yüksek ({fonlama.get('oran', 0):.2f}%). Likidasyon/Maliyet riski nedeniyle işlem askıda."
             else:
                 karar = "LONG"
-                neden = f"Güçlü YÜKSELİŞ Beklentisi! {sembol} kompozit skoru {kompozit_skor:.1f}. RSI ({pazar['rsi']:.1f}).{twitter_msg}"
+                neden = f"Güçlü YÜKSELİŞ Beklentisi! {sembol} kompozit skoru {kompozit_skor:.1f}. RSI ({pazar.get('rsi', 50):.1f}).{twitter_msg}"
                 if pazar.get("is_breakout"): neden = "🚀 ACİL LONG (BREAKOUT)! Hacim patlaması tespit edildi. " + neden
             
     elif kompozit_skor < -40:
@@ -524,14 +542,15 @@ def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon:
         else:
             if btc_trendi == "YUKARI":
                 neden = f"SHORT fırsatı vardı fakat BTC Trendi YUKARI olduğu için İPTAL edildi. Güvenlik öncelikli."
-            elif "Kısa" in fonlama["risk"]:
-                neden = f"SHORT fırsatı vardı fakat negatif Fonlama Oranı aşırı yüksek ({fonlama['oran']:.2f}%). Pozisyon açılmadı."
+            elif "Kısa" in fonlama.get("risk", ""):
+                neden = f"SHORT fırsatı vardı fakat negatif Fonlama Oranı aşırı yüksek ({fonlama.get('oran', 0):.2f}%). Pozisyon açılmadı."
             else:
                 karar = "SHORT"
                 neden = f"Güçlü DÜŞÜŞ Beklentisi! {sembol} zayıflık gösteriyor (Skor: {kompozit_skor:.1f}).{twitter_msg}"
                 if pazar.get("is_breakout"): neden = "📉 ACİL SHORT (CRASH)! Aşağı yönlü hacim patlaması tespit edildi. " + neden
 
-    sonraki_sn = dinamik_analiz_araligi(pazar["volatilite"], pazar.get("is_breakout", False))
+    vol = pazar.get("volatilite", 0) or 0
+    sonraki_sn = dinamik_analiz_araligi(vol, pazar.get("is_breakout", False))
     
     return {
         "sembol": sembol,
@@ -543,7 +562,7 @@ def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon:
         "expected_growth": beklenen_artis,
         "tavsiye_kaldirac": kaldirac,
         "tavsiye_oran": oran,
-        "ozet": f"BTC: {btc_trendi} | Fonlama: {fonlama['oran']:.3f}% | Time-Pr: {zaman_baski_carpani:.2f}"
+        "ozet": f"BTC: {btc_trendi} | Fonlama: {fonlama.get('oran', 0):.3f}% | Time-Pr: {zaman_baski_carpani:.2f}"
     }
 
 def llm_karar(sembol: str, pazar: dict, sma_sinyal: str, api_key: str, acik_pozisyon: str, btc_trendi: str, fonlama: dict, zaman_baski_carpani: float = 1.0) -> dict:
@@ -714,35 +733,36 @@ def multi_timeframe_analiz(exchange, sembol: str) -> dict:
 # ─────────────────────────────────────────────
 def dca_hesapla(pozisyon: dict, guncel_fiyat: float, bakiye: float) -> dict:
     """Martingale DCA: Pozisyon terse düştüğünde kademeli artan miktarlarla ekleme."""
-    giris = pozisyon["giris_fiyati"]
-    margin = pozisyon["islem_margin"]
-    kaldirac = pozisyon["islem_kaldirac"]
-    liq = pozisyon["likidasyon_fiyati"]
-    tip = pozisyon["pozisyon"]
+    if not isinstance(pozisyon, dict) or not guncel_fiyat or guncel_fiyat <= 0:
+        return {"uygun": False, "ekleme_margin": 0, "yeni_ortalama": 0, "neden": "Geçersiz pozisyon verisi", "dca_sayisi": 0}
+    giris = pozisyon.get("giris_fiyati", 0)
+    margin = pozisyon.get("islem_margin", 0)
+    kaldirac = pozisyon.get("islem_kaldirac", 1)
+    liq = pozisyon.get("likidasyon_fiyati", 0)
+    tip = pozisyon.get("pozisyon", "YOK")
     dca_sayisi = pozisyon.get("dca_sayisi", 0)
     
-    # PNL hesapla
+    if not giris or giris <= 0 or not margin or kaldirac <= 0:
+        return {"uygun": False, "ekleme_margin": 0, "yeni_ortalama": giris, "neden": "Eksik pozisyon verisi", "dca_sayisi": dca_sayisi}
+    
     if tip == "LONG":
         pnl_pct = ((guncel_fiyat - giris) / giris) * 100 * kaldirac
-        liq_uzaklik = ((guncel_fiyat - liq) / guncel_fiyat) * 100
+        liq_uzaklik = ((guncel_fiyat - liq) / guncel_fiyat) * 100 if guncel_fiyat > 0 else 0
     else:
         pnl_pct = ((giris - guncel_fiyat) / giris) * 100 * kaldirac
-        liq_uzaklik = ((liq - guncel_fiyat) / guncel_fiyat) * 100
+        liq_uzaklik = ((liq - guncel_fiyat) / guncel_fiyat) * 100 if guncel_fiyat > 0 else 0
     
     dca_onerisi = {"uygun": False, "ekleme_margin": 0, "yeni_ortalama": giris, "neden": "", "dca_sayisi": dca_sayisi}
     
-    # DCA kuralı: %3-20 zarar, liq %5+ uzak, max 3 DCA
     if -20 < pnl_pct < -3 and liq_uzaklik > 5.0 and dca_sayisi < 3:
-        # Martingale: Her DCA'da miktar 2 katına çıkar
-        martingale_carpan = 2 ** dca_sayisi  # 1x, 2x, 4x
+        martingale_carpan = 2 ** dca_sayisi
         temel_ekleme = min(bakiye * 0.08, margin * 0.3)
         ekleme = temel_ekleme * martingale_carpan
-        ekleme = min(ekleme, bakiye * 0.30)  # Max bakiyenin %30'u tavan
+        ekleme = min(ekleme, bakiye * 0.30)
         
         if ekleme > 0.3:
             yeni_toplam_margin = margin + ekleme
             yeni_ortalama = (giris * margin + guncel_fiyat * ekleme) / yeni_toplam_margin
-            # Hedef kâr revize: Yeni ortalamadan %10 yukarısı
             hedef_kar_fiyat = yeni_ortalama * (1.10 if tip == "LONG" else 0.90)
             dca_onerisi = {
                 "uygun": True,

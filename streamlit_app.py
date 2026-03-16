@@ -491,10 +491,17 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
             # --- Multi-Timeframe Analiz ---
             try:
                 mtf = ai_engine.multi_timeframe_analiz(exchange, secilen_sembol)
-                with lock:
-                    state["mtf_konsensus"] = mtf["konsensus"]
-                    log_ekle(f"🔬 Multi-TF: 5dk={mtf['detay']['5dk']['sinyal']} | 15dk={mtf['detay']['15dk']['sinyal']} | 1s={mtf['detay']['1s']['sinyal']} → {mtf['konsensus']} (RSI Ort: {mtf['ortalama_rsi']})", state)
-            except:
+                if isinstance(mtf, dict) and isinstance(mtf.get("detay"), dict):
+                    d = mtf["detay"]
+                    s5 = d.get("5dk", {}).get("sinyal", "?") if isinstance(d.get("5dk"), dict) else "?"
+                    s15 = d.get("15dk", {}).get("sinyal", "?") if isinstance(d.get("15dk"), dict) else "?"
+                    s1s = d.get("1s", {}).get("sinyal", "?") if isinstance(d.get("1s"), dict) else "?"
+                    with lock:
+                        state["mtf_konsensus"] = mtf.get("konsensus", "KARARSIZ")
+                        log_ekle(f"🔬 Multi-TF: 5dk={s5} | 15dk={s15} | 1s={s1s} → {mtf.get('konsensus', '?')} (RSI Ort: {mtf.get('ortalama_rsi', 50)})", state)
+                else:
+                    mtf = {"konsensus": "KARARSIZ", "guc": 0}
+            except Exception:
                 mtf = {"konsensus": "KARARSIZ", "guc": 0}
             
             # --- Grid Analizi (Yatay piyasa algılama) ---
@@ -558,7 +565,10 @@ def bot_engine(state, lock: threading.Lock, dur_sinyali: threading.Event):
                     
             karar_paketi = {"karar": "BEKLE", "dusunce": kapat_sinyali_nedeni, "aralik_sn": 5}
             if not pozisyonu_kapat:
-                if state["ai_modu"] == "OpenAI LLM" and state["openai_key"]:
+                # Pazar verisi None ise AI fonksiyonlarına geçirilmemeli
+                if not isinstance(secilen_pazar, dict) or not secilen_pazar:
+                    karar_paketi = {"karar": "BEKLE", "dusunce": "Pazar verisi alınamadı, bekleniyor.", "aralik_sn": 30, "guven_skoru": 0, "expected_growth": 0, "tavsiye_kaldirac": 10, "tavsiye_oran": 0.10, "ozet": "Veri yok"}
+                elif state.get("ai_modu") == "OpenAI LLM" and state.get("openai_key"):
                     karar_paketi = ai_engine.llm_karar(secilen_sembol, secilen_pazar, secilen_sma, state["openai_key"], poz_durumu, btc_trend, fonlama, zaman_baski_carpani)
                 else:
                     skor = ai_engine.kompozit_skor_hesapla(secilen_pazar, secilen_sma)
