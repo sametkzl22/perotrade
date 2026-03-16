@@ -1,20 +1,31 @@
 """
-Persistent State Manager
-========================
+Persistent State Manager — Streamlit Cloud Optimized
+=====================================================
 Bot durumunu persistent_state.json dosyasında saklar.
-PC yeniden başladığında bot kaldığı yerden devam eder.
-Bileşik faiz (compounding) mantığını yönetir.
+Streamlit Cloud'da dosya sistemi geçici (ephemeral) olduğundan,
+st.cache_resource ile Global In-Memory yedek tutar.
+
+Güvenlik Katmanları:
+  1. Güvenli Okuma  → Dosya yoksa / bozuksa varsayılan demo değerlerini döndürür.
+  2. Hata Yakalama  → json.load & json.dump geniş try-except ile korunur.
+  3. NoneType Guard → Yüklenen her anahtar var mı kontrolü, yoksa default atanır.
+  4. Dosya Kilidi   → Yazma izolasyonu: PermissionError / IOError yakalanır.
 """
 
 import json
 import os
 import sys
 import base64
+import tempfile
+import shutil
 from datetime import datetime, timezone
 
-# --- STREAMLIT CLOUD HAFIZASI ---
+# ──────────────────────────────────────────────
+# STREAMLIT CLOUD IN-MEMORY YEDEK
+# ──────────────────────────────────────────────
 try:
     import streamlit as st
+
     @st.cache_resource
     def _get_cloud_memory():
         return {}
@@ -23,55 +34,68 @@ except ImportError:
 
 _local_memory = {}
 
+
 def get_memory():
+    """Streamlit varsa cache_resource'tan, yoksa modül-seviye dict'ten döner."""
     if st is not None:
         try:
             return _get_cloud_memory()
-        except:
+        except Exception:
             pass
     return _local_memory
 
+
+# ──────────────────────────────────────────────
+# YARDIMCI FONKSİYONLAR
+# ──────────────────────────────────────────────
 def get_app_path():
     """PyInstaller EXE uyumluluğu: Çalışma dizinini bulur."""
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
+
 STATE_FILE = os.path.join(get_app_path(), "persistent_state.json")
 
+
 def encode_key(key: str) -> str:
-    """API anahtarlarını basit base64 ile şifreler (gizler)."""
-    if not key: return ""
+    if not key:
+        return ""
     return base64.b64encode(key.encode('utf-8')).decode('utf-8')
 
+
 def decode_key(encoded_key: str) -> str:
-    """Base64 şifreli API anahtarını çözer."""
-    if not encoded_key: return ""
+    if not encoded_key:
+        return ""
     try:
         return base64.b64decode(encoded_key.encode('utf-8')).decode('utf-8')
-    except:
+    except Exception:
         return ""
 
+
+# ──────────────────────────────────────────────
+# VARSAYILAN STATE
+# ──────────────────────────────────────────────
 DEFAULT_STATE = {
-    "bakiye": 10.0,
-    "baslangic_bakiye": 10.0,
-    "hedef_bakiye": 100.0,
-    "gun_baslangic_bakiye": 10.0,  # O günün başlangıç bakiyesi (compounding için)
+    "bakiye": 100.0,
+    "baslangic_bakiye": 100.0,
+    "hedef_bakiye": 1000.0,
+    "gun_baslangic_bakiye": 100.0,
     "gunluk_hedef_pct": 10.0,
-    "son_gun": "",  # YYYY-MM-DD formatında son aktif gün
+    "son_gun": "",
     "toplam_islem_sayisi": 0,
     "toplam_kar": 0.0,
     "aktif_pozisyonlar": {},
     "islem_gecmisi": [],
     "cuzdan_gecmisi": [],
     "max_drawdown": 0.0,
-    "pik_bakiye": 10.0,
-    "gun_sayaci": 0,  # Kaç gündür çalışıyor
-    "api_key_enc": "",    # Base64 şifreli API Key
-    "api_secret_enc": "", # Base64 şifreli Secret Key
+    "pik_bakiye": 100.0,
+    "gun_sayaci": 0,
+    "api_key_enc": "",
+    "api_secret_enc": "",
     "use_real_api": False,
-    
-    # --- DEMO MODU DEĞİŞKENLERİ ---
+
+    # --- DEMO MODU ---
     "Demo_Bakiye": 100.0,
     "demo_aktif_pozisyonlar": {},
     "demo_islem_gecmisi": [],
@@ -83,78 +107,177 @@ DEFAULT_STATE = {
 }
 
 
-def state_yukle(dosya: str = STATE_FILE) -> dict:
-    """JSON dosyasından state yükler. Yoksa default oluşturur. Bulut hafızasından kurtarmayı dener."""
-    memory = get_memory()
-    
-    if os.path.exists(dosya):
+def _ensure_keys(state: dict) -> dict:
+    """
+    NoneType Guard — State sözlüğündeki her beklenen anahtarı kontrol eder,
+    eksik veya None olan değerlere varsayılanı atar.
+    """
+    for key, default_val in DEFAULT_STATE.items():
+        if key not in state or state[key] is None:
+            state[key] = (
+                default_val.copy() if isinstance(default_val, (dict, list)) else default_val
+            )
+        # Tip uyumsuzluğu kontrolü (örn. dict beklenirken str geldi)
+        if isinstance(default_val, dict) and not isinstance(state[key], dict):
+            state[key] = {}
+        elif isinstance(default_val, list) and not isinstance(state[key], list):
+            state[key] = []
+    return state
+
+
+# ──────────────────────────────────────────────
+# GÜVENLİ OKUMA
+# ──────────────────────────────────────────────
+def _safe_read_json(dosya: str) -> dict | None:
+    """
+    JSON dosyasını güvenle okur.
+    Dosya yoksa, bozuksa veya erişim reddedilirse None döner.
+    """
+    if not os.path.exists(dosya):
+        return None
+
+    try:
+        with open(dosya, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+            if not content:
+                return None
+            data = json.loads(content)
+            if not isinstance(data, dict):
+                print("⚠️ State dosyası dict değil, varsayılana dönülüyor.")
+                return None
+            return data
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        print(f"⚠️ State dosyası bozuk (corrupt): {e}")
+        return None
+    except (PermissionError, IOError, OSError) as e:
+        print(f"⚠️ State dosyası okunamadı (izin hatası): {e}")
+        return None
+    except Exception as e:
+        print(f"⚠️ State dosyası okunamadı (bilinmeyen): {e}")
+        return None
+
+
+# ──────────────────────────────────────────────
+# GÜVENLİ YAZMA (Atomic Write + İzolasyon)
+# ──────────────────────────────────────────────
+def _safe_write_json(data: dict, dosya: str) -> bool:
+    """
+    Atomic write: Önce geçici dosyaya yazar, ardından hedef dosyayla yer değiştirir.
+    Böylece yazma ortasında çökme durumunda bile dosya bozulmaz.
+    PermissionError / IOError yakalanır.
+    Başarılı ise True, değilse False döner.
+    """
+    try:
+        dir_path = os.path.dirname(dosya) or "."
+        fd, tmp_path = tempfile.mkstemp(suffix=".tmp", dir=dir_path)
         try:
-            with open(dosya, "r", encoding="utf-8") as f:
-                state = json.load(f)
-            
-            # --- DEMO MODU YÖNLENDİRMESİ ---
-            # Eğer sahte (demo) modundaysak, ana motorun çökmemesi için Demo değerlerini genel anahtarlara aktar.
-            if not state.get("use_real_api", False):
-                state["bakiye"] = state.get("Demo_Bakiye", 100.0)
-                state["baslangic_bakiye"] = 100.0 # Demo baslangic
-                state["gun_baslangic_bakiye"] = state.get("demo_gun_baslangic", 100.0)
-                state["aktif_pozisyonlar"] = state.get("demo_aktif_pozisyonlar", {})
-                state["islem_gecmisi"] = state.get("demo_islem_gecmisi", [])
-                state["cuzdan_gecmisi"] = state.get("demo_cuzdan_gecmisi", [])
-                state["max_drawdown"] = state.get("demo_max_drawdown", 0.0)
-                state["pik_bakiye"] = state.get("demo_pik_bakiye", 100.0)
-                state["baslangic_zamani"] = state.get("demo_baslangic_zamani", 0.0)
-                print(f"🎮 DEMO Modu Yüklendi! (Sanal Bakiye: ${state.get('bakiye'):.2f})")
-            else:
-                print(f"💰 REAL Mod Yüklendi! (Bakiye: ${state.get('bakiye', 0):.2f})")
-            
-            # Yeni gün kontrolü (Compounding)
-            bugun = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            if state.get("son_gun", "") != bugun:
-                eski_gun = state.get("son_gun", "İlk Gün")
-                mevcut_bakiye = state.get("bakiye", 100.0)
-                state["gun_baslangic_bakiye"] = mevcut_bakiye
-                state["son_gun"] = bugun
-                state["gun_sayaci"] = state.get("gun_sayaci", 0) + 1
-                state_kaydet(state, dosya)
-            
-            memory["last_state"] = state
-            return state
-        except Exception as e:
-            print(f"⚠️ State dosyası okunamadı: {e}. Varsayılan oluşturuluyor.")
-            
-    # Eğer dosya yoksa ama bulut (Global In-Memory) hafızasında varsa oradan kurtar
-    if "last_state" in memory:
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp_f:
+                json.dump(data, tmp_f, indent=2, ensure_ascii=False)
+            shutil.move(tmp_path, dosya)
+            return True
+        except Exception:
+            # Geçici dosya temizliği
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
+    except (PermissionError, IOError, OSError) as e:
+        print(f"❌ State yazılamadı (izin/dosya hatası): {e}")
+        return False
+    except (TypeError, ValueError) as e:
+        print(f"❌ State JSON serialization hatası: {e}")
+        return False
+    except Exception as e:
+        print(f"❌ State kaydetme hatası: {e}")
+        return False
+
+
+# ──────────────────────────────────────────────
+# ANA FONKSİYONLAR
+# ──────────────────────────────────────────────
+def state_yukle(dosya: str = STATE_FILE) -> dict:
+    """
+    State yükler (3 katmanlı fallback):
+      1. Disk (persistent_state.json)
+      2. Bulut Hafızası (st.cache_resource)
+      3. Varsayılan default değerler
+    """
+    memory = get_memory()
+
+    # ─── KATMAN 1: Disk ───
+    state = _safe_read_json(dosya)
+
+    if state is not None:
+        state = _ensure_keys(state)
+
+        # Demo / Real yönlendirmesi
+        if not state.get("use_real_api", False):
+            state["bakiye"] = state.get("Demo_Bakiye", 100.0)
+            state["baslangic_bakiye"] = 100.0
+            state["gun_baslangic_bakiye"] = state.get("demo_gun_baslangic", 100.0)
+            state["aktif_pozisyonlar"] = state.get("demo_aktif_pozisyonlar", {})
+            state["islem_gecmisi"] = state.get("demo_islem_gecmisi", [])
+            state["cuzdan_gecmisi"] = state.get("demo_cuzdan_gecmisi", [])
+            state["max_drawdown"] = state.get("demo_max_drawdown", 0.0)
+            state["pik_bakiye"] = state.get("demo_pik_bakiye", 100.0)
+            state["baslangic_zamani"] = state.get("demo_baslangic_zamani", 0.0)
+            print(f"🎮 DEMO Modu Yüklendi! (Sanal Bakiye: ${state.get('bakiye', 0):.2f})")
+        else:
+            print(f"💰 REAL Mod Yüklendi! (Bakiye: ${state.get('bakiye', 0):.2f})")
+
+        # Yeni gün → Compounding
+        bugun = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if state.get("son_gun", "") != bugun:
+            state["gun_baslangic_bakiye"] = state.get("bakiye", 100.0)
+            state["son_gun"] = bugun
+            state["gun_sayaci"] = state.get("gun_sayaci", 0) + 1
+            state_kaydet(state, dosya)
+
+        memory["last_state"] = state
+        return state
+
+    # ─── KATMAN 2: Bulut Hafızası (In-Memory) ───
+    if "last_state" in memory and isinstance(memory["last_state"], dict):
         print("☁️ Disk silinmiş ama Bulut Hafızası bulundu! Veriler kurtarıldı.")
-        kurtarilan = memory["last_state"]
+        kurtarilan = _ensure_keys(memory["last_state"])
         state_kaydet(kurtarilan, dosya)
         return kurtarilan
-    
-    # Yeni state oluştur
+
+    # ─── KATMAN 3: Varsayılan ───
+    print("🆕 İlk çalıştırma: Varsayılan demo state oluşturuluyor.")
     state = DEFAULT_STATE.copy()
     state["son_gun"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     state_kaydet(state, dosya)
+    memory["last_state"] = state
     return state
 
 
 def state_kaydet(state: dict, dosya: str = STATE_FILE):
-    """State'i JSON dosyasına kaydeder. Demo ve Real verileri birbirini ezmemesi için korur."""
+    """
+    State'i diske yazar (atomic). Demo ve Real verileri birbirini ezmez.
+    Her yazma işlemi aynı zamanda Bulut Hafızasına yedeklenir.
+    """
+    if not isinstance(state, dict):
+        print("❌ state_kaydet: Geçersiz state tipi, kaydetme iptal.")
+        return
+
     try:
-        eski_kayit = {}
-        if os.path.exists(dosya):
-            with open(dosya, "r", encoding="utf-8") as f:
-                eski_kayit = json.load(f)
-                
-        # Serializables
+        # Mevcut disk verisini oku (varsa) — mod arası koruma için
+        eski_kayit = _safe_read_json(dosya) or {}
+
+        # Serializable filtreleme
         kayit = {}
         for k, v in state.items():
             if isinstance(v, (str, int, float, bool, list, dict, type(None))):
                 kayit[k] = v
-                
+
+        kayit = _ensure_keys(kayit)
+
         is_demo = not kayit.get("use_real_api", False)
-        
-        # DEMO modunda isek, memory'deki "bakiye" vb. aslında SANAL paradır.
+
         if is_demo:
+            # Demo modunda, ana motor "bakiye" kullanır ama aslında sanal paradır
             kayit["Demo_Bakiye"] = kayit.get("bakiye", 100.0)
             kayit["demo_aktif_pozisyonlar"] = kayit.get("aktif_pozisyonlar", {})
             kayit["demo_islem_gecmisi"] = kayit.get("islem_gecmisi", [])
@@ -163,55 +286,84 @@ def state_kaydet(state: dict, dosya: str = STATE_FILE):
             kayit["demo_pik_bakiye"] = kayit.get("pik_bakiye", 100.0)
             kayit["demo_max_drawdown"] = kayit.get("max_drawdown", 0.0)
             kayit["demo_baslangic_zamani"] = kayit.get("baslangic_zamani", 0.0)
-            
-            # JSON'daki gerçek (Real) parayı memory'deki sanal parayla ezmemek için dosyadan geri yükle
-            for key in ["bakiye", "baslangic_bakiye", "gun_baslangic_bakiye", "aktif_pozisyonlar", "islem_gecmisi", "cuzdan_gecmisi", "max_drawdown", "pik_bakiye"]:
+
+            # Real verileri koruma (üzerine yazma)
+            for key in ["bakiye", "baslangic_bakiye", "gun_baslangic_bakiye",
+                         "aktif_pozisyonlar", "islem_gecmisi", "cuzdan_gecmisi",
+                         "max_drawdown", "pik_bakiye"]:
                 if key in eski_kayit:
                     kayit[key] = eski_kayit[key]
         else:
-            # REAL moddaysak, memory'deki veriler gerçektir. JSON'daki Demo verilerini koru.
-            for key in ["Demo_Bakiye", "demo_aktif_pozisyonlar", "demo_islem_gecmisi", "demo_cuzdan_gecmisi", "demo_gun_baslangic", "demo_pik_bakiye", "demo_max_drawdown", "demo_baslangic_zamani"]:
+            # Real moddayken Demo verilerini koruma
+            for key in ["Demo_Bakiye", "demo_aktif_pozisyonlar", "demo_islem_gecmisi",
+                         "demo_cuzdan_gecmisi", "demo_gun_baslangic", "demo_pik_bakiye",
+                         "demo_max_drawdown", "demo_baslangic_zamani"]:
                 if key in eski_kayit:
                     kayit[key] = eski_kayit[key]
-        
-        with open(dosya, "w", encoding="utf-8") as f:
-            json.dump(kayit, f, indent=2, ensure_ascii=False)
-            
-        # Aynı zamanda bulut (In-Memory) hafızasına yedekle
+
+        # Atomic write (güvenli)
+        success = _safe_write_json(kayit, dosya)
+
+        # Bulut Hafızasına her zaman yedekle
         memory = get_memory()
         memory["last_state"] = kayit
-        
+
+        if not success:
+            print("⚠️ Diske yazılamadı ama Bulut Hafızasına yedeklendi.")
+
     except Exception as e:
-        print(f"❌ State kaydetme hatası: {e}")
+        # Son savunma hattı
+        print(f"❌ state_kaydet kritik hata: {e}")
+        try:
+            memory = get_memory()
+            memory["last_state"] = state
+            print("💾 Kritik hata sonrası Bulut Hafızasına yedeklendi.")
+        except Exception:
+            pass
 
 
+# ──────────────────────────────────────────────
+# YARDIMCI HESAPLAMALAR
+# ──────────────────────────────────────────────
 def gunluk_kar_pct(state: dict) -> float:
     """Bugünkü kâr yüzdesini hesaplar."""
-    gun_baslangic = state.get("gun_baslangic_bakiye", state.get("baslangic_bakiye", 10.0))
-    if gun_baslangic <= 0:
+    if not isinstance(state, dict):
+        return 0.0
+    gun_baslangic = state.get("gun_baslangic_bakiye", state.get("baslangic_bakiye", 100.0))
+    if not isinstance(gun_baslangic, (int, float)) or gun_baslangic <= 0:
         return 0.0
     mevcut = state.get("bakiye", 0)
+    if not isinstance(mevcut, (int, float)):
+        return 0.0
     return ((mevcut - gun_baslangic) / gun_baslangic) * 100
 
 
 def bilesik_faiz_hedef(state: dict) -> float:
     """Bugünkü bileşik faiz hedefini hesaplar."""
-    gun_baslangic = state.get("gun_baslangic_bakiye", state.get("baslangic_bakiye", 10.0))
+    if not isinstance(state, dict):
+        return 0.0
+    gun_baslangic = state.get("gun_baslangic_bakiye", state.get("baslangic_bakiye", 100.0))
     hedef_pct = state.get("gunluk_hedef_pct", 10.0)
+    if not isinstance(gun_baslangic, (int, float)):
+        gun_baslangic = 100.0
+    if not isinstance(hedef_pct, (int, float)):
+        hedef_pct = 10.0
     return gun_baslangic * (1 + hedef_pct / 100)
 
 
 def gun_sonu_raporu(state: dict) -> str:
     """Gün sonu özet raporu üretir."""
+    if not isinstance(state, dict):
+        return "⚠️ Geçersiz state — rapor üretilemedi."
     kar = gunluk_kar_pct(state)
-    gun = state.get("gun_sayaci", 0)
-    bakiye = state.get("bakiye", 0)
-    baslangic = state.get("baslangic_bakiye", 10.0)
+    gun = state.get("gun_sayaci", 0) or 0
+    bakiye = state.get("bakiye", 0) or 0
+    baslangic = state.get("baslangic_bakiye", 100.0) or 100.0
     toplam_buyume = ((bakiye - baslangic) / baslangic * 100) if baslangic > 0 else 0
-    
+
     return (
         f"📊 GÜN #{gun} RAPORU\n"
-        f"├─ Başlangıç: ${state.get('gun_baslangic_bakiye', 10):.2f}\n"
+        f"├─ Başlangıç: ${state.get('gun_baslangic_bakiye', 100):.2f}\n"
         f"├─ Kapanış: ${bakiye:.2f}\n"
         f"├─ Günlük Kâr: %{kar:+.2f}\n"
         f"├─ Toplam Büyüme: %{toplam_buyume:+.2f}\n"
