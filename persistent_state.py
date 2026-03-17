@@ -233,6 +233,15 @@ def state_yukle(dosya: str = STATE_FILE) -> dict:
             state["son_gun"] = bugun
             state["gun_sayaci"] = state.get("gun_sayaci", 0) + 1
             state_kaydet(state, dosya)
+        else:
+            # Dışarıdan Bakiye Ekleme Kontrolü (Aynı Gün İçerisinde)
+            # Eğer mevcut bakiye, gün başlangıcından %50 daha fazlaysa, bu manuel eklemedir.
+            mevcut = state.get("bakiye", 0.0)
+            baslangic = state.get("gun_baslangic_bakiye", 0.0)
+            if baslangic > 0 and ((mevcut - baslangic) / baslangic) >= 0.50:
+                print(f"🔄 Manuel bakiye artışı algılandı! Gün başlangıç {baslangic:.2f} -> {mevcut:.2f} eşitlendi.")
+                state["gun_baslangic_bakiye"] = mevcut
+                state_kaydet(state, dosya)
 
         memory["last_state"] = state
         return state

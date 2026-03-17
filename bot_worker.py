@@ -100,7 +100,7 @@ class GlobalBotState:
         with self._lock:
             snap = {}
             for k, v in self._data.items():
-                if isinstance(v, (threading.Lock, threading.Event)):
+                if 'Lock' in str(type(v)) or 'Event' in str(type(v)):
                     continue
                 if isinstance(v, dict):
                     snap[k] = v.copy()
