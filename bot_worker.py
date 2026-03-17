@@ -160,6 +160,7 @@ class GlobalBotState:
 MOD_PRESETLERI = {
     "⚡ Agresif Mod": {"risk": 1.0, "sma_kisa": 7, "sma_uzun": 25, "aralik_carpan": 0.5},
     "🌱 Soft Kar Modu": {"risk": 0.30, "sma_kisa": 14, "sma_uzun": 50, "aralik_carpan": 1.5},
+    "💎 Ultra-Scalper": {"risk": 0.15, "sma_kisa": 5, "sma_uzun": 15, "aralik_carpan": 0.1},
 }
 
 
@@ -338,7 +339,21 @@ def ws_fiyat_dinleyici(state: dict, lock: threading.Lock, dur_sinyali: threading
                                         state["bot_calisiyor"] = False
                                         dur_sinyali.set()
                                 else:
-                                    if pnl_pct >= 10.0 and not poz.get("kademeli_tp_yapildi", False):
+                                    # 💎 Ultra-Scalper: %1.5 ROE'de tüm pozisyonu kapat
+                                    is_scalper = state.get("mod") == "💎 Ultra-Scalper"
+                                    if is_scalper and pnl_pct >= 1.5 and not poz.get("kademeli_tp_yapildi", False):
+                                        kapanacak_semboller.append(p_sembol)
+                                        poz["kapat_nedeni"] = f"💎 SCALPER TP: %{pnl_pct:.1f} ROE ile hedef yakalandı."
+                                        log_ekle(f"💎 SCALPER TP: {p_sembol} %{pnl_pct:.1f} ROE → Tam pozisyon kapatılıyor.", state, is_breakout=True)
+                                    elif is_scalper and pnl_pct >= 0.5 and not poz.get("ts_aktif"):
+                                        # Scalper trailing stop: giriş fiyatının %0.3 yakınına çek
+                                        poz["ts_aktif"] = True
+                                        if is_long:
+                                            poz["trailing_stop_fiyat"] = poz["giris_fiyati"] * 0.997
+                                        else:
+                                            poz["trailing_stop_fiyat"] = poz["giris_fiyati"] * 1.003
+                                        log_ekle(f"💎 SCALPER TS: {p_sembol} iz süren stop girişe çok yakın bağlandı.", state)
+                                    elif pnl_pct >= 10.0 and not poz.get("kademeli_tp_yapildi", False):
                                         poz["kademeli_tp_yapildi"] = True
                                         real_pnl = aktif_pnl_val / 2
                                         ret_margin = poz["islem_margin"] / 2
@@ -377,10 +392,12 @@ def ws_fiyat_dinleyici(state: dict, lock: threading.Lock, dur_sinyali: threading
                                             kapanacak_semboller.append(p_sembol)
 
                                     gecen_dk = (time.time() - poz.get("acilis_zamani", time.time())) / 60.0
-                                    if gecen_dk >= 60.0 and abs(pnl_pct) < 0.5:
+                                    zaman_limit = 5.0 if state.get("mod") == "💎 Ultra-Scalper" else 60.0
+                                    pnl_esik = 0.3 if state.get("mod") == "💎 Ultra-Scalper" else 0.5
+                                    if gecen_dk >= zaman_limit and abs(pnl_pct) < pnl_esik:
                                         if p_sembol not in kapanacak_semboller:
                                             kapanacak_semboller.append(p_sembol)
-                                            poz["kapat_nedeni"] = "Zaman Maliyeti: Yetersiz Volatilite"
+                                            poz["kapat_nedeni"] = f"Zaman Maliyeti: {gecen_dk:.0f}dk'da yetersiz hareket" if state.get("mod") == "💎 Ultra-Scalper" else "Zaman Maliyeti: Yetersiz Volatilite"
 
                             for ks in kapanacak_semboller:
                                 f_ks = guncel_fiyatlar.get(ks, state["aktif_pozisyonlar"].get(ks, {}).get("giris_fiyati", 0))
@@ -591,7 +608,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         karar_paketi = ai_engine.llm_karar(secilen_sembol, secilen_pazar, secilen_sma, state["openai_key"], poz_durumu, btc_trend, fonlama, zaman_baski_carpani)
                     else:
                         skor = ai_engine.kompozit_skor_hesapla(secilen_pazar, secilen_sma)
-                        karar_paketi = ai_engine.mock_ai_karar(secilen_sembol, secilen_pazar, skor, poz_durumu, btc_trend, fonlama, zaman_baski_carpani)
+                        karar_paketi = ai_engine.mock_ai_karar(secilen_sembol, secilen_pazar, skor, poz_durumu, btc_trend, fonlama, zaman_baski_carpani, mod=state.get("mod", ""))
 
                     # NLP Haber Veto
                     haber_puanlari = tarama_sonucu.get("haber_puanlari", {})

@@ -194,6 +194,17 @@ with st.sidebar:
             worker.stop()
             st.rerun()
 
+    # Mod seçimi
+    st.markdown("---")
+    mod_listesi = ["⚡ Agresif Mod", "🌱 Soft Kar Modu", "💎 Ultra-Scalper"]
+    mevcut_mod = S.get("mod", "⚡ Agresif Mod")
+    mevcut_idx = mod_listesi.index(mevcut_mod) if mevcut_mod in mod_listesi else 0
+    secilen_mod = st.selectbox("🎯 İşlem Modu", mod_listesi, index=mevcut_idx)
+    if secilen_mod != mevcut_mod:
+        worker.state.set("mod", secilen_mod)
+        worker.state.save_to_persistent()
+        st.rerun()
+
     # Bot durumu gösterge
     if worker.is_running:
         st.success(f"🟢 Bot Çalışıyor: {S.get('bot_durumu', 'Çalışıyor')}")

@@ -487,7 +487,7 @@ def ai_metrikler(pazar: dict, kompozit_skor: float, zaman_baski_carpani: float =
     
     return guven, beklenen, tavsiye_kaldirac, tavsiye_oran
 
-def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon: str, btc_trendi: str, fonlama: dict, zaman_baski_carpani: float = 1.0) -> dict:
+def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon: str, btc_trendi: str, fonlama: dict, zaman_baski_carpani: float = 1.0, mod: str = "") -> dict:
     if not isinstance(pazar, dict):
         return {"sembol": sembol, "karar": "BEKLE", "skor": 0, "dusunce": "Pazar verisi yok", "aralik_sn": 30, "guven_skoru": 0, "expected_growth": 0, "tavsiye_kaldirac": 10, "tavsiye_oran": 0.10, "ozet": "Veri yok"}
     if not isinstance(fonlama, dict):
@@ -502,12 +502,15 @@ def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon:
     fg_korku_var_mi = fg.get("durum", "Neutral") in ["Fear", "Extreme Fear"]
     makro = pazar.get("makro") or {"durum": "Normal", "neden": ""}
 
+    # 💎 Ultra-Scalper: Eşik 40 → 15
+    esik = 15 if mod == "💎 Ultra-Scalper" else 40
+
     if makro.get("durum") == "Risk-Off":
         # Makro risk durumunda tamamen durmak/(sadece short) yerine riskleri kısıyoruz
         kaldirac = min(kaldirac, 3)
         oran = min(oran, 0.05)
         
-        if kompozit_skor > 40:
+        if kompozit_skor > esik:
             if acik_pozisyon == "SHORT": 
                 karar = "KAPAT"
                 neden = f"[Risk-Off: Kaldıraç 3x'e Sınırlandı] Trend YUKARI döndü! SHORT pozisyon kapatılıyor."
@@ -515,7 +518,7 @@ def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon:
                 karar = "LONG"
                 neden = f"[Risk-Off: Kaldıraç 3x'e Sınırlandı] Makro riske rağmen güçlü YÜKSELİŞ sinyali. Sınırlı riskle LONG."
                 
-        elif kompozit_skor < -40:
+        elif kompozit_skor < -esik:
             if acik_pozisyon == "LONG":
                 karar = "KAPAT"
                 neden = f"[Risk-Off: Kaldıraç 3x'e Sınırlandı] Güçlü DÜŞÜŞ sinyali! LONG pozisyon kapatılıyor."
@@ -525,7 +528,7 @@ def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon:
     elif pazar.get("is_breakout") and fg_korku_var_mi and acik_pozisyon != "LONG" and not (btc_trendi == "AŞAĞI"):
         karar = "LONG"
         neden = f"🚀 KORKUYU SATIN AL: Piyasada Aşırı Korku ({fg.get('deger', 50)} - {fg.get('durum', 'N/A')}) varken hacim patlaması (Breakout) yakalandı! Güçlü AL sinyali."
-    elif kompozit_skor > 40:
+    elif kompozit_skor > esik:
         if acik_pozisyon == "SHORT": 
             karar = "KAPAT"
             neden = f"Trend YUKARI döndü! SHORT pozisyon riske girdi, acil kapatılıyor (Skor: {kompozit_skor:.1f})."
@@ -543,7 +546,7 @@ def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon:
                 neden = f"Güçlü YÜKSELİŞ Beklentisi! {sembol} kompozit skoru {kompozit_skor:.1f}. RSI ({pazar.get('rsi', 50):.1f}).{twitter_msg}"
                 if pazar.get("is_breakout"): neden = "🚀 ACİL LONG (BREAKOUT)! Hacim patlaması tespit edildi. " + neden
             
-    elif kompozit_skor < -40:
+    elif kompozit_skor < -esik:
         if acik_pozisyon == "LONG":
             karar = "KAPAT"
             neden = f"Trend AŞAĞI döndü! LONG pozisyon terse düştü, acil kapatılıyor (Skor: {kompozit_skor:.1f})."
