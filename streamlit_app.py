@@ -387,7 +387,8 @@ with tab_dash:
         poz_liste = []
         for idx, (s, p) in enumerate(aktif_pozlar.items()):
             try:
-                guncel_fiyat = S.get("fiyat", 0) if s == S.get("aktif_sembol") else p.get('giris_fiyati', 0)
+                fiyat_haritasi = S.get("guncel_fiyatlar", {})
+                guncel_fiyat = fiyat_haritasi.get(s, S.get("fiyat", 0) if s == S.get("aktif_sembol") else p.get('giris_fiyati', 0))
                 if guncel_fiyat <= 0 or p.get('giris_fiyati', 0) <= 0:
                     anlik_pnl = 0.0
                     pnl_pct = 0.0

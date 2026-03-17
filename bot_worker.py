@@ -77,6 +77,7 @@ class GlobalBotState:
             "use_real_api": False,
             "api_key_enc": "",
             "api_secret_enc": "",
+            "guncel_fiyatlar": {},
         }
 
     @property
@@ -305,6 +306,8 @@ def ws_fiyat_dinleyici(state: dict, lock: threading.Lock, dur_sinyali: threading
                                 guncel_fiyatlar[s] = tck.get("last", guncel_fiyatlar.get(s, 0))
 
                         with lock:
+                            state["guncel_fiyatlar"] = guncel_fiyatlar.copy()
+
                             toplam_margin = aktif_margin_toplami(state.get("aktif_pozisyonlar", {}))
                             top_pnl_anlik = pnl_hesapla_coklu(state.get("aktif_pozisyonlar", {}), guncel_fiyatlar)
                             anlik_varlik = state["bakiye"] + toplam_margin + top_pnl_anlik
