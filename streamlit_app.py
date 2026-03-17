@@ -376,10 +376,33 @@ if S.get("cuzdan_gecmisi"):
 tab_dash, tab_tv = st.tabs(["📊 Dashboard", "📈 Grafikler (TradingView)"])
 
 with tab_dash:
+    st.markdown("### 💼 Cüzdan Özeti")
+    state_bakiye = S.get("bakiye", 0)
+    aktif_pozlar = S.get("aktif_pozisyonlar", {})
+    margin_total = aktif_margin_toplami(aktif_pozlar)
+    fiyat_haritasi = S.get("guncel_fiyatlar", {})
+    
+    aktif_toplam_pnl = 0.0
+    for s, p in aktif_pozlar.items():
+        try:
+            gf = fiyat_haritasi.get(s, S.get("fiyat", 0) if s == S.get("aktif_sembol") else p.get('giris_fiyati', 0))
+            if gf > 0 and p.get('giris_fiyati', 0) > 0:
+                pnl = pnl_hesapla(p.get('pozisyon', 'YOK'), p.get('giris_fiyati', 0), gf, 
+                                  p.get('islem_margin', 0) * p.get('islem_kaldirac', 1), p.get('islem_kaldirac', 1))
+                if abs((pnl / p.get('islem_margin', 1)) * 100) <= 500:
+                    aktif_toplam_pnl += pnl
+        except Exception:
+            pass
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Kullanılabilir USDT", f"${state_bakiye:.2f}")
+    c2.metric("İşlemdeki Margin", f"${margin_total:.2f}")
+    c3.metric("Toplam Varlık", f"${state_bakiye + margin_total + aktif_toplam_pnl:.2f}", delta=f"{aktif_toplam_pnl:+.2f} USDT")
+
+    st.markdown("---")
     st.markdown("### 📊 Aktif Pozisyonlar Paneli")
     aktif_toplam_pnl = 0.0
 
-    aktif_pozlar = S.get("aktif_pozisyonlar", {})
     if not aktif_pozlar:
         st.info("Açık Pozisyon Bulunmuyor.")
     else:

@@ -270,40 +270,37 @@ def ws_fiyat_dinleyici(state: dict, lock: threading.Lock, dur_sinyali: threading
 
         while not dur_sinyali.is_set():
             try:
-                sembol = state["aktif_sembol"]
-                if sembol and sembol != "Bekleniyor...":
-                    ticker_tsk = asyncio.create_task(exchange.watch_ticker(sembol))
-                    poz_tasks = []
-                    diger_semboller = [s for s in state.get("aktif_pozisyonlar", {}).keys() if s != sembol]
-                    for s in diger_semboller:
-                        poz_tasks.append(exchange.watch_ticker(s))
-
+                sembol = state.get("aktif_sembol")
+                dinlenecekler = list(state.get("aktif_pozisyonlar", {}).keys())
+                if sembol and sembol != "Bekleniyor..." and sembol not in dinlenecekler:
+                    dinlenecekler.insert(0, sembol)
+                
+                if dinlenecekler:
+                    poz_tasks = [asyncio.create_task(exchange.watch_ticker(s)) for s in dinlenecekler]
                     try:
-                        res = await asyncio.wait_for(asyncio.gather(ticker_tsk, *poz_tasks, return_exceptions=True), timeout=5.0)
-
-                        breakout_ticker = res[0]
-                        if isinstance(breakout_ticker, dict):
+                        res = await asyncio.wait_for(asyncio.gather(*poz_tasks, return_exceptions=True), timeout=5.0)
+                        
+                        guncel_olusan = {}
+                        for i, s in enumerate(dinlenecekler):
+                            tck = res[i]
+                            if isinstance(tck, dict):
+                                guncel_fiyatlar[s] = tck.get("last", guncel_fiyatlar.get(s, 0))
+                                guncel_olusan[s] = tck
+                        
+                        if sembol in guncel_olusan:
+                            tck = guncel_olusan[sembol]
                             with lock:
-                                f = breakout_ticker.get("last", state["fiyat"])
-                                deg = breakout_ticker.get("percentage", state["degisim_24s"])
-                                hac = breakout_ticker.get("quoteVolume", state["hacim_24s"])
+                                f = tck.get("last", state.get("fiyat", 0))
                                 state["fiyat"] = f
-                                if deg:
-                                    state["degisim_24s"] = deg
-                                if hac:
-                                    state["hacim_24s"] = hac
-                                guncel_fiyatlar[sembol] = f
+                                if tck.get("percentage"): state["degisim_24s"] = tck.get("percentage")
+                                if tck.get("quoteVolume"): state["hacim_24s"] = tck.get("quoteVolume")
 
-                                if state["son_fiyat_tick"] > 0 and f != state["son_fiyat_tick"]:
-                                    degisim_tick = abs((f - state["son_fiyat_tick"]) / state["son_fiyat_tick"]) * 100
+                                sf = state.get("son_fiyat_tick", 0)
+                                if sf > 0 and f != sf:
+                                    degisim_tick = abs((f - sf) / sf) * 100
                                     if degisim_tick >= 0.3:
                                         state["analiz_tetikleyici"].set()
                                 state["son_fiyat_tick"] = f
-
-                        for i, s in enumerate(diger_semboller):
-                            tck = res[i + 1]
-                            if isinstance(tck, dict):
-                                guncel_fiyatlar[s] = tck.get("last", guncel_fiyatlar.get(s, 0))
 
                         with lock:
                             state["guncel_fiyatlar"] = guncel_fiyatlar.copy()
@@ -851,6 +848,17 @@ class BotWorker:
     def stop(self):
         raw = self.state.raw()
         raw["dur_sinyali"].set()
+        
+        # STOP ANINDA TÜM POZİSYONLARI KAPAT
+        with self.state.lock:
+            kapanacaklar = list(raw.get("aktif_pozisyonlar", {}).keys())
+            fiyatlar = raw.get("guncel_fiyatlar", {})
+            for s in kapanacaklar:
+                poz = raw["aktif_pozisyonlar"][s]
+                f = fiyatlar.get(s, poz.get("giris_fiyati", 0))
+                if f > 0:
+                    islem_kapat(raw, s, f, "🚨 BOT DURDURULDU: Kullanıcı İsteği")
+
         raw["bot_calisiyor"] = False
         raw["bot_durumu"] = "Durduruldu"
         self.state.save_to_persistent()
