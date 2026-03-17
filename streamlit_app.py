@@ -205,6 +205,12 @@ with st.sidebar:
         worker.state.save_to_persistent()
         st.rerun()
 
+    # Haber Veto Toggle
+    haber_veto_aktif = st.toggle("🛡️ Haber Vetosunu Aktifleştir", value=cfg.ENABLE_NEWS_VETO,
+                                  help="Kapatıldığında bot, haberlerdeki 'Savaş', 'Çöküş' gibi kelimeleri yoksayarak sadece teknik verilere göre işlem açar.")
+    if haber_veto_aktif != cfg.ENABLE_NEWS_VETO:
+        cfg.ENABLE_NEWS_VETO = haber_veto_aktif
+
     # Bot durumu gösterge
     if worker.is_running:
         st.success(f"🟢 Bot Çalışıyor: {S.get('bot_durumu', 'Çalışıyor')}")

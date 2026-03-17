@@ -610,18 +610,19 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         skor = ai_engine.kompozit_skor_hesapla(secilen_pazar, secilen_sma)
                         karar_paketi = ai_engine.mock_ai_karar(secilen_sembol, secilen_pazar, skor, poz_durumu, btc_trend, fonlama, zaman_baski_carpani, mod=state.get("mod", ""))
 
-                    # NLP Haber Veto
-                    haber_puanlari = tarama_sonucu.get("haber_puanlari", {})
-                    if haber_puanlari:
-                        veto_sonuc = ai_engine.haber_vetosu(haber_puanlari, karar_paketi.get("karar", "BEKLE"))
-                        if veto_sonuc.get("veto"):
-                            with lock:
-                                log_ekle(veto_sonuc.get("neden", ""), state)
-                            karar_paketi["karar"] = "BEKLE"
-                            karar_paketi["dusunce"] = veto_sonuc.get("neden", "")
-                        elif veto_sonuc.get("neden"):
-                            with lock:
-                                log_ekle(veto_sonuc["neden"], state)
+                    # NLP Haber Veto (cfg.ENABLE_NEWS_VETO ile kontrol edilir)
+                    if cfg.ENABLE_NEWS_VETO:
+                        haber_puanlari = tarama_sonucu.get("haber_puanlari", {})
+                        if haber_puanlari:
+                            veto_sonuc = ai_engine.haber_vetosu(haber_puanlari, karar_paketi.get("karar", "BEKLE"))
+                            if veto_sonuc.get("veto"):
+                                with lock:
+                                    log_ekle(veto_sonuc.get("neden", ""), state)
+                                karar_paketi["karar"] = "BEKLE"
+                                karar_paketi["dusunce"] = veto_sonuc.get("neden", "")
+                            elif veto_sonuc.get("neden"):
+                                with lock:
+                                    log_ekle(veto_sonuc["neden"], state)
                     # Bakiye Senkronizasyonu (Manual Injection Guard)
                     # Eğer bakiye aniden %100 veya daha fazla fırlarsa, bu manuel eklemedir, kilitlenmeyi önle.
                     gun_baslangic = state.get("gun_baslangic_bakiye", state.get("baslangic_bakiye", cfg.INITIAL_BALANCE))

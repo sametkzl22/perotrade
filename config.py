@@ -26,6 +26,9 @@ DAILY_LOSS_STOP = -5.0     # %5 kayıpta -> Panik Koruması (işlem durur)
 MAX_CONCURRENT_TRADES = 99 # Aynı anda açılabilecek maksimum işlem sayısı
 MAX_RISK_PER_TRADE = 1.0   # Normal modda Max %100 bakiye kullanımı
 
+# ───── Haber & Makro Filtre ─────
+ENABLE_NEWS_VETO = True    # False = haberleri yoksay, sadece teknik skor ile işlem yap
+
 # ───── Analiz Ayarları ─────
 SHORT_MA = 7
 LONG_MA = 25

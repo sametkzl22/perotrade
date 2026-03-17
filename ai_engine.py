@@ -14,6 +14,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
 
+import config as cfg
+
 # ─────────────────────────────────────────────
 # 1) Teknik Analiz Göstergeleri & Veri Çekme
 # ─────────────────────────────────────────────
@@ -505,7 +507,7 @@ def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon:
     # 💎 Ultra-Scalper: Eşik 40 → 15
     esik = 15 if mod == "💎 Ultra-Scalper" else 40
 
-    if makro.get("durum") == "Risk-Off":
+    if cfg.ENABLE_NEWS_VETO and makro.get("durum") == "Risk-Off":
         # Makro risk durumunda tamamen durmak/(sadece short) yerine riskleri kısıyoruz
         kaldirac = min(kaldirac, 3)
         oran = min(oran, 0.05)
