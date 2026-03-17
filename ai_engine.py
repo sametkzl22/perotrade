@@ -303,12 +303,7 @@ def top_coinleri_tara(exchange, limit=100) -> list:
         return standart_liste
 
 def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
-    secilen_sembol = None
-    en_baskın_mutlak_skor = -1
-    secilen_pazar = None
-    secilen_sma = None
-    secilen_breakout = False
-    secilen_rapor = ""
+    uygun_coinler = []
     
     taranan_liste = []
     haberler = trend_analizi_yap()
@@ -359,13 +354,7 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
             # Haber puanını da ekle
             mutlak_guc += abs(haber_puanlari["toplam_puan"]) * 10
             
-            if mutlak_guc > en_baskın_mutlak_skor:
-                en_baskın_mutlak_skor = mutlak_guc
-                secilen_sembol = coin
-                secilen_pazar = pazar
-                secilen_sma = sma_sinyal
-                secilen_breakout = is_breakout
-                
+            if mutlak_guc >= 30: # Multi-position seçimi için eşiği düşürdük
                 # Şeffaf Karar Raporu Oluştur
                 tw_data = pazar.get('twitter', {}) or {}
                 tw_durum = f"Twitter: {tw_data.get('yazar', '?')} ({tw_data.get('skor', 0):+.1f})" if tw_data.get('aktif') else "Twitter: Etkisiz"
@@ -379,16 +368,24 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
                     f"MAKRO: {makro_data.get('durum', 'Normal')} - {makro_data.get('neden', '')}"
                 )
                 
+                uygun_coinler.append({
+                    "sembol": coin,
+                    "pazar": pazar,
+                    "sma": sma_sinyal,
+                    "is_breakout": is_breakout,
+                    "rapor": secilen_rapor,
+                    "mutlak_guc": mutlak_guc
+                })
+                
         except Exception:
             continue
 
+    # Mutlak güce göre yüksekten düşüğe sırala
+    uygun_coinler.sort(key=lambda x: x["mutlak_guc"], reverse=True)
+
     return {
-        "secilen_sembol": secilen_sembol,
-        "secilen_pazar": secilen_pazar,
-        "secilen_sma": secilen_sma,
-        "secilen_breakout": secilen_breakout,
+        "secilen_coinler": uygun_coinler,
         "taranan_liste": taranan_liste,
-        "karar_raporu": secilen_rapor,
         "haber_puanlari": haber_puanlari
     }
 
@@ -537,9 +534,13 @@ def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon:
             karar = "KAPAT"
             neden = f"Trend YUKARI döndü! SHORT pozisyon riske girdi, acil kapatılıyor (Skor: {kompozit_skor:.1f})."
         else:
-            if btc_trendi == "AŞAĞI":
-                neden = f"LONG fırsatı vardı fakt BTC Trendi AŞAĞI olduğu için İPTAL edildi. Güvenlik öncelikli."
-            elif "Uzun" in fonlama.get("risk", ""):
+            if btc_trendi == "AŞAĞI" and not pazar.get("is_breakout"):
+                if kompozit_skor >= 60:
+                    karar = "LONG"
+                    neden = f"BTC AŞAĞI eğilimli olsa da çok güçlü bir YÜKSELİŞ momentuma (Skor: {kompozit_skor:.1f}) sahip. LONG açılıyor."
+                else:
+                    neden = f"LONG fırsatı vardı fakat BTC Trendi AŞAĞI olduğu için İPTAL edildi. Güvenlik öncelikli."
+            elif "Uzun" in fonlama.get("risk", "") and fonlama.get("oran", 0.0) > 0.15:
                 neden = f"LONG fırsatı vardı fakat Fonlama Oranı aşırı yüksek ({fonlama.get('oran', 0):.2f}%). Likidasyon/Maliyet riski nedeniyle işlem askıda."
             else:
                 karar = "LONG"
@@ -551,9 +552,13 @@ def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon:
             karar = "KAPAT"
             neden = f"Trend AŞAĞI döndü! LONG pozisyon terse düştü, acil kapatılıyor (Skor: {kompozit_skor:.1f})."
         else:
-            if btc_trendi == "YUKARI":
-                neden = f"SHORT fırsatı vardı fakat BTC Trendi YUKARI olduğu için İPTAL edildi. Güvenlik öncelikli."
-            elif "Kısa" in fonlama.get("risk", ""):
+            if btc_trendi == "YUKARI" and not pazar.get("is_breakout"):
+                if kompozit_skor <= -60:
+                    karar = "SHORT"
+                    neden = f"BTC YUKARI eğilimli olsa da çok güçlü bir DÜŞÜŞ momentuma (Skor: {kompozit_skor:.1f}) sahip. SHORT açılıyor."
+                else:
+                    neden = f"SHORT fırsatı vardı fakat BTC Trendi YUKARI olduğu için İPTAL edildi. Güvenlik öncelikli."
+            elif "Kısa" in fonlama.get("risk", "") and fonlama.get("oran", 0.0) < -0.15:
                 neden = f"SHORT fırsatı vardı fakat negatif Fonlama Oranı aşırı yüksek ({fonlama.get('oran', 0):.2f}%). Pozisyon açılmadı."
             else:
                 karar = "SHORT"
