@@ -21,10 +21,10 @@ DAILY_TARGET_PCT = 10.0   # Günlük %10 kâr hedefi
 COMPOUNDING = True         # Her günün kârı ertesi günün bakiyesine eklenir
 
 # ───── Risk Limitleri ─────
-DAILY_PROFIT_LOCK = 50.0   # %50 kâra ulaşınca -> Güvenli Mod (işlem durur)
+DAILY_PROFIT_LOCK = 500.0  # %500 kâra ulaşınca -> Güvenli Mod (işlem durur)
 DAILY_LOSS_STOP = -5.0     # %5 kayıpta -> Panik Koruması (işlem durur)
-MAX_CONCURRENT_TRADES = 3  # Aynı anda açılabilecek maksimum işlem sayısı
-MAX_RISK_PER_TRADE = 0.15  # Normal modda Max %15 bakiye kullanımı
+MAX_CONCURRENT_TRADES = 99 # Aynı anda açılabilecek maksimum işlem sayısı
+MAX_RISK_PER_TRADE = 1.0   # Normal modda Max %100 bakiye kullanımı
 
 # ───── Analiz Ayarları ─────
 SHORT_MA = 7

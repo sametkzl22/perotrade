@@ -82,12 +82,8 @@ def volatilite_hesapla(df: pd.DataFrame) -> float:
         return 0.0
 
 def dinamik_analiz_araligi(volatilite: float, is_breakout: bool = False) -> int:
-    """ Breakout varsa ultra-hızlı 2 saniye reaksiyon süresi. """
-    if is_breakout: return 2
-    if volatilite > 5.0: return 30
-    elif volatilite > 2.0: return 120
-    elif volatilite > 0.5: return 300
-    else: return 900
+    """ Berserker Mode: Ultra hızlı 1 saniyelik sabit döngü. """
+    return 1
 
 
 # ─────────────────────────────────────────────

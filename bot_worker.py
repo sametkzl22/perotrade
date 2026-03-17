@@ -468,11 +468,12 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                     
                 with lock:
                     mevcut_islem_sayisi = len(state.get("aktif_pozisyonlar", {}))
-                max_islem = getattr(cfg, "MAX_CONCURRENT_TRADES", 3)
+                max_islem = getattr(cfg, "MAX_CONCURRENT_TRADES", 99)
                 
                 secilen_sembol = c_data.get("sembol", "BTC/USDT")
-                if mevcut_islem_sayisi >= max_islem and secilen_sembol not in state.get("aktif_pozisyonlar", {}):
-                    continue
+                # BERSERKER MODE: Sınırsız işlem yapması için limit koşulu kapatıldı.
+                # if mevcut_islem_sayisi >= max_islem and secilen_sembol not in state.get("aktif_pozisyonlar", {}):
+                #     continue
 
                 secilen_pazar = c_data.get("pazar", {})
                 secilen_sma = c_data.get("sma", "BEKLE")
@@ -747,9 +748,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                 son_kayit_bakiye = guncel_bakiye
 
             # --- BEKLEME (EVENT-DRIVEN) ---
-            bekleme_suresi = int(karar_paketi.get("aralik_sn", 30)) if karar_paketi else 30
-            if not is_breakout_global:
-                bekleme_suresi = int(bekleme_suresi * preset.get("aralik_carpan", 1.0))
+            bekleme_suresi = 1 # Berserker Mode: Bekleme süresi daima 1 saniye
             with lock:
                 state["sonraki_analiz_sn"] = bekleme_suresi
 
