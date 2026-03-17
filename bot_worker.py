@@ -423,6 +423,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
         return
 
     son_kayit_zamani = time.time()
+    son_kayit_bakiye = state.get("bakiye", 0.0)
 
     while not dur_sinyali.is_set():
         try:
@@ -577,6 +578,15 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                     elif veto_sonuc.get("neden"):
                         with lock:
                             log_ekle(veto_sonuc["neden"], state)
+                # Bakiye Senkronizasyonu (Manual Injection Guard)
+                # Eğer bakiye aniden %100 veya daha fazla fırlarsa, bu manuel eklemedir, kilitlenmeyi önle.
+                gun_baslangic = state.get("gun_baslangic_bakiye", state.get("baslangic_bakiye", cfg.INITIAL_BALANCE))
+                mevcut_bakiye = state.get("bakiye", gun_baslangic) + aktif_margin_toplami(state.get("aktif_pozisyonlar", {}))
+                
+                if gun_baslangic > 0 and ((mevcut_bakiye - gun_baslangic) / gun_baslangic) * 100 >= 100.0:
+                    with lock:
+                        state["gun_baslangic_bakiye"] = mevcut_bakiye
+                        log_ekle(f"🔄 Bakiye Senkronizasyonu: Manuel ekleme tespit edildi. Yeni Gün Başlangıç: ${mevcut_bakiye:.2f}", state)
 
                 # Günlük Risk Barometresi
                 gunluk_kar = gunluk_kar_hesapla(state)
@@ -693,8 +703,11 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                     dur_sinyali.set()
                     break
 
-            # Persistent State: Her 60 saniyede bir kaydet (her döngüde değil)
-            if time.time() - son_kayit_zamani >= 60:
+            # Persistent State: Her 60 saniyede bir veya bakiye değiştiğinde (Atomic Save) kaydet
+            guncel_bakiye = state.get("bakiye", 0.0)
+            bakiye_degisti_mi = abs(guncel_bakiye - son_kayit_bakiye) > 0.01
+
+            if bakiye_degisti_mi or (time.time() - son_kayit_zamani >= 60):
                 try:
                     temiz = {}
                     with lock:
@@ -705,6 +718,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                 except Exception:
                     pass
                 son_kayit_zamani = time.time()
+                son_kayit_bakiye = guncel_bakiye
 
             # --- BEKLEME (EVENT-DRIVEN) ---
             bekleme_suresi = int(karar_paketi.get("aralik_sn", 30))

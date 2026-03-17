@@ -510,14 +510,25 @@ def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon:
     makro = pazar.get("makro") or {"durum": "Normal", "neden": ""}
 
     if makro.get("durum") == "Risk-Off":
-        if acik_pozisyon == "LONG":
-            karar = "KAPAT"
-            neden = f"🚨 ACİL (Risk-Off): {makro.get('neden', '')}. Güvenli limana geçiş, LONG pozisyon hemen kapatılıyor."
-        elif acik_pozisyon == "YOK" and kompozit_skor < -10:
-            karar = "SHORT"
-            neden = f"🚨 MAKRO FIRSAT: {makro.get('neden', '')} tespit edildi + zayıf trend. Küresel panik kaynaklı güçlü SHORT!"
-        elif acik_pozisyon == "SHORT":
-            neden = f"🚨 Makro gerginlik ({makro.get('neden', '')}) SHORT pozisyonumuz için lehimize. Tutmaya devam ediyoruz."
+        # Makro risk durumunda tamamen durmak/(sadece short) yerine riskleri kısıyoruz
+        kaldirac = min(kaldirac, 3)
+        oran = min(oran, 0.05)
+        
+        if kompozit_skor > 40:
+            if acik_pozisyon == "SHORT": 
+                karar = "KAPAT"
+                neden = f"[Risk-Off: Kaldıraç 3x'e Sınırlandı] Trend YUKARI döndü! SHORT pozisyon kapatılıyor."
+            elif btc_trendi != "AŞAĞI" and not "Uzun" in fonlama.get("risk", ""):
+                karar = "LONG"
+                neden = f"[Risk-Off: Kaldıraç 3x'e Sınırlandı] Makro riske rağmen güçlü YÜKSELİŞ sinyali. Sınırlı riskle LONG."
+                
+        elif kompozit_skor < -40:
+            if acik_pozisyon == "LONG":
+                karar = "KAPAT"
+                neden = f"[Risk-Off: Kaldıraç 3x'e Sınırlandı] Güçlü DÜŞÜŞ sinyali! LONG pozisyon kapatılıyor."
+            elif btc_trendi != "YUKARI" and not "Kısa" in fonlama.get("risk", ""):
+                karar = "SHORT"
+                neden = f"[Risk-Off: Kaldıraç 3x'e Sınırlandı] Makro gerginlik ({makro.get('neden', '')}) SHORT için lehimize. Sınırlı riskle SHORT."
     elif pazar.get("is_breakout") and fg_korku_var_mi and acik_pozisyon != "LONG" and not (btc_trendi == "AŞAĞI"):
         karar = "LONG"
         neden = f"🚀 KORKUYU SATIN AL: Piyasada Aşırı Korku ({fg.get('deger', 50)} - {fg.get('durum', 'N/A')}) varken hacim patlaması (Breakout) yakalandı! Güçlü AL sinyali."

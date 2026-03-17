@@ -216,6 +216,13 @@ with st.sidebar:
     margin_total = aktif_margin_toplami(S.get("aktif_pozisyonlar", {}))
     st.sidebar.markdown(f"**Toplam Varlık:** ${state_bakiye + margin_total:.2f}")
 
+    if st.sidebar.button("🔓 Günlük Kâr Kilidini Sıfırla", use_container_width=True, help="Günlük %10 kâr hedefine ulaşıldıysa ve botu tekrar çalıştırmak istiyorsanız bu butona basarak başlangıç bakiyesini güncelleyebilirsiniz."):
+        worker.state.set("gun_baslangic_bakiye", state_bakiye + margin_total)
+        worker.state.save_to_persistent()
+        st.sidebar.success("✅ Kâr Kilidi Sıfırlandı!")
+        time.sleep(1)
+        st.rerun()
+
     # 48 Saatlik Demo Takibi
     if not S.get("use_real_api", False):
         st.sidebar.markdown("---")
