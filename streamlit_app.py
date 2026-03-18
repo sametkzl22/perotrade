@@ -232,6 +232,8 @@ with st.sidebar:
     state_bakiye = S.get("bakiye", 0)
     margin_total = aktif_margin_toplami(S.get("aktif_pozisyonlar", {}))
     st.sidebar.markdown(f"**Toplam Varlık:** ${state_bakiye + margin_total:.2f}")
+    st.sidebar.markdown(f"**💵 Boşta Kalan Para:** ${state_bakiye:.2f}")
+    st.sidebar.markdown(f"**🔒 İşlemdeki Margin:** ${margin_total:.2f}")
 
     if st.sidebar.button("Günlük İstatistikleri ve Kilidi Sıfırla", use_container_width=True, help="Günlük kâr hedefine ulaşıldıysa ve botu tekrar çalıştırmak istiyorsanız bu butona basarak başlangıç bakiyesini güncelleyebilir ve Güvenli Mod'u kapatabilirsiniz."):
         worker.state.set("gun_baslangic_bakiye", state_bakiye + margin_total)

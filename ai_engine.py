@@ -83,6 +83,81 @@ def volatilite_hesapla(df: pd.DataFrame) -> float:
     except Exception:
         return 0.0
 
+
+def atr_hesapla(df: pd.DataFrame, period: int = 14) -> float:
+    """Gerçek ATR (Average True Range) hesaplar."""
+    if df is None or df.empty or len(df) < period + 1:
+        return 0.0
+    try:
+        high = df['high']
+        low = df['low']
+        close = df['close'].shift(1)
+        tr1 = high - low
+        tr2 = (high - close).abs()
+        tr3 = (low - close).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=period).mean().iloc[-1]
+        return float(atr) if not np.isnan(atr) else 0.0
+    except Exception:
+        return 0.0
+
+
+def volatilite_spike_kontrol(df: pd.DataFrame, period: int = 14) -> dict:
+    """Anlık ATR'nin ortalamaya oranını hesaplar. Spike = patlama sinyali."""
+    sonuc = {"spike": False, "spike_oran": 0.0, "atr": 0.0, "atr_ort": 0.0}
+    if df is None or df.empty or len(df) < period + 5:
+        return sonuc
+    try:
+        high = df['high']
+        low = df['low']
+        close = df['close'].shift(1)
+        tr = pd.concat([high - low, (high - close).abs(), (low - close).abs()], axis=1).max(axis=1)
+        atr_series = tr.rolling(window=period).mean()
+        atr_son = float(atr_series.iloc[-1])
+        atr_ort = float(atr_series.iloc[-period:-1].mean()) if len(atr_series) > period else atr_son
+        if np.isnan(atr_son) or np.isnan(atr_ort) or atr_ort <= 0:
+            return sonuc
+        spike_oran = atr_son / atr_ort
+        return {
+            "spike": spike_oran >= 1.5,
+            "spike_oran": round(spike_oran, 2),
+            "atr": round(atr_son, 6),
+            "atr_ort": round(atr_ort, 6)
+        }
+    except Exception:
+        return sonuc
+
+
+def likidite_kontrol(exchange, sembol: str, min_hacim_usdt: float = 500_000) -> dict:
+    """24s USDT hacmini kontrol eder. Düşük hacimli (iğneli) coinleri engeller."""
+    sonuc = {"gecti": False, "hacim_24s": 0.0, "neden": ""}
+    try:
+        if exchange is None:
+            sonuc["neden"] = "Exchange bağlantısı yok"
+            return sonuc
+        ticker = exchange.fetch_ticker(sembol)
+        if not isinstance(ticker, dict):
+            sonuc["neden"] = "Ticker verisi alınamadı"
+            return sonuc
+        hacim = float(ticker.get("quoteVolume", 0) or 0)
+        sonuc["hacim_24s"] = hacim
+        if hacim < min_hacim_usdt:
+            sonuc["neden"] = f"Düşük likidite: ${hacim:,.0f} < ${min_hacim_usdt:,.0f}"
+            return sonuc
+        bid = float(ticker.get("bid", 0) or 0)
+        ask = float(ticker.get("ask", 0) or 0)
+        if bid > 0 and ask > 0:
+            spread_pct = ((ask - bid) / bid) * 100
+            if spread_pct > 0.5:
+                sonuc["neden"] = f"Geniş spread: %{spread_pct:.2f} (iğne riski)"
+                return sonuc
+        sonuc["gecti"] = True
+        return sonuc
+    except Exception:
+        sonuc["neden"] = "Likidite kontrolü başarısız"
+        return sonuc
+
+
 def dinamik_analiz_araligi(volatilite: float, is_breakout: bool = False) -> int:
     """ Berserker Mode: Ultra hızlı 1 saniyelik sabit döngü. """
     return 1
@@ -309,6 +384,11 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
 
     for coin in top_coinler[:15]:
         try:
+            # v6: Likidite Kontrolü — düşük hacimli tehlikeli coinleri engelle
+            liq_check = likidite_kontrol(exchange, coin, min_hacim_usdt=500_000)
+            if not liq_check.get("gecti", False):
+                continue  # Likidite yetersiz, atla
+
             df = mum_verisi_cek(exchange, coin, "1h", limit=sma_uzun+5)
             if df is None or df.empty or len(df) < 15: continue
             
@@ -318,6 +398,12 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
             
             sma_sinyal = sinyal_uret(df, sma_kisa, sma_uzun)
             
+            # v6: ATR Spike Volatilite Tarayıcısı
+            atr_spike = volatilite_spike_kontrol(df)
+            pazar["atr"] = atr_spike.get("atr", 0.0)
+            pazar["atr_spike"] = atr_spike.get("spike", False)
+            pazar["atr_spike_oran"] = atr_spike.get("spike_oran", 0.0)
+
             # Breakout Kontrolü (Hacim Patlaması & Konsolidasyon)
             is_breakout = False
             son_hacim = df['volume'].iloc[-1]
@@ -330,7 +416,10 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
             if hacim_artis_pct >= 200 and fiyat_farki_pct < 3.0:
                 is_breakout = True
             elif son_hacim > (ortalama_hacim * 1.5) and fiyat_farki_pct < 3.0:
-                is_breakout = True  # Daha düşük hacim artışı ama yine de dikkat çekici
+                is_breakout = True
+            # v6: ATR spike de breakout sinyali verebilir
+            if atr_spike.get("spike") and hacim_artis_pct >= 100:
+                is_breakout = True
             pazar['is_breakout'] = is_breakout
                 
             skor = kompozit_skor_hesapla(pazar, sma_sinyal)
@@ -341,27 +430,31 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
                 "Skor": round(skor,1),
                 "Volatilite": round(pazar["volatilite"], 2),
                 "Hacim Artışı": f"%{hacim_artis_pct:.0f}",
+                "ATR Spike": f"🔥 x{atr_spike.get('spike_oran', 0):.1f}" if atr_spike.get("spike") else "—",
                 "Breakout": "🔥 EVET" if is_breakout else "HAYIR"
             })
             
             # Volatilite * Breakout puanı (Hacimli ama ölü USDC gibi coinleri eler)
             mutlak_guc = abs(skor) + (pazar["volatilite"] * 2) 
             if is_breakout: mutlak_guc += 50
+            if atr_spike.get("spike"): mutlak_guc += 20  # v6: ATR spike bonus
             if pazar["volatilite"] < 0.5: mutlak_guc -= 100 # Sabit coin cezası
             
             # Haber puanını da ekle
             mutlak_guc += abs(haber_puanlari["toplam_puan"]) * 10
             
-            if mutlak_guc >= 30: # Multi-position seçimi için eşiği düşürdük
+            if mutlak_guc >= 30:
                 # Şeffaf Karar Raporu Oluştur
                 tw_data = pazar.get('twitter', {}) or {}
                 tw_durum = f"Twitter: {tw_data.get('yazar', '?')} ({tw_data.get('skor', 0):+.1f})" if tw_data.get('aktif') else "Twitter: Etkisiz"
                 h_tetiklenen = haber_puanlari.get("tetiklenen", []) or []
                 haber_ozet = ", ".join([f"{k.upper()}({a:+.1f})" for k, a in h_tetiklenen]) if h_tetiklenen else "Belirgin gündem yok"
                 makro_data = pazar.get('makro', {}) or {}
+                atr_str = f"ATR Spike: x{atr_spike.get('spike_oran', 0):.1f}" if atr_spike.get("spike") else "ATR: Normal"
                 secilen_rapor = (
                     f"SEÇİLEN COİN: {coin}\n"
-                    f"TEKNİK: RSI: {pazar.get('rsi', 50):.1f}, Hacim Artışı: %{hacim_artis_pct:.0f}, Breakout: {'Evet' if is_breakout else 'Hayır'}\n"
+                    f"TEKNİK: RSI: {pazar.get('rsi', 50):.1f}, Hacim Artışı: %{hacim_artis_pct:.0f}, {atr_str}, Breakout: {'Evet' if is_breakout else 'Hayır'}\n"
+                    f"LİKİDİTE: ${liq_check.get('hacim_24s', 0):,.0f} ✅\n"
                     f"GÜNDEM: {haber_ozet}. {tw_durum}. Duyarlılık: {pazar.get('duyarlilik', 0):+.2f}\n"
                     f"MAKRO: {makro_data.get('durum', 'Normal')} - {makro_data.get('neden', '')}"
                 )
