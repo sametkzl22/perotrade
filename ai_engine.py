@@ -1,10 +1,10 @@
 """
-AI Karar Motoru (AI Decision Engine) v4
+AI Karar Motoru (AI Decision Engine) v7
 ========================================
 Breakout Tarayıcı, Hacim Anormallikleri, Trend/Web Simülasyonu,
 Twitter (X) Duyarlılık Analizi, Güven Skoru & Beklenen Artış,
-Vadeli İşlemler (Long/Short) stratejisi ve *Live Test Optimizasyonları*
-(BTC Korelasyonu, Fonlama Oranı, 2s Breakout Taraması).
+Vadeli İşlemler (Long/Short) stratejisi, ATR Volatilite Scanner,
+Likidite Filtresi, USDT Dominance Kontrolü ve SQLite Loglama.
 """
 
 import math
@@ -14,7 +14,13 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
 
+try:
+    import requests as _requests
+except ImportError:
+    _requests = None
+
 import config as cfg
+import data_logger
 
 # ─────────────────────────────────────────────
 # 1) Teknik Analiz Göstergeleri & Veri Çekme
@@ -206,6 +212,38 @@ def fonlama_orani_getir(exchange, symbol: str) -> dict:
     if s_oran > 0.05: risk = "Uzun(Long) Riskli"
     elif s_oran < -0.05: risk = "Kısa(Short) Riskli"
     return {"oran": s_oran, "risk": risk}
+
+
+def usdt_dominance_getir() -> dict:
+    """v7: USDT.D (USDT Dominance) verisini çeker. Yükselen USDT.D = altcoinlerden çıkış."""
+    varsayilan = {"deger": 5.0, "trend": "YATAY", "etki": "NÖTR"}
+    try:
+        if _requests is not None:
+            resp = _requests.get(
+                "https://api.coingecko.com/api/v3/global",
+                timeout=5
+            )
+            if resp.status_code == 200:
+                data = resp.json().get("data", {})
+                market_cap_pct = data.get("market_cap_percentage", {})
+                usdt_pct = market_cap_pct.get("usdt", 0.0) or market_cap_pct.get("tether", 0.0)
+                if usdt_pct > 0:
+                    # Trend tahmini: %5 üstü = yükseliyor (altcoinlerden çıkış)
+                    if usdt_pct > 5.5:
+                        return {"deger": round(usdt_pct, 2), "trend": "YUKARI", "etki": "LONG_AZALT"}
+                    elif usdt_pct < 4.0:
+                        return {"deger": round(usdt_pct, 2), "trend": "ASAGI", "etki": "LONG_ARTIR"}
+                    else:
+                        return {"deger": round(usdt_pct, 2), "trend": "YATAY", "etki": "NÖTR"}
+    except Exception:
+        pass
+    # Fallback: Simülasyon
+    sim_val = random.uniform(3.5, 7.0)
+    if sim_val > 5.5:
+        return {"deger": round(sim_val, 2), "trend": "YUKARI", "etki": "LONG_AZALT"}
+    elif sim_val < 4.0:
+        return {"deger": round(sim_val, 2), "trend": "ASAGI", "etki": "LONG_ARTIR"}
+    return {"deger": round(sim_val, 2), "trend": "YATAY", "etki": "NÖTR"}
 
 
 # ─────────────────────────────────────────────
@@ -467,6 +505,16 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
                     "rapor": secilen_rapor,
                     "mutlak_guc": mutlak_guc
                 })
+
+            # v7: SQLite'a tarama verisi kaydet
+            try:
+                data_logger.tarama_kaydet(
+                    sembol=coin, fiyat=pazar.get("fiyat", 0), skor=round(skor, 1),
+                    atr=atr_spike.get("atr", 0), volatilite=round(pazar.get("volatilite", 0), 2),
+                    hacim_artis=round(hacim_artis_pct, 0), breakout=is_breakout
+                )
+            except Exception:
+                pass
                 
         except Exception:
             continue

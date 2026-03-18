@@ -18,6 +18,7 @@ import streamlit.components.v1 as components
 import config as cfg
 import persistent_state as ps
 from bot_worker import BotWorker, GlobalBotState, aktif_margin_toplami, pnl_hesapla
+import data_logger
 
 
 # ─────────────────────────────────────────────
@@ -317,7 +318,18 @@ elif "Hedef" in S.get("bot_durumu", ""):
     status_class = "status-target"
 
 col_durum.markdown(f"<div style='text-align:right; margin-top:20px;'><span class='status-badge {status_class}'>Durum: {S.get('bot_durumu', 'Durduruldu')}</span></div>", unsafe_allow_html=True)
-st.markdown(f"<div class='dashboard-header'><b>🎯 Odaklanılan Ticker: {S.get('aktif_sembol', 'Bekleniyor...')}</b> — Risk Barometresi: {S.get('global_risk_seviyesi', 'Normal')}</div>", unsafe_allow_html=True)
+
+usdt_d = S.get("usdt_d_deger", 0.0)
+usdt_trend = S.get("usdt_d_trend", "YATAY")
+trend_ikon = "⬆️" if usdt_trend == "YUKARI" else "⬇️" if usdt_trend == "ASAGI" else "➡️"
+trend_renk = "#ff4444" if usdt_trend == "YUKARI" else "#00ff88" if usdt_trend == "ASAGI" else "#cccccc"
+
+st.markdown(f"""
+<div class='dashboard-header' style='display: flex; justify-content: space-between; align-items: center;'>
+    <span><b>🎯 Odaklanılan Ticker: {S.get('aktif_sembol', 'Bekleniyor...')}</b> — Risk Barometresi: {S.get('global_risk_seviyesi', 'Normal')}</span>
+    <span style='color:{trend_renk}; font-weight:800; font-size:16px;'>USDT.D: %{usdt_d:.2f} {trend_ikon}</span>
+</div>
+""", unsafe_allow_html=True)
 
 # Performans Metrikleri
 st.markdown("---")
@@ -375,7 +387,7 @@ if S.get("cuzdan_gecmisi"):
 # ─────────────────────────────────────────────
 # Dashboard Tabs
 # ─────────────────────────────────────────────
-tab_dash, tab_tv = st.tabs(["📊 Dashboard", "📈 Grafikler (TradingView)"])
+tab_dash, tab_tv, tab_gecmis = st.tabs(["📊 Dashboard", "📈 Grafikler (TradingView)", "📚 Geçmiş Performans"])
 
 with tab_dash:
     st.markdown("### 💼 Cüzdan Özeti")
@@ -558,6 +570,39 @@ with tab_tv:
         st.dataframe(df_scan, use_container_width=True, hide_index=True)
     else:
         st.info("Piyasa taraması bekleniyor...")
+
+with tab_gecmis:
+    st.markdown("### 📚 Geçmiş Performans (SQLite Veritabanı)")
+    stats = data_logger.basari_orani_getir(son_n=100)
+    
+    st.markdown("#### Kümülatif Kâr/Zarar Başarısı (Son 100 İşlem)")
+    gc1, gc2, gc3, gc4 = st.columns(4)
+    gc1.metric("Toplam İşlem", stats["toplam"])
+    gc2.metric("Kârlı Kapanış", stats["karli"])
+    gc3.metric("Zararlı Kapanış", stats["zarari"])
+    gc4.metric("Başarı Oranı", f"%{stats['oran']}")
+    
+    st.markdown("---")
+    islemler = data_logger.son_islemler_getir(limit=50)
+    if islemler:
+        df_log = pd.DataFrame(islemler)
+        
+        # PNL Grafiği
+        st.markdown("#### Yakın Geçmiş PNL Trendi ($)")
+        # Renklendirme için pozitif ve negatif değerleri ayır
+        st.bar_chart(df_log.set_index("zaman")["pnl"])
+        
+        st.markdown("#### Son Kapanan İşlemler Defteri")
+        # Kolonları isimlendir
+        df_ui = df_log.rename(columns={
+            "zaman": "Tarih", "sembol": "Coin", "tip": "Yön", 
+            "giris": "Giriş", "cikis": "Çıkış", "pnl": "PNL ($)", 
+            "pnl_pct": "ROE (%)", "kaldirac": "Kaldıraç", 
+            "margin": "Margin", "neden": "Kapatma Nedeni"
+        })
+        st.dataframe(df_ui, use_container_width=True, hide_index=True)
+    else:
+        st.info("Henüz veritabanında işlem kaydı yok. Bot işlem yapmaya başladığında veriler buraya yansıyacaktır.")
 
 
 # ─────────────────────────────────────────────

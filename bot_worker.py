@@ -19,6 +19,7 @@ import ccxt.pro as ccxtpro
 import ai_engine
 import config as cfg
 import persistent_state as ps
+import data_logger
 
 
 # ─────────────────────────────────────────────
@@ -55,6 +56,13 @@ class GlobalBotState:
             "fonlama_orani": 0.0,
             "fonlama_riski": "Yok",
             "mtf_konsensus": "KARARSIZ",
+
+            # v7 State
+            "usdt_d_deger": 0.0,
+            "usdt_d_trend": "YATAY",
+            "martingale_ardisik_kayip": 0,
+            "martingale_carpan": 1.0,
+            "baslangic_zamani": time.time(),
 
             "exchange_adi": cfg.EXCHANGE_NAME,
             "mod": "⚡ Agresif Mod",
@@ -162,6 +170,7 @@ MOD_PRESETLERI = {
     "⚡ Agresif Mod": {"risk": 1.0, "sma_kisa": 7, "sma_uzun": 25, "aralik_carpan": 0.5},
     "🌱 Soft Kar Modu": {"risk": 0.30, "sma_kisa": 14, "sma_uzun": 50, "aralik_carpan": 1.5},
     "💎 Ultra-Scalper": {"risk": 0.15, "sma_kisa": 5, "sma_uzun": 15, "aralik_carpan": 0.1},
+    "🔥 HFT Scalper": {"risk": 0.10, "sma_kisa": 3, "sma_uzun": 10, "aralik_carpan": 0.05},
 }
 
 
@@ -238,6 +247,7 @@ def islem_kapat(state, sembol, fiyat, neden, is_breakout=False, is_liq=False):
     margin = poz["islem_margin"]
     kaldirac = poz["islem_kaldirac"]
     aktif_pnl = pnl_hesapla(eski_poz, poz["giris_fiyati"], fiyat, margin * kaldirac, kaldirac)
+    poz_giris = poz["giris_fiyati"]  # v7: SQLite için sakla
 
     reel_getiri = margin + aktif_pnl
     state["bakiye"] += reel_getiri
@@ -254,6 +264,33 @@ def islem_kapat(state, sembol, fiyat, neden, is_breakout=False, is_liq=False):
         "bakiye_usdt": round(state["bakiye"], 2), "kar_zarar": kz_str, "ai_notu": neden
     })
     log_ekle(f"{icon} POZİSYON KAPATILDI: {sembol} {eski_poz}. PNL: {kz_str}", state, is_breakout, is_liq)
+
+    # v7: Martingale Takibi
+    if aktif_pnl < 0:
+        state["martingale_ardisik_kayip"] = state.get("martingale_ardisik_kayip", 0) + 1
+        kayip_n = state["martingale_ardisik_kayip"]
+        if kayip_n >= 3:
+            state["martingale_carpan"] = 1.0  # 3+ kayıp: geri çekil
+            log_ekle(f"⚠️ MARTINGALE DURDURULDU: {kayip_n} ardışık kayıp. Çarpan 1.0x'e düştü.", state)
+        else:
+            state["martingale_carpan"] = min(2 ** kayip_n, 4.0)
+            log_ekle(f"🎲 MARTINGALE: {kayip_n}. kayıp. Sonraki margin çarpanı: {state['martingale_carpan']:.0f}x", state)
+    else:
+        if state.get("martingale_ardisik_kayip", 0) > 0:
+            log_ekle(f"✅ MARTINGALE RESET: Kârlı işlem. Çarpan 1.0x'e döndü.", state)
+        state["martingale_ardisik_kayip"] = 0
+        state["martingale_carpan"] = 1.0
+
+    # v7: SQLite'a işlem kapanışı kaydet
+    try:
+        pnl_pct_val = (aktif_pnl / margin * 100) if margin > 0 else 0
+        data_logger.islem_kaydet(
+            sembol=sembol, tip=eski_poz, giris_fiyati=poz_giris,
+            cikis_fiyati=fiyat, pnl=aktif_pnl, pnl_pct=pnl_pct_val,
+            kaldirac=kaldirac, margin=margin, neden=neden
+        )
+    except Exception:
+        pass
 
 
 def dinamik_stop_loss_hesapla(exchange, sembol: str, pozisyon_tipi: str, giris_fiyati: float, kaldirac: int, atr_carpan: float = 1.5) -> float:
@@ -391,7 +428,23 @@ def ws_fiyat_dinleyici(state: dict, lock: threading.Lock, dur_sinyali: threading
                                 else:
                                     # 💎 Ultra-Scalper: %1.5 ROE'de tüm pozisyonu kapat
                                     is_scalper = state.get("mod") == "💎 Ultra-Scalper"
-                                    if is_scalper and pnl_pct >= 1.5 and not poz.get("kademeli_tp_yapildi", False):
+                                    is_hft = state.get("mod") == "🔥 HFT Scalper"
+
+                                    # v7: 🔥 HFT Scalper: %0.5 ROE'de TP, %0.3 SL, 2dk timeout
+                                    if is_hft:
+                                        if pnl_pct >= 0.5:
+                                            kapanacak_semboller.append(p_sembol)
+                                            poz["kapat_nedeni"] = f"🔥 HFT TP: %{pnl_pct:.1f} ROE hedef yakalandı."
+                                            log_ekle(f"🔥 HFT TP: {p_sembol} %{pnl_pct:.1f} ROE → Tam pozisyon kapatılıyor.", state, is_breakout=True)
+                                        elif pnl_pct <= -0.3:
+                                            kapanacak_semboller.append(p_sembol)
+                                            poz["kapat_nedeni"] = f"🔥 HFT SL: %{pnl_pct:.1f} ROE zarar."
+                                            log_ekle(f"🔥 HFT SL: {p_sembol} %{pnl_pct:.1f} ROE → Stop-loss.", state)
+                                        elif (time.time() - poz.get("acilis_zamani", 0)) > 120:  # 2 dakika
+                                            kapanacak_semboller.append(p_sembol)
+                                            poz["kapat_nedeni"] = f"🔥 HFT TIMEOUT: 2 dakika doldu, hareket yok."
+                                            log_ekle(f"🔥 HFT TIMEOUT: {p_sembol} 2dk süre doldu. Kapatılıyor.", state)
+                                    elif is_scalper and pnl_pct >= 1.5 and not poz.get("kademeli_tp_yapildi", False):
                                         kapanacak_semboller.append(p_sembol)
                                         poz["kapat_nedeni"] = f"💎 SCALPER TP: %{pnl_pct:.1f} ROE ile hedef yakalandı."
                                         log_ekle(f"💎 SCALPER TP: {p_sembol} %{pnl_pct:.1f} ROE → Tam pozisyon kapatılıyor.", state, is_breakout=True)
@@ -622,6 +675,36 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                     state["fonlama_orani"] = fonlama.get("oran", 0)
                     state["fonlama_riski"] = fonlama.get("risk", "Yok")
 
+                    # v7: USDT Dominance kontrolü
+                    try:
+                        usdt_d = ai_engine.usdt_dominance_getir()
+                        state["usdt_d_deger"] = usdt_d.get("deger", 0)
+                        state["usdt_d_trend"] = usdt_d.get("trend", "YATAY")
+                        if usdt_d.get("etki") == "LONG_AZALT":
+                            log_ekle(f"📊 USDT.D YÜKSELİYOR: %{usdt_d.get('deger', 0):.1f} → LONG iştahı azaltılıyor.", state)
+                    except Exception:
+                        pass
+
+                    # v7: 24 Saatlik Döngü Reset Kontrolü
+                    baslangic_z = state.get("baslangic_zamani", 0)
+                    if baslangic_z > 0 and (time.time() - baslangic_z) >= 86400:  # 24 saat
+                        mevcut_bakiye = state["bakiye"] + aktif_margin_toplami(state.get("aktif_pozisyonlar", {}))
+                        # Tüm pozisyonları kapat
+                        kapanacak_24 = list(state.get("aktif_pozisyonlar", {}).keys())
+                        fiyatlar_24 = state.get("guncel_fiyatlar", {})
+                        for s24 in kapanacak_24:
+                            p24 = state["aktif_pozisyonlar"].get(s24)
+                            if p24:
+                                f24 = fiyatlar_24.get(s24, p24.get("giris_fiyati", 0))
+                                if f24 > 0:
+                                    islem_kapat(state, s24, f24, "🔄 24S DÖNGÜ: Otomatik kapama")
+                        # Bakiye güncelle ve reset
+                        state["gun_baslangic_bakiye"] = state["bakiye"]
+                        state["baslangic_zamani"] = time.time()
+                        state["martingale_ardisik_kayip"] = 0
+                        state["martingale_carpan"] = 1.0
+                        log_ekle(f"🔄 24S DÖNGÜ TAMAMLANDI: Yeni base bakiye: ${state['bakiye']:.2f}. İstatistikler sıfırlandı.", state, is_breakout=True)
+
                 if dur_sinyali.is_set():
                     break
 
@@ -770,10 +853,21 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         tavsiye_kaldirac = karar_paketi.get("tavsiye_kaldirac", 10)
                         tavsiye_oran = karar_paketi.get("tavsiye_oran", 0.10)
 
+                        # v7: USDT.D LONG baskılama
+                        if sinyal == "LONG" and state.get("usdt_d_trend") == "YUKARI":
+                            tavsiye_oran = tavsiye_oran * 0.7  # %30 azalt
+                            tavsiye_kaldirac = max(1, int(tavsiye_kaldirac * 0.7))
+                            log_ekle(f"📊 USDT.D BASKILAMA: LONG oran/kaldıraç %30 azaltıldı. Oran: {tavsiye_oran:.2f}, Kaldıraç: {tavsiye_kaldirac}x", state)
+
+                        # v7: Martingale çarpanı uygula
+                        mart_carpan = state.get("martingale_carpan", 1.0)
+
                         risk_limit = 0.40 if zaman_baski_carpani >= 4.0 else 0.30 if zaman_baski_carpani >= 3.0 else 0.20
                         kullanilabilir_max = min(tavsiye_oran, risk_limit - (risk_pct / 100.0))
                         if kullanilabilir_max > 0:
-                            margin = state["bakiye"] * kullanilabilir_max
+                            margin = state["bakiye"] * kullanilabilir_max * mart_carpan
+                            # v7: Martingale güvenlik limiti: bakiyenin %50'sini geçemez
+                            margin = min(margin, state["bakiye"] * 0.5)
                             buyukluk_usdt = margin * tavsiye_kaldirac
 
                             # v6: ATR tabanlı dinamik stop-loss hesapla

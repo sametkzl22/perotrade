@@ -226,16 +226,27 @@ def state_yukle(dosya: str = STATE_FILE) -> dict:
         else:
             print(f"💰 REAL Mod Yüklendi! (Bakiye: ${state.get('bakiye', 0):.2f})")
 
-        # Yeni gün → Compounding
-        bugun = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        if state.get("son_gun", "") != bugun:
+        # v7: 24 Saatlik Döngü -> baslangic_zamani ile sıkı kontrol (86400s)
+        baslangic_z = state.get("baslangic_zamani", 0)
+        simdi = time.time()
+        
+        # İlk başlangıç için zaman belirle
+        if baslangic_z == 0:
+            state["baslangic_zamani"] = simdi
+            state["son_gun"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        # 24 Saat dolduysa Temiz Reset & Compounding
+        elif (simdi - baslangic_z) >= 86400:
+            print(f"🔄 24S Döngü Doldu (Load Anı). Kâr/Zarar base bakiyeye eklendi.")
             state["gun_baslangic_bakiye"] = state.get("bakiye", 100.0)
-            state["son_gun"] = bugun
+            state["baslangic_zamani"] = simdi
+            state["son_gun"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             state["gun_sayaci"] = state.get("gun_sayaci", 0) + 1
+            state["is_breakout"] = False  # Berserker'dan çık
+            state["martingale_ardisik_kayip"] = 0
+            state["martingale_carpan"] = 1.0
             state_kaydet(state, dosya)
         else:
-            # Dışarıdan Bakiye Ekleme Kontrolü (Aynı Gün İçerisinde)
-            # Eğer mevcut bakiye, gün başlangıcından %50 daha fazlaysa, bu manuel eklemedir.
+            # Dışarıdan Bakiye Ekleme Kontrolü
             mevcut = state.get("bakiye", 0.0)
             baslangic = state.get("gun_baslangic_bakiye", 0.0)
             if baslangic > 0 and ((mevcut - baslangic) / baslangic) >= 0.50:
