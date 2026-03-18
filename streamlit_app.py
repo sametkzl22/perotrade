@@ -17,7 +17,7 @@ import streamlit.components.v1 as components
 
 import config as cfg
 import persistent_state as ps
-from bot_worker import BotWorker, GlobalBotState, aktif_margin_toplami, pnl_hesapla
+from bot_worker import BotWorker, GlobalBotState, aktif_margin_toplami, pnl_hesapla, pnl_hesapla_coklu
 import data_logger
 
 
@@ -212,6 +212,13 @@ with st.sidebar:
     if haber_veto_aktif != cfg.ENABLE_NEWS_VETO:
         cfg.ENABLE_NEWS_VETO = haber_veto_aktif
 
+    # Opsiyonel Martingale Toggle
+    mart_aktif = st.toggle("🔄 Martingale Stratejisi (Deneysel)", value=S.get("martingale_aktif", False), 
+                           help="Sadece kayıplı işlemlerde bakiyeyi korumak için margin miktarını katlayarak yeni işlem açar.")
+    if mart_aktif != S.get("martingale_aktif", False):
+        worker.state.set("martingale_aktif", mart_aktif)
+        worker.state.save_to_persistent()
+
     # Bot durumu gösterge
     if worker.is_running:
         st.success(f"🟢 Bot Çalışıyor: {S.get('bot_durumu', 'Çalışıyor')}")
@@ -244,16 +251,22 @@ with st.sidebar:
         time.sleep(1)
         st.rerun()
 
-    # 48 Saatlik Demo Takibi
+    # Esnek Demo Test Süresi
     if not S.get("use_real_api", False):
         st.sidebar.markdown("---")
-        st.sidebar.markdown("### ⏳ 48 Saatlik Demo Testi")
+        st.sidebar.markdown("### ⏳ Demo Test Süresi")
+        hedef_saat = st.sidebar.number_input("Test Süresi (Saat)", min_value=1, max_value=720, value=int(S.get("hedef_sure_saat", 48)))
+        if hedef_saat != S.get("hedef_sure_saat", 48.0):
+            worker.state.set("hedef_sure_saat", float(hedef_saat))
+            worker.state.save_to_persistent()
+            
         bas_zamani = S.get("baslangic_zamani", 0)
         gecen_saniye = (time.time() - bas_zamani) if bas_zamani > 0 else 0
-        kalan_saniye = max(0, (48 * 3600) - gecen_saniye)
+        hedef_saniye = hedef_saat * 3600
+        kalan_saniye = max(0.0, hedef_saniye - gecen_saniye)
         saat = int(kalan_saniye // 3600)
         dakika = int((kalan_saniye % 3600) // 60)
-        ilerleme_pct = min(1.0, gecen_saniye / (48 * 3600))
+        ilerleme_pct = min(1.0, gecen_saniye / hedef_saniye) if hedef_saniye > 0 else 1.0
 
         st.sidebar.progress(ilerleme_pct)
         st.sidebar.markdown(f"**Kalan Süre:** {saat}s {dakika}d")
@@ -264,17 +277,36 @@ with st.sidebar:
             pozitifler = [i for i in kapanan_islemler if isinstance(i.get("kar_zarar"), (int, float)) and float(str(i["kar_zarar"]).replace(" USDT", "").replace("+", "")) > 0]
             basari_orani = (len(pozitifler) / len(kapanan_islemler) * 100) if kapanan_islemler else 0
 
-            st.sidebar.success(f"🎉 **2 Günlük Demo Tamamlandı!**\n\n"
+            st.sidebar.success(f"🎉 **{int(hedef_saat)} Saatlik Demo Tamamlandı!**\n\n"
                                f"📊 **Toplam İşlem:** {len(kapanan_islemler)}\n"
                                f"🎯 **Başarı Oranı:** %{basari_orani:.1f}\n"
                                f"💰 **Toplam Kâr:** ${state_bakiye - 100.0:.2f}")
+
+# ─────────────────────────────────────────────
+# GLOBAL HEADER / METRICS (Ortak)
+# ─────────────────────────────────────────────
+usdt_d = S.get("usdt_d_deger", 0.0)
+usdt_trend = S.get("usdt_d_trend", "YATAY")
+trend_ikon = "⬆️" if usdt_trend == "YUKARI" else "⬇️" if usdt_trend == "ASAGI" else "➡️"
+trend_renk = "#ff4444" if usdt_trend == "YUKARI" else "#00ff88" if usdt_trend == "ASAGI" else "#cccccc"
+global_aktif_pnl = pnl_hesapla_coklu(S.get("aktif_pozisyonlar", {}), S.get("guncel_fiyatlar", {}))
+pnl_renk = "#00ff88" if global_aktif_pnl >= 0 else "#ff4444"
 
 
 # ─────────────────────────────────────────────
 # LOG-ONLY MODE
 # ─────────────────────────────────────────────
 if st.session_state.view_mode == "📜 Sadece İşlem Logları":
-    st.markdown("<h1 style='color: #66fcf1;'>📜 İşlem Logları (Full Screen)</h1>", unsafe_allow_html=True)
+    st.markdown(f"""
+    <div class='dashboard-header' style='display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;'>
+        <h1 style='color: #66fcf1; margin: 0; font-size: 24px;'>📜 İşlem Logları</h1>
+        <div style='display:flex; gap: 20px; font-size: 15px;'>
+            <span style='color: #c5c6c7; font-weight: bold;'>Bakiye: ${S.get('bakiye', 0):.2f}</span>
+            <span style='color: {pnl_renk}; font-weight: bold;'>Aktif PNL: ${global_aktif_pnl:+.2f}</span>
+            <span style='color:{trend_renk}; font-weight:800;'>USDT.D: %{usdt_d:.2f} {trend_ikon}</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
     # Düşünce Günlüğü
     st.markdown("### 🧠 AI Düşünce Günlüğü")
@@ -318,11 +350,6 @@ elif "Hedef" in S.get("bot_durumu", ""):
     status_class = "status-target"
 
 col_durum.markdown(f"<div style='text-align:right; margin-top:20px;'><span class='status-badge {status_class}'>Durum: {S.get('bot_durumu', 'Durduruldu')}</span></div>", unsafe_allow_html=True)
-
-usdt_d = S.get("usdt_d_deger", 0.0)
-usdt_trend = S.get("usdt_d_trend", "YATAY")
-trend_ikon = "⬆️" if usdt_trend == "YUKARI" else "⬇️" if usdt_trend == "ASAGI" else "➡️"
-trend_renk = "#ff4444" if usdt_trend == "YUKARI" else "#00ff88" if usdt_trend == "ASAGI" else "#cccccc"
 
 st.markdown(f"""
 <div class='dashboard-header' style='display: flex; justify-content: space-between; align-items: center;'>

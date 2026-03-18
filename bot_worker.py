@@ -169,8 +169,7 @@ class GlobalBotState:
 MOD_PRESETLERI = {
     "⚡ Agresif Mod": {"risk": 1.0, "sma_kisa": 7, "sma_uzun": 25, "aralik_carpan": 0.5},
     "🌱 Soft Kar Modu": {"risk": 0.30, "sma_kisa": 14, "sma_uzun": 50, "aralik_carpan": 1.5},
-    "💎 Ultra-Scalper": {"risk": 0.15, "sma_kisa": 5, "sma_uzun": 15, "aralik_carpan": 0.1},
-    "🔥 HFT Scalper": {"risk": 0.10, "sma_kisa": 3, "sma_uzun": 10, "aralik_carpan": 0.05},
+    "💎 Ultra-Scalper": {"risk": 0.10, "sma_kisa": 3, "sma_uzun": 10, "aralik_carpan": 0.05},
 }
 
 
@@ -265,19 +264,23 @@ def islem_kapat(state, sembol, fiyat, neden, is_breakout=False, is_liq=False):
     })
     log_ekle(f"{icon} POZİSYON KAPATILDI: {sembol} {eski_poz}. PNL: {kz_str}", state, is_breakout, is_liq)
 
-    # v7: Martingale Takibi
-    if aktif_pnl < 0:
-        state["martingale_ardisik_kayip"] = state.get("martingale_ardisik_kayip", 0) + 1
-        kayip_n = state["martingale_ardisik_kayip"]
-        if kayip_n >= 3:
-            state["martingale_carpan"] = 1.0  # 3+ kayıp: geri çekil
-            log_ekle(f"⚠️ MARTINGALE DURDURULDU: {kayip_n} ardışık kayıp. Çarpan 1.0x'e düştü.", state)
+    # v7.1: Opsiyonel Martingale Takibi
+    if state.get("martingale_aktif", False):
+        if aktif_pnl < 0:
+            state["martingale_ardisik_kayip"] = state.get("martingale_ardisik_kayip", 0) + 1
+            kayip_n = state["martingale_ardisik_kayip"]
+            if kayip_n >= 3:
+                state["martingale_carpan"] = 1.0  # 3+ kayıp: geri çekil
+                log_ekle(f"⚠️ MARTINGALE DURDURULDU: {kayip_n} ardışık kayıp. Çarpan 1.0x'e düştü.", state)
+            else:
+                state["martingale_carpan"] = min(2 ** kayip_n, 4.0)
+                log_ekle(f"🎲 MARTINGALE: {kayip_n}. kayıp. Sonraki margin çarpanı: {state['martingale_carpan']:.0f}x", state)
         else:
-            state["martingale_carpan"] = min(2 ** kayip_n, 4.0)
-            log_ekle(f"🎲 MARTINGALE: {kayip_n}. kayıp. Sonraki margin çarpanı: {state['martingale_carpan']:.0f}x", state)
+            if state.get("martingale_ardisik_kayip", 0) > 0:
+                log_ekle(f"✅ MARTINGALE RESET: Kârlı işlem. Çarpan 1.0x'e döndü.", state)
+            state["martingale_ardisik_kayip"] = 0
+            state["martingale_carpan"] = 1.0
     else:
-        if state.get("martingale_ardisik_kayip", 0) > 0:
-            log_ekle(f"✅ MARTINGALE RESET: Kârlı işlem. Çarpan 1.0x'e döndü.", state)
         state["martingale_ardisik_kayip"] = 0
         state["martingale_carpan"] = 1.0
 
@@ -426,28 +429,22 @@ def ws_fiyat_dinleyici(state: dict, lock: threading.Lock, dur_sinyali: threading
                                     if dsl_hit:
                                         islem_kapat(state, p_sembol, f_s, f"🛡️ DİNAMİK SL TETİKLENDİ: ATR Stop ${dsl:.4f}")
                                 else:
-                                    # 💎 Ultra-Scalper: %1.5 ROE'de tüm pozisyonu kapat
                                     is_scalper = state.get("mod") == "💎 Ultra-Scalper"
-                                    is_hft = state.get("mod") == "🔥 HFT Scalper"
 
-                                    # v7: 🔥 HFT Scalper: %0.5 ROE'de TP, %0.3 SL, 2dk timeout
-                                    if is_hft:
+                                    # v7.1: 💎 Ultra-Scalper (HFT logic incorporated): %0.5 ROE TP, %0.3 SL, 2dk timeout
+                                    if is_scalper:
                                         if pnl_pct >= 0.5:
                                             kapanacak_semboller.append(p_sembol)
-                                            poz["kapat_nedeni"] = f"🔥 HFT TP: %{pnl_pct:.1f} ROE hedef yakalandı."
-                                            log_ekle(f"🔥 HFT TP: {p_sembol} %{pnl_pct:.1f} ROE → Tam pozisyon kapatılıyor.", state, is_breakout=True)
+                                            poz["kapat_nedeni"] = f"💎 SCALPER TP: %{pnl_pct:.1f} ROE hedef yakalandı."
+                                            log_ekle(f"💎 SCALPER TP: {p_sembol} %{pnl_pct:.1f} ROE → Tam pozisyon kapatılıyor.", state, is_breakout=True)
                                         elif pnl_pct <= -0.3:
                                             kapanacak_semboller.append(p_sembol)
-                                            poz["kapat_nedeni"] = f"🔥 HFT SL: %{pnl_pct:.1f} ROE zarar."
-                                            log_ekle(f"🔥 HFT SL: {p_sembol} %{pnl_pct:.1f} ROE → Stop-loss.", state)
+                                            poz["kapat_nedeni"] = f"💎 SCALPER SL: %{pnl_pct:.1f} ROE zarar."
+                                            log_ekle(f"💎 SCALPER SL: {p_sembol} %{pnl_pct:.1f} ROE → Stop-loss.", state)
                                         elif (time.time() - poz.get("acilis_zamani", 0)) > 120:  # 2 dakika
                                             kapanacak_semboller.append(p_sembol)
-                                            poz["kapat_nedeni"] = f"🔥 HFT TIMEOUT: 2 dakika doldu, hareket yok."
-                                            log_ekle(f"🔥 HFT TIMEOUT: {p_sembol} 2dk süre doldu. Kapatılıyor.", state)
-                                    elif is_scalper and pnl_pct >= 1.5 and not poz.get("kademeli_tp_yapildi", False):
-                                        kapanacak_semboller.append(p_sembol)
-                                        poz["kapat_nedeni"] = f"💎 SCALPER TP: %{pnl_pct:.1f} ROE ile hedef yakalandı."
-                                        log_ekle(f"💎 SCALPER TP: {p_sembol} %{pnl_pct:.1f} ROE → Tam pozisyon kapatılıyor.", state, is_breakout=True)
+                                            poz["kapat_nedeni"] = f"💎 SCALPER TIMEOUT: 2 dakika doldu, hareket yok."
+                                            log_ekle(f"💎 SCALPER TIMEOUT: {p_sembol} 2dk süre doldu. Kapatılıyor.", state)
                                     elif is_scalper and pnl_pct >= 0.5 and not poz.get("ts_aktif"):
                                         # Scalper trailing stop: giriş fiyatının %0.3 yakınına çek
                                         poz["ts_aktif"] = True
