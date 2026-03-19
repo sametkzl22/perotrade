@@ -256,9 +256,11 @@ def state_yukle(dosya: str = STATE_FILE) -> dict:
             mevcut = state.get("bakiye", 0.0)
             baslangic = state.get("gun_baslangic_bakiye", 0.0)
             if baslangic > 0 and ((mevcut - baslangic) / baslangic) >= 0.50:
-                print(f"🔄 Manuel bakiye artışı algılandı! Gün başlangıç {baslangic:.2f} -> {mevcut:.2f} eşitlendi.")
-                state["gun_baslangic_bakiye"] = mevcut
-                state_kaydet(state, dosya)
+                print(f"🔄 Manuel bakiye artışı algılandı! (Gün başlangıç bakiyesi artık gün ortasında DÜŞÜRÜLMÜYOR/EŞİTLENMİYOR).")
+                # Hedefe erken varılmasını engelliyordu, bu yüzden gün sonuna kadar sabit bırakıldı:
+                # state["gun_baslangic_bakiye"] = mevcut
+                # state_kaydet(state, dosya)
+
 
         memory["last_state"] = state
         return state

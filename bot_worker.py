@@ -940,11 +940,31 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         islem_kapat_with_retry(state, secilen_sembol, fiyat, karar_paketi.get("dusunce", ""), exchange)
 
                     if state.get("pik_bakiye", 0) >= state.get("hedef_bakiye", 100):
-                        state["bot_durumu"] = "🎯 Hedefi Ulaştı!"
-                        state["bot_calisiyor"] = False
-                        log_ekle("🏆 HEDEF ULAŞILDI! Bot durduruluyor.", state)
-                        islem_gecmisi_kaydet(state.get("islem_gecmisi", []))
-                        dur_sinyali.set()
+                        if state.get("mod", "") == "💎 Ultra-Scalper":
+                            if not state.get("scalper_hedef_loglandi", False):
+                                log_ekle("💎 Günlük Hedef Aşıldı - İşlemlere Devam Ediliyor (Ultra-Scalper)", state)
+                                state["scalper_hedef_loglandi"] = True
+                        else:
+                            import data_logger
+                            baslangic_zaman_ts = state.get("baslangic_zamani", 0)
+                            if baslangic_zaman_ts > 0:
+                                gercek_pnl = data_logger.gercek_pnl_getir(baslangic_zaman_ts)
+                                hedef_farki = state.get("hedef_bakiye", 100) - state.get("gun_baslangic_bakiye", 0)
+                                if (hedef_farki > 0 and gercek_pnl >= hedef_farki * 0.95) or (gercek_pnl >= hedef_farki and hedef_farki > 0):
+                                    state["bot_durumu"] = "🎯 Hedefi Ulaştı!"
+                                    state["bot_calisiyor"] = False
+                                    log_ekle(f"🏆 HEDEF ULAŞILDI! (Gerçek PNL: ${gercek_pnl:.2f}) Bot durduruluyor.", state)
+                                    islem_gecmisi_kaydet(state.get("islem_gecmisi", []))
+                                    dur_sinyali.set()
+                                else:
+                                    # Açık kardan dolayı pik yapmış olabilir, henüz realize edilmedi
+                                    state["pik_bakiye"] = max(state.get("bakiye", 0), state.get("hedef_bakiye", 100) - 2.0)
+                            else:
+                                state["bot_durumu"] = "🎯 Hedefi Ulaştı!"
+                                state["bot_calisiyor"] = False
+                                log_ekle("🏆 HEDEF ULAŞILDI! Bot durduruluyor.", state)
+                                islem_gecmisi_kaydet(state.get("islem_gecmisi", []))
+                                dur_sinyali.set()
                     break
 
             # Persistent State: Her 60 saniyede bir veya bakiye değiştiğinde (Atomic Save) kaydet

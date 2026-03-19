@@ -213,3 +213,21 @@ def en_iyi_korelasyonlari_getir(limit: int = 50) -> dict:
         }
     except Exception:
         return {}
+
+
+def gercek_pnl_getir(baslangic_zamani_timestamp: float) -> float:
+    """Verilen UNIX zaman damgasından (baslangic_zamani) bu yana trade_logs.db'deki realize edilmiş toplam PNL'yi döner."""
+    try:
+        dt_iso = datetime.fromtimestamp(baslangic_zamani_timestamp, tz=timezone.utc).isoformat()
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT SUM(pnl) FROM islem_log WHERE zaman >= ?", (dt_iso,)
+        ).fetchone()
+        conn.close()
+        
+        if row and row[0] is not None:
+            return float(row[0])
+        return 0.0
+    except Exception as e:
+        print(f"⚠️ PNL Doğrulama Hatası: {e}")
+        return 0.0

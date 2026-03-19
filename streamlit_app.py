@@ -384,7 +384,7 @@ hedef_pct = 10.0
 
 gauge_pct = max(0.0, min(gunluk_pnl / hedef_pct, 1.0)) if hedef_pct > 0 else 0.0
 if gunluk_pnl >= hedef_pct:
-    gauge_renk, gauge_emoji, gauge_durum = "#00ff88", "🏆", "HEDEF TAMAM!"
+    gauge_renk, gauge_emoji, gauge_durum = "#00ff88", "🏆", "Hedef Tamamlandı (Extra Kârda)"
 elif gunluk_pnl >= 0:
     gauge_renk, gauge_emoji, gauge_durum = "#66fcf1", "📈", "Kârda"
 else:
