@@ -171,3 +171,45 @@ def skor_gecmisi_getir(sembol: str, limit: int = 50) -> list:
         return [{"zaman": r[0], "skor": r[1], "fiyat": r[2], "karar": r[3]} for r in rows]
     except Exception:
         return []
+
+
+def en_iyi_korelasyonlari_getir(limit: int = 50) -> dict:
+    """Geçmişteki kârlı işlemlerin ortalama volatilite ve hacim artışı değerlerini döner."""
+    try:
+        conn = _get_conn()
+        # PNL > 0 olan işlemleri çek
+        rows = conn.execute(
+            "SELECT sembol, zaman FROM islem_log WHERE pnl > 0 ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        
+        if not rows:
+            conn.close()
+            return {}
+            
+        vol_total = 0.0
+        hacim_total = 0.0
+        sayac = 0
+        
+        for sembol, zaman in rows:
+            # İşlem zamanından önceki en son tarama kaydını al
+            t_row = conn.execute(
+                "SELECT volatilite, hacim_artis FROM tarama_log WHERE sembol=? AND zaman <= ? ORDER BY id DESC LIMIT 1",
+                (sembol, zaman)
+            ).fetchone()
+            if t_row:
+                vol_total += t_row[0] or 0
+                hacim_total += t_row[1] or 0
+                sayac += 1
+                
+        conn.close()
+        
+        if sayac == 0:
+            return {}
+            
+        return {
+            "ortalama_volatilite": round(vol_total / sayac, 2),
+            "ortalama_hacim_artis": round(hacim_total / sayac, 2),
+            "orneklem_sayisi": sayac
+        }
+    except Exception:
+        return {}

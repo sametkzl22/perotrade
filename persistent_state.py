@@ -18,6 +18,7 @@ import sys
 import base64
 import tempfile
 import shutil
+import time
 from datetime import datetime, timezone
 
 # ──────────────────────────────────────────────
@@ -234,16 +235,21 @@ def state_yukle(dosya: str = STATE_FILE) -> dict:
         if baslangic_z == 0:
             state["baslangic_zamani"] = simdi
             state["son_gun"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        # 24 Saat dolduysa Temiz Reset & Compounding
+        # v8 24 Saat dolduysa Temiz Reset & Compounding
         elif (simdi - baslangic_z) >= 86400:
             print(f"🔄 24S Döngü Doldu (Load Anı). Kâr/Zarar base bakiyeye eklendi.")
             state["gun_baslangic_bakiye"] = state.get("bakiye", 100.0)
+            state["baslangic_bakiye"] = state.get("bakiye", 100.0)
+            state["pik_bakiye"] = state.get("bakiye", 100.0)
             state["baslangic_zamani"] = simdi
             state["son_gun"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             state["gun_sayaci"] = state.get("gun_sayaci", 0) + 1
+            state["gunluk_pik_kar"] = 0.0
             state["is_breakout"] = False  # Berserker'dan çık
             state["martingale_ardisik_kayip"] = 0
             state["martingale_carpan"] = 1.0
+            state["islem_gecmisi"] = []
+            state["toplam_islem_sayisi"] = 0
             state_kaydet(state, dosya)
         else:
             # Dışarıdan Bakiye Ekleme Kontrolü

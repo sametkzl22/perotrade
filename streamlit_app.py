@@ -297,13 +297,16 @@ pnl_renk = "#00ff88" if global_aktif_pnl >= 0 else "#ff4444"
 # LOG-ONLY MODE
 # ─────────────────────────────────────────────
 if st.session_state.view_mode == "📜 Sadece İşlem Logları":
+    margin_total = aktif_margin_toplami(S.get("aktif_pozisyonlar", {}))
+    anlik_toplam_bakiye = S.get("bakiye", 0) + margin_total + global_aktif_pnl
+
     st.markdown(f"""
     <div class='dashboard-header' style='display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;'>
         <h1 style='color: #66fcf1; margin: 0; font-size: 24px;'>📜 İşlem Logları</h1>
         <div style='display:flex; gap: 20px; font-size: 15px;'>
-            <span style='color: #c5c6c7; font-weight: bold;'>Bakiye: ${S.get('bakiye', 0):.2f}</span>
-            <span style='color: {pnl_renk}; font-weight: bold;'>Aktif PNL: ${global_aktif_pnl:+.2f}</span>
-            <span style='color:{trend_renk}; font-weight:800;'>USDT.D: %{usdt_d:.2f} {trend_ikon}</span>
+            <span style='color: #c5c6c7; font-weight: bold;'>📉 Toplam Varlık: ${anlik_toplam_bakiye:,.2f}</span>
+            <span style='color: {pnl_renk}; font-weight: bold;'>💵 Aktif PNL: ${global_aktif_pnl:+.2f}</span>
+            <span style='color:{trend_renk}; font-weight:800;'>📊 USDT.D: %{usdt_d:.2f} {trend_ikon}</span>
         </div>
     </div>
     """, unsafe_allow_html=True)

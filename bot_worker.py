@@ -364,27 +364,24 @@ def ws_fiyat_dinleyici(state: dict, lock: threading.Lock, dur_sinyali: threading
                     try:
                         res = await asyncio.wait_for(asyncio.gather(*poz_tasks, return_exceptions=True), timeout=5.0)
                         
-                        guncel_olusan = {}
                         for i, s in enumerate(dinlenecekler):
                             tck = res[i]
                             if isinstance(tck, dict):
                                 guncel_fiyatlar[s] = tck.get("last", guncel_fiyatlar.get(s, 0))
-                                guncel_olusan[s] = tck
-                        
-                        if sembol in guncel_olusan:
-                            tck = guncel_olusan[sembol]
-                            with lock:
-                                f = tck.get("last", state.get("fiyat", 0))
-                                state["fiyat"] = f
-                                if tck.get("percentage"): state["degisim_24s"] = tck.get("percentage")
-                                if tck.get("quoteVolume"): state["hacim_24s"] = tck.get("quoteVolume")
-
-                                sf = state.get("son_fiyat_tick", 0)
-                                if sf > 0 and f != sf:
-                                    degisim_tick = abs((f - sf) / sf) * 100
-                                    if degisim_tick >= 0.3:
-                                        state["analiz_tetikleyici"].set()
-                                state["son_fiyat_tick"] = f
+                                if s == sembol:
+                                    with lock:
+                                        f = tck.get("last", state.get("fiyat", 0))
+                                        state["fiyat"] = f
+                                        if tck.get("percentage"): state["degisim_24s"] = tck.get("percentage")
+                                        if tck.get("quoteVolume"): state["hacim_24s"] = tck.get("quoteVolume")
+                                        
+                                        sf = state.get("son_fiyat_tick", 0)
+                                        if sf > 0 and f != sf:
+                                            # v8: tick değişimi
+                                            degisim_tick = abs((f - sf) / sf) * 100
+                                            if degisim_tick >= 0.3:
+                                                state["analiz_tetikleyici"].set()
+                                        state["son_fiyat_tick"] = f
 
                         with lock:
                             state["guncel_fiyatlar"] = guncel_fiyatlar.copy()
@@ -431,20 +428,20 @@ def ws_fiyat_dinleyici(state: dict, lock: threading.Lock, dur_sinyali: threading
                                 else:
                                     is_scalper = state.get("mod") == "💎 Ultra-Scalper"
 
-                                    # v7.1: 💎 Ultra-Scalper (HFT logic incorporated): %0.5 ROE TP, %0.3 SL, 2dk timeout
+                                    # v8: 💎 Ultra-Scalper: Kesintisiz %1.5 ROE TP, %0.5 SL, 5dk timeout
                                     if is_scalper:
-                                        if pnl_pct >= 0.5:
+                                        if pnl_pct >= 1.5:
                                             kapanacak_semboller.append(p_sembol)
-                                            poz["kapat_nedeni"] = f"💎 SCALPER TP: %{pnl_pct:.1f} ROE hedef yakalandı."
-                                            log_ekle(f"💎 SCALPER TP: {p_sembol} %{pnl_pct:.1f} ROE → Tam pozisyon kapatılıyor.", state, is_breakout=True)
-                                        elif pnl_pct <= -0.3:
+                                            poz["kapat_nedeni"] = f"💎 SCALPER TP: %{pnl_pct:.1f} ROE Kâr yakalandı!"
+                                            log_ekle(f"💎 SCALPER TP: {p_sembol} %{pnl_pct:.1f} ROE → Kâr alındı, yeni fırsat aranıyor.", state, is_breakout=True)
+                                        elif pnl_pct <= -0.5:
                                             kapanacak_semboller.append(p_sembol)
-                                            poz["kapat_nedeni"] = f"💎 SCALPER SL: %{pnl_pct:.1f} ROE zarar."
-                                            log_ekle(f"💎 SCALPER SL: {p_sembol} %{pnl_pct:.1f} ROE → Stop-loss.", state)
-                                        elif (time.time() - poz.get("acilis_zamani", 0)) > 120:  # 2 dakika
+                                            poz["kapat_nedeni"] = f"💎 SCALPER SL: %{pnl_pct:.1f} ROE zararla durduruldu."
+                                            log_ekle(f"💎 SCALPER SL: {p_sembol} %{pnl_pct:.1f} ROE → Pozisyon kapatıldı.", state)
+                                        elif (time.time() - poz.get("acilis_zamani", 0)) > 300:  # 5 dakika
                                             kapanacak_semboller.append(p_sembol)
-                                            poz["kapat_nedeni"] = f"💎 SCALPER TIMEOUT: 2 dakika doldu, hareket yok."
-                                            log_ekle(f"💎 SCALPER TIMEOUT: {p_sembol} 2dk süre doldu. Kapatılıyor.", state)
+                                            poz["kapat_nedeni"] = f"💎 SCALPER TIMEOUT: 5 dakika doldu, hareket yetersiz."
+                                            log_ekle(f"💎 SCALPER TIMEOUT: {p_sembol} 5dk süre doldu. Kapatılıyor.", state)
                                     elif is_scalper and pnl_pct >= 0.5 and not poz.get("ts_aktif"):
                                         # Scalper trailing stop: giriş fiyatının %0.3 yakınına çek
                                         poz["ts_aktif"] = True
@@ -682,10 +679,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                     except Exception:
                         pass
 
-                    # v7: 24 Saatlik Döngü Reset Kontrolü
+                    # v8: 24 Saatlik Akıllı Döngü Reset Kontrolü
                     baslangic_z = state.get("baslangic_zamani", 0)
                     if baslangic_z > 0 and (time.time() - baslangic_z) >= 86400:  # 24 saat
-                        mevcut_bakiye = state["bakiye"] + aktif_margin_toplami(state.get("aktif_pozisyonlar", {}))
                         # Tüm pozisyonları kapat
                         kapanacak_24 = list(state.get("aktif_pozisyonlar", {}).keys())
                         fiyatlar_24 = state.get("guncel_fiyatlar", {})
@@ -695,12 +691,21 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 f24 = fiyatlar_24.get(s24, p24.get("giris_fiyati", 0))
                                 if f24 > 0:
                                     islem_kapat(state, s24, f24, "🔄 24S DÖNGÜ: Otomatik kapama")
-                        # Bakiye güncelle ve reset
+                        # Botu Berserker'dan çıkar, tamamen yenile
                         state["gun_baslangic_bakiye"] = state["bakiye"]
+                        state["baslangic_bakiye"] = state["bakiye"]
+                        state["pik_bakiye"] = state["bakiye"]
+                        state["gunluk_pik_kar"] = 0.0
                         state["baslangic_zamani"] = time.time()
+                        state["is_breakout"] = False
                         state["martingale_ardisik_kayip"] = 0
                         state["martingale_carpan"] = 1.0
-                        log_ekle(f"🔄 24S DÖNGÜ TAMAMLANDI: Yeni base bakiye: ${state['bakiye']:.2f}. İstatistikler sıfırlandı.", state, is_breakout=True)
+                        state["toplam_islem_sayisi"] = 0
+                        state["ai_dusunce_gunlugu"] = []
+                        if "islem_gecmisi" in state:
+                            state["islem_gecmisi"].clear()
+                        state["bot_durumu"] = "Çalışıyor"
+                        log_ekle(f"🔄 24S DÖNGÜ TAMAMLANDI: Yeni anapara ${state['bakiye']:.2f}. Tüm istatistikler sıfırlandı, yeni gün başlıyor!", state, is_breakout=True)
 
                 if dur_sinyali.is_set():
                     break
@@ -736,9 +741,24 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         karar_paketi = {"karar": "BEKLE", "dusunce": "Pazar verisi alınamadı, bekleniyor.", "aralik_sn": 30, "guven_skoru": 0, "expected_growth": 0, "tavsiye_kaldirac": 10, "tavsiye_oran": 0.10, "ozet": "Veri yok"}
                     elif state.get("ai_modu") == "OpenAI LLM" and state.get("openai_key"):
                         karar_paketi = ai_engine.llm_karar(secilen_sembol, secilen_pazar, secilen_sma, state["openai_key"], poz_durumu, btc_trend, fonlama, zaman_baski_carpani)
-                    else:
                         skor = ai_engine.kompozit_skor_hesapla(secilen_pazar, secilen_sma)
                         karar_paketi = ai_engine.mock_ai_karar(secilen_sembol, secilen_pazar, skor, poz_durumu, btc_trend, fonlama, zaman_baski_carpani, mod=state.get("mod", ""))
+
+                    # v8: Kesin Kar (Sure Profit) Korelasyon Mantığı
+                    kesin_kar = state.get("kesin_kar_parametreleri", {})
+                    if kesin_kar and isinstance(secilen_pazar, dict):
+                        vol = secilen_pazar.get("volatilite", 0)
+                        h_artis = secilen_pazar.get("hacim_artis", secilen_pazar.get("hacim_artis_pct", 0))
+                        
+                        b_vol = kesin_kar.get("ortalama_volatilite", 0)
+                        b_hacim = kesin_kar.get("ortalama_hacim_artis", 0)
+                        
+                        if b_vol > 0 and b_hacim > 0:
+                            # Volatilite ve hacim artışı tarihsel kârlı ortalamanın en az %80'iyse
+                            if h_artis >= (b_hacim * 0.8) and vol >= (b_vol * 0.8):
+                                if karar_paketi.get("karar") in ["LONG", "SHORT"]:
+                                    karar_paketi["guven_skoru"] = max(95.0, karar_paketi.get("guven_skoru", 0))
+                                    karar_paketi["dusunce"] = f"🌟 KESİN KÂR SENARYOSU! Geçmiş verilere (Vol={vol:.1f}, H.Artış={h_artis:.0f}%) uyuşuyor. " + karar_paketi.get("dusunce", "")
 
                     # NLP Haber Veto (cfg.ENABLE_NEWS_VETO ile kontrol edilir)
                     if cfg.ENABLE_NEWS_VETO:
@@ -763,19 +783,31 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                             state["gun_baslangic_bakiye"] = mevcut_bakiye
                             log_ekle(f"🔄 Bakiye Senkronizasyonu: Manuel ekleme tespit edildi. Yeni Gün Başlangıç: ${mevcut_bakiye:.2f}", state)
 
-                    # Günlük Risk Barometresi
+                    # v8: Dinamik Kâr Kilidi & Zarar Kurtarma (Recovery Mode)
                     gunluk_kar = gunluk_kar_hesapla(state)
-                    if gunluk_kar >= 10.0:
-                        karar_paketi["karar"] = "BEKLE"
-                        karar_paketi["dusunce"] = f"🛡️ GÜVENLİ MOD: Günlük kâr hedefi (%{gunluk_kar:.1f}) aşıldı!"
-                        with lock:
+                    pik_kar = state.get("gunluk_pik_kar", 0.0)
+                    if gunluk_kar > pik_kar:
+                        state["gunluk_pik_kar"] = gunluk_kar
+                        pik_kar = gunluk_kar
+
+                    hedef_pct = getattr(cfg, "DAILY_TARGET_PCT", 10.0)
+                    if pik_kar >= hedef_pct:
+                        kilit_seviyesi = hedef_pct * getattr(cfg, "PROFIT_LOCK_RATIO", 0.8)
+                        if gunluk_kar < kilit_seviyesi:
+                            karar_paketi["karar"] = "BEKLE"
+                            karar_paketi["dusunce"] = f"🛡️ GÜVENLİ MOD: Kâr kilidi (%{kilit_seviyesi:.1f}) tetiklendi! Korunuyor."
                             state["bot_durumu"] = "🛡️ Güvenli Mod"
-                            log_ekle(karar_paketi["dusunce"], state)
-                    elif gunluk_kar <= -5.0:
-                        with lock:
-                            state["bot_durumu"] = "🚨 Panik Koruması!"
-                            log_ekle(f"🚨 PANİK KORUMASI: Günlük kayıp %{gunluk_kar:.1f}!", state)
-                        karar_paketi["karar"] = "BEKLE"
+                        else:
+                            # HFT devam! Durdurmak yok.
+                            pass
+
+                    loss_stop = getattr(cfg, "DAILY_LOSS_STOP", -7.5)
+                    if gunluk_kar <= loss_stop:
+                        state["bot_durumu"] = "🩺 Kurtarma Modu"
+                        # Sadece çok güvenli sinyalleri kabul et
+                        if karar_paketi["karar"] in ["LONG", "SHORT"] and karar_paketi.get("guven_skoru", 0) < getattr(cfg, "RECOVERY_CONFIDENCE_THRESHOLD", 90):
+                            karar_paketi["karar"] = "BEKLE"
+                            karar_paketi["dusunce"] = f"🩺 KURTARMA MODU: SKOR {karar_paketi.get('guven_skoru',0):.1f} YETERSİZ (>90 Gerek). İptal."
 
                     # DCA
                     if secilen_sembol in state.get("aktif_pozisyonlar", {}):
@@ -856,8 +888,11 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                             tavsiye_kaldirac = max(1, int(tavsiye_kaldirac * 0.7))
                             log_ekle(f"📊 USDT.D BASKILAMA: LONG oran/kaldıraç %30 azaltıldı. Oran: {tavsiye_oran:.2f}, Kaldıraç: {tavsiye_kaldirac}x", state)
 
-                        # v7: Martingale çarpanı uygula
+                        # v8: Recovery Mode & Martingale çarpanı uygula
                         mart_carpan = state.get("martingale_carpan", 1.0)
+                        if state.get("bot_durumu", "") == "🩺 Kurtarma Modu":
+                            # Kurtarma modunda %90+ güvenliyiz, batan kasayı toparlamak için riski 2'ye katla
+                            mart_carpan = max(2.0, mart_carpan)
 
                         risk_limit = 0.40 if zaman_baski_carpani >= 4.0 else 0.30 if zaman_baski_carpani >= 3.0 else 0.20
                         kullanilabilir_max = min(tavsiye_oran, risk_limit - (risk_pct / 100.0))
@@ -965,6 +1000,21 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
         pass
 
 
+def korelasyon_rutini(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
+    """5 dakikada bir çalışarak en iyi geçmiş işlem koşullarını analiz edip önbelleğe alır."""
+    while not dur_sinyali.is_set():
+        try:
+            korelasyonlar = data_logger.en_iyi_korelasyonlari_getir(limit=50)
+            if korelasyonlar:
+                with lock:
+                    state["kesin_kar_parametreleri"] = korelasyonlar
+                    log_ekle(f"🧠 Derin Analiz: Geçmiş işlemlere göre Kesin Kâr güncellendi. (A.Vol: %{korelasyonlar.get('ortalama_volatilite', 0):.1f}, Hacim: %{korelasyonlar.get('ortalama_hacim_artis', 0):.0f})", state)
+        except Exception:
+            pass
+        
+        # 300 saniye bekle
+        dur_sinyali.wait(300)
+
 # ─────────────────────────────────────────────
 # Bot Worker (Singleton Manager)
 # ─────────────────────────────────────────────
@@ -976,6 +1026,7 @@ class BotWorker:
         self.state.load_from_persistent()
         self._ws_thread = None
         self._engine_thread = None
+        self._corr_thread = None
 
     @property
     def is_running(self) -> bool:
@@ -1008,6 +1059,9 @@ class BotWorker:
 
         self._engine_thread = threading.Thread(target=bot_engine, args=(raw, lock, dur), daemon=True)
         self._engine_thread.start()
+        
+        self._corr_thread = threading.Thread(target=korelasyon_rutini, args=(raw, lock, dur), daemon=True)
+        self._corr_thread.start()
 
     def stop(self):
         raw = self.state.raw()
