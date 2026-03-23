@@ -105,6 +105,25 @@ DEFAULT_STATE = {
     "demo_pik_bakiye": 100.0,
     "demo_cuzdan_gecmisi": [],
     "demo_max_drawdown": 0.0,
+
+    # --- 94-Day Challenge (İzole) ---
+    "challenge": {
+        "aktif": False,
+        "baslangic_bakiye": 10.0,
+        "gun_baslangic_bakiye": 10.0,
+        "bakiye": 10.0,
+        "pik_bakiye": 10.0,
+        "gun": 0,
+        "baslangic_zamani": 0.0,
+        "gun_baslangic_zamani": 0.0,
+        "toplam_islem": 0,
+        "toplam_kar": 0.0,
+        "gunluk_pik_kar_pct": 0.0,
+        "trailing_stop_seviyesi": 0.0,
+        "islem_gecmisi": [],
+        "cuzdan_gecmisi": [],
+        "max_drawdown": 0.0,
+    },
 }
 
 
@@ -250,6 +269,20 @@ def state_yukle(dosya: str = STATE_FILE) -> dict:
             state["martingale_carpan"] = 1.0
             state["islem_gecmisi"] = []
             state["toplam_islem_sayisi"] = 0
+
+            # v9: Challenge mod 24h bileşik reset
+            ch = state.get("challenge", {})
+            if isinstance(ch, dict) and ch.get("aktif"):
+                ch_bakiye = ch.get("bakiye", 10.0)
+                ch["gun_baslangic_bakiye"] = ch_bakiye
+                ch["pik_bakiye"] = max(ch.get("pik_bakiye", ch_bakiye), ch_bakiye)
+                ch["gun"] = ch.get("gun", 0) + 1
+                ch["gun_baslangic_zamani"] = simdi
+                ch["gunluk_pik_kar_pct"] = 0.0
+                ch["trailing_stop_seviyesi"] = 0.0
+                ch["islem_gecmisi"] = []
+                state["challenge"] = ch
+
             state_kaydet(state, dosya)
         else:
             # Dışarıdan Bakiye Ekleme Kontrolü

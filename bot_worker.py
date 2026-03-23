@@ -171,6 +171,7 @@ MOD_PRESETLERI = {
     "⚡ Agresif Mod": {"risk": 1.0, "sma_kisa": 7, "sma_uzun": 25, "aralik_carpan": 0.5},
     "🌱 Soft Kar Modu": {"risk": 0.30, "sma_kisa": 14, "sma_uzun": 50, "aralik_carpan": 1.5},
     "💎 Ultra-Scalper": {"risk": 0.10, "sma_kisa": 3, "sma_uzun": 10, "aralik_carpan": 0.05},
+    "🚀 94-Day Challenge": {"risk": 0.20, "sma_kisa": 5, "sma_uzun": 14, "aralik_carpan": 0.3},
 }
 
 
@@ -806,7 +807,44 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         pik_kar = gunluk_kar
 
                     hedef_pct = getattr(cfg, "DAILY_TARGET_PCT", 10.0)
-                    if pik_kar >= hedef_pct:
+
+                    # v9: 94-Day Challenge — İzole Trailing Stop ve Kilitlenmeme
+                    is_challenge = state.get("mod") == "🚀 94-Day Challenge"
+                    if is_challenge:
+                        ch = state.get("challenge", {})
+                        if isinstance(ch, dict) and ch.get("aktif"):
+                            ch_gun_bas = ch.get("gun_baslangic_bakiye", 10.0)
+                            ch_bakiye = ch.get("bakiye", ch_gun_bas)
+                            ch_kar_pct = ((ch_bakiye - ch_gun_bas) / ch_gun_bas * 100) if ch_gun_bas > 0 else 0
+
+                            # Günlük pik takibi
+                            ch_pik = ch.get("gunluk_pik_kar_pct", 0.0)
+                            if ch_kar_pct > ch_pik:
+                                ch["gunluk_pik_kar_pct"] = ch_kar_pct
+                                ch_pik = ch_kar_pct
+
+                            ch_ts_activate = getattr(cfg, "CHALLENGE_TRAILING_STOP_ACTIVATE", 10.0)
+                            ch_ts_step = getattr(cfg, "CHALLENGE_TRAILING_STOP_STEP", 2.0)
+
+                            # Trailing stop aktifleştirme: %10 hedeften sonra
+                            if ch_pik >= ch_ts_activate:
+                                # Stop seviyesi = pik - step (minimum = ch_ts_activate - step = %8)
+                                yeni_stop = ch_pik - ch_ts_step
+                                eski_stop = ch.get("trailing_stop_seviyesi", 0.0)
+                                if yeni_stop > eski_stop:
+                                    ch["trailing_stop_seviyesi"] = yeni_stop
+                                    log_ekle(f"🚀 CHALLENGE TS: Pik %{ch_pik:.1f} → Stop %{yeni_stop:.1f}", state)
+
+                                # Kâr stop seviyesinin altına düştüyse → pozisyonları kapat ama DURMA
+                                if ch_kar_pct < ch.get("trailing_stop_seviyesi", 0.0) and ch.get("trailing_stop_seviyesi", 0) > 0:
+                                    karar_paketi["karar"] = "BEKLE"
+                                    karar_paketi["dusunce"] = f"🚀 CHALLENGE KORU: Kâr %{ch_kar_pct:.1f} < Stop %{ch.get('trailing_stop_seviyesi', 0):.1f}. Yeni işlem yok, kâr korunuyor."
+                                    state["bot_durumu"] = "🚀 Challenge Koruma"
+                            else:
+                                pass  # Henüz %10'a ulaşmadı, normal işlem devam
+
+                            state["challenge"] = ch
+                    elif pik_kar >= hedef_pct:
                         kilit_seviyesi = hedef_pct * getattr(cfg, "PROFIT_LOCK_RATIO", 0.8)
                         if gunluk_kar < kilit_seviyesi:
                             karar_paketi["karar"] = "BEKLE"
@@ -894,8 +932,23 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                             log_ekle(f"✅ MTF GATE ONAYLADI: {secilen_sembol} {sinyal} → MTF: {mtf_k}", state)
 
                     if sinyal in ["LONG", "SHORT"] and secilen_sembol not in state.get("aktif_pozisyonlar", {}):
-                        tavsiye_kaldirac = karar_paketi.get("tavsiye_kaldirac", 10)
-                        tavsiye_oran = karar_paketi.get("tavsiye_oran", 0.10)
+                        # v9: Challenge mod kaldıraç/risk override
+                        if is_challenge:
+                            ch_data = state.get("challenge", {})
+                            ch_bakiye = ch_data.get("bakiye", 10.0) if isinstance(ch_data, dict) else 10.0
+                            tavsiye_oran = getattr(cfg, "CHALLENGE_RISK_PER_TRADE", 0.20)
+                            ch_min_lev = getattr(cfg, "CHALLENGE_MIN_LEVERAGE", 20)
+                            ch_max_lev = getattr(cfg, "CHALLENGE_MAX_LEVERAGE", 50)
+                            if ch_bakiye < 50:
+                                tavsiye_kaldirac = ch_max_lev
+                            elif ch_bakiye < 500:
+                                tavsiye_kaldirac = max(ch_min_lev, int(ch_max_lev * 0.7))
+                            else:
+                                tavsiye_kaldirac = ch_min_lev
+                            log_ekle(f"🚀 CHALLENGE: Kaldıraç={tavsiye_kaldirac}x, Risk=%{tavsiye_oran*100:.0f}, Bakiye=${ch_bakiye:.2f}", state)
+                        else:
+                            tavsiye_kaldirac = karar_paketi.get("tavsiye_kaldirac", 10)
+                            tavsiye_oran = karar_paketi.get("tavsiye_oran", 0.10)
 
                         # v9: Makro Trend Risk Çarpanı
                         makro_risk = state.get("makro_risk_carpani", 1.0)

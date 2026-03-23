@@ -48,3 +48,14 @@ HEADLESS_COIN_SCAN_LIMIT = 50  # CPU dostu: 50 coin tara (100 yerine)
 ML_MODEL_PATH = "models/xgb_model.joblib"
 ML_RETRAIN_INTERVAL_HOURS = 24    # Her 24 saatte bir model yeniden eğitilir
 ML_MIN_TRAINING_SAMPLES = 30     # Minimum eğitim örneği sayısı
+
+# ───── 94-Day Challenge ─────
+CHALLENGE_INITIAL_BALANCE = 10.0
+CHALLENGE_TARGET_BALANCE = 100000.0
+CHALLENGE_TOTAL_DAYS = 94
+CHALLENGE_DAILY_TARGET_PCT = 10.0   # Günlük %10 hedef
+CHALLENGE_MAX_LEVERAGE = 50         # Cross 20x-50x arası
+CHALLENGE_MIN_LEVERAGE = 20
+CHALLENGE_RISK_PER_TRADE = 0.20     # İşlem başına kasanın %20'si
+CHALLENGE_TRAILING_STOP_ACTIVATE = 10.0   # %10'da trailing stop aktifleşir
+CHALLENGE_TRAILING_STOP_STEP = 2.0        # Her %2 artışta stop %2 yukarı kayar

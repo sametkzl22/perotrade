@@ -197,12 +197,38 @@ with st.sidebar:
 
     # Mod seçimi
     st.markdown("---")
-    mod_listesi = ["⚡ Agresif Mod", "🌱 Soft Kar Modu", "💎 Ultra-Scalper"]
+    mod_listesi = ["⚡ Agresif Mod", "🌱 Soft Kar Modu", "💎 Ultra-Scalper", "🚀 94-Day Challenge"]
     mevcut_mod = S.get("mod", "⚡ Agresif Mod")
     mevcut_idx = mod_listesi.index(mevcut_mod) if mevcut_mod in mod_listesi else 0
     secilen_mod = st.selectbox("🎯 İşlem Modu", mod_listesi, index=mevcut_idx)
     if secilen_mod != mevcut_mod:
         worker.state.set("mod", secilen_mod)
+        # Challenge mod aktivasyonu
+        if secilen_mod == "🚀 94-Day Challenge":
+            ch = worker.state.get("challenge", {})
+            if not isinstance(ch, dict):
+                ch = {}
+            if not ch.get("aktif"):
+                import time as _time
+                ch["aktif"] = True
+                ch["baslangic_bakiye"] = getattr(cfg, "CHALLENGE_INITIAL_BALANCE", 10.0)
+                ch["gun_baslangic_bakiye"] = ch["baslangic_bakiye"]
+                ch["bakiye"] = ch["baslangic_bakiye"]
+                ch["pik_bakiye"] = ch["baslangic_bakiye"]
+                ch["gun"] = 1
+                ch["baslangic_zamani"] = _time.time()
+                ch["gun_baslangic_zamani"] = _time.time()
+                ch["toplam_islem"] = 0
+                ch["toplam_kar"] = 0.0
+                ch["gunluk_pik_kar_pct"] = 0.0
+                ch["trailing_stop_seviyesi"] = 0.0
+                ch["islem_gecmisi"] = []
+                ch["cuzdan_gecmisi"] = []
+                ch["max_drawdown"] = 0.0
+                worker.state.set("challenge", ch)
+        else:
+            # Başka moda geçildiğinde challenge durağan kalır (veriler silinmez)
+            pass
         worker.state.save_to_persistent()
         st.rerun()
 
@@ -250,6 +276,98 @@ with st.sidebar:
         st.sidebar.success("✅ Günlük İstatistikler ve Kâr Kilidi Sıfırlandı!")
         time.sleep(1)
         st.rerun()
+
+    # ====== 🚀 94-Day Challenge Dashboard ======
+    ch_data = S.get("challenge", {})
+    if S.get("mod") == "🚀 94-Day Challenge" and isinstance(ch_data, dict) and ch_data.get("aktif"):
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### 🚀 94-Day Challenge")
+
+        ch_gun = ch_data.get("gun", 1)
+        ch_toplam_gun = getattr(cfg, "CHALLENGE_TOTAL_DAYS", 94)
+        ch_baslangic = ch_data.get("baslangic_bakiye", 10.0)
+        ch_gun_bas = ch_data.get("gun_baslangic_bakiye", 10.0)
+        ch_bakiye = ch_data.get("bakiye", ch_gun_bas)
+        ch_hedef = getattr(cfg, "CHALLENGE_TARGET_BALANCE", 100000.0)
+        ch_daily_target = getattr(cfg, "CHALLENGE_DAILY_TARGET_PCT", 10.0)
+
+        # Günlük kâr/zarar
+        ch_gunluk_pnl = ((ch_bakiye - ch_gun_bas) / ch_gun_bas * 100) if ch_gun_bas > 0 else 0
+        ch_kalan_pct = max(0.0, ch_daily_target - ch_gunluk_pnl)
+
+        # Toplam yolculuk ilerlemesi
+        import math
+        if ch_bakiye > ch_baslangic and ch_hedef > ch_baslangic:
+            ch_progress = min(1.0, math.log(ch_bakiye / ch_baslangic) / math.log(ch_hedef / ch_baslangic))
+        else:
+            ch_progress = 0.0
+
+        ch_ts = ch_data.get("trailing_stop_seviyesi", 0.0)
+
+        # Görseller
+        ch_pnl_renk = "#00ff88" if ch_gunluk_pnl >= 0 else "#ff4444"
+        ch_gun_emoji = "🎯" if ch_gunluk_pnl >= ch_daily_target else "📈" if ch_gunluk_pnl > 0 else "📉"
+
+        st.sidebar.markdown(f"""
+        <div style='background: linear-gradient(135deg, #1a1a2e, #16213e); border-radius: 12px; padding: 16px; border: 1px solid #f7971e; margin-bottom: 10px;'>
+            <div style='font-size: 16px; font-weight: 800; color: #f7971e; margin-bottom: 12px;'>🏆 Challenge Status</div>
+            <div style='display: flex; justify-content: space-between; margin-bottom: 8px;'>
+                <span style='color: #c5c6c7;'>📅 Challenge Günü:</span>
+                <span style='color: #66fcf1; font-weight: 700;'>{ch_gun}/{ch_toplam_gun}</span>
+            </div>
+            <div style='display: flex; justify-content: space-between; margin-bottom: 8px;'>
+                <span style='color: #c5c6c7;'>{ch_gun_emoji} Bugünkü Hedef:</span>
+                <span style='color: {ch_pnl_renk}; font-weight: 700;'>%{ch_daily_target:.0f} (Kalan: %{ch_kalan_pct:.1f})</span>
+            </div>
+            <div style='display: flex; justify-content: space-between; margin-bottom: 8px;'>
+                <span style='color: #c5c6c7;'>💰 Challenge Bakiye:</span>
+                <span style='color: #66fcf1; font-weight: 700;'>${ch_bakiye:,.2f}</span>
+            </div>
+            <div style='display: flex; justify-content: space-between; margin-bottom: 8px;'>
+                <span style='color: #c5c6c7;'>📊 Günlük PNL:</span>
+                <span style='color: {ch_pnl_renk}; font-weight: 700;'>%{ch_gunluk_pnl:+.2f}</span>
+            </div>
+            <div style='display: flex; justify-content: space-between; margin-bottom: 12px;'>
+                <span style='color: #c5c6c7;'>🛡️ Trailing Stop:</span>
+                <span style='color: #f7971e; font-weight: 700;'>{'%' + f'{ch_ts:.1f}' if ch_ts > 0 else 'Pasif (< %10)'}</span>
+            </div>
+            <div style='margin-bottom: 4px; font-size: 13px; color: #c5c6c7;'>🚀 100.000$ Yolculuğu: %{ch_progress*100:.1f} Tamamlandı</div>
+            <div style='background: #1a1a2e; border-radius: 8px; height: 12px; overflow: hidden;'>
+                <div style='background: linear-gradient(90deg, #f7971e, #ffd200); height: 100%; width: {ch_progress*100:.0f}%; border-radius: 8px; transition: width 0.3s;'></div>
+            </div>
+            <div style='display: flex; justify-content: space-between; margin-top: 4px; font-size: 11px; color: #888;'>
+                <span>${ch_baslangic:,.0f}</span>
+                <span style='color: #ffd200; font-weight: 600;'>${ch_bakiye:,.2f}</span>
+                <span>${ch_hedef:,.0f}</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Challenge Reset butonu
+        if st.sidebar.button("🔄 Challenge'ı Sıfırla ($10'dan Tekrar)", use_container_width=True):
+            import time as _time
+            yeni_ch = {
+                "aktif": True,
+                "baslangic_bakiye": getattr(cfg, "CHALLENGE_INITIAL_BALANCE", 10.0),
+                "gun_baslangic_bakiye": getattr(cfg, "CHALLENGE_INITIAL_BALANCE", 10.0),
+                "bakiye": getattr(cfg, "CHALLENGE_INITIAL_BALANCE", 10.0),
+                "pik_bakiye": getattr(cfg, "CHALLENGE_INITIAL_BALANCE", 10.0),
+                "gun": 1,
+                "baslangic_zamani": _time.time(),
+                "gun_baslangic_zamani": _time.time(),
+                "toplam_islem": 0,
+                "toplam_kar": 0.0,
+                "gunluk_pik_kar_pct": 0.0,
+                "trailing_stop_seviyesi": 0.0,
+                "islem_gecmisi": [],
+                "cuzdan_gecmisi": [],
+                "max_drawdown": 0.0,
+            }
+            worker.state.set("challenge", yeni_ch)
+            worker.state.save_to_persistent()
+            st.sidebar.success("✅ Challenge sıfırlandı! $10'dan yeniden başlıyorsun.")
+            time.sleep(1)
+            st.rerun()
 
     # Esnek Demo Test Süresi
     if not S.get("use_real_api", False):
