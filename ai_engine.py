@@ -1,14 +1,17 @@
 """
-AI Karar Motoru (AI Decision Engine) v7
+AI Karar Motoru (AI Decision Engine) v9
 ========================================
 Breakout Tarayıcı, Hacim Anormallikleri, Trend/Web Simülasyonu,
 Twitter (X) Duyarlılık Analizi, Güven Skoru & Beklenen Artış,
 Vadeli İşlemler (Long/Short) stratejisi, ATR Volatilite Scanner,
-Likidite Filtresi, USDT Dominance Kontrolü ve SQLite Loglama.
+Likidite Filtresi, USDT Dominance Kontrolü, Local ML Inference
+ve SQLite Loglama.
 """
 
 import math
+import os
 import random
+import threading
 import feedparser
 import pandas as pd
 import numpy as np
@@ -18,6 +21,12 @@ try:
     import requests as _requests
 except ImportError:
     _requests = None
+
+# TA-Lib opsiyonel: varsa C-hızında çalışır, yoksa saf NumPy fallback
+try:
+    import talib as _talib
+except ImportError:
+    _talib = None
 
 import config as cfg
 import data_logger
@@ -42,68 +51,126 @@ def mum_verisi_cek(exchange, symbol, timeframe="1h", limit=55):
     except Exception:
         return pd.DataFrame()
 
-def sma_hesapla(series: pd.Series, period: int) -> pd.Series:
-    return series.rolling(window=period).mean()
+def _to_np(data) -> np.ndarray:
+    """pd.Series / pd.DataFrame column → np.float64 array."""
+    if isinstance(data, pd.Series):
+        return data.to_numpy(dtype=np.float64, na_value=np.nan)
+    if isinstance(data, pd.DataFrame):
+        return data['close'].to_numpy(dtype=np.float64, na_value=np.nan)
+    return np.asarray(data, dtype=np.float64)
+
+
+def sma_hesapla(series, period: int):
+    """NumPy SMA — pd.Series veya np.ndarray kabul eder."""
+    if _talib is not None:
+        arr = _to_np(series)
+        return _talib.SMA(arr, timeperiod=period)
+    arr = _to_np(series)
+    if len(arr) < period:
+        return np.full_like(arr, np.nan)
+    kernel = np.ones(period) / period
+    sma = np.convolve(arr, kernel, mode='full')[:len(arr)]
+    sma[:period - 1] = np.nan
+    return sma
+
 
 def sinyal_uret(df: pd.DataFrame, sma_kisa: int, sma_uzun: int) -> str:
     if df is None or df.empty or len(df) < max(sma_kisa, sma_uzun) + 1:
         return "BEKLE"
     try:
-        df = df.copy()
-        df["sma_k"] = sma_hesapla(df["close"], sma_kisa)
-        df["sma_u"] = sma_hesapla(df["close"], sma_uzun)
+        close = _to_np(df['close'])
+        sma_k = sma_hesapla(close, sma_kisa)
+        sma_u = sma_hesapla(close, sma_uzun)
 
-        if df["sma_k"].isna().iloc[-1] or df["sma_u"].isna().iloc[-1]: return "BEKLE"
+        if np.isnan(sma_k[-1]) or np.isnan(sma_u[-1]):
+            return "BEKLE"
 
-        onceki, son = df.iloc[-2], df.iloc[-1]
-        if onceki["sma_k"] <= onceki["sma_u"] and son["sma_k"] > son["sma_u"]: return "AL"
-        if onceki["sma_k"] >= onceki["sma_u"] and son["sma_k"] < son["sma_u"]: return "SAT"
+        if sma_k[-2] <= sma_u[-2] and sma_k[-1] > sma_u[-1]:
+            return "AL"
+        if sma_k[-2] >= sma_u[-2] and sma_k[-1] < sma_u[-1]:
+            return "SAT"
         return "BEKLE"
     except Exception:
         return "BEKLE"
 
-def rsi_hesapla(df: pd.DataFrame, period: int = 14) -> float:
-    if df is None or df.empty or len(df) < period + 1:
-        return 50.0
+
+def rsi_hesapla(df_or_arr, period: int = 14) -> float:
+    """Wilder's RSI — saf NumPy. pd.DataFrame, pd.Series veya np.ndarray kabul eder."""
     try:
-        delta = df['close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-        rs = gain / loss
-        rs = rs.replace([np.inf, -np.inf], 100)
-        rsi = 100 - (100 / (1 + rs))
-        val = rsi.iloc[-1]
-        return float(val) if not np.isnan(val) else 50.0
+        if isinstance(df_or_arr, pd.DataFrame):
+            arr = _to_np(df_or_arr['close'])
+        else:
+            arr = _to_np(df_or_arr)
+        if len(arr) < period + 1:
+            return 50.0
+
+        if _talib is not None:
+            rsi_arr = _talib.RSI(arr, timeperiod=period)
+            val = rsi_arr[-1]
+            return float(val) if not np.isnan(val) else 50.0
+
+        delta = np.diff(arr)
+        gain = np.where(delta > 0, delta, 0.0)
+        loss = np.where(delta < 0, -delta, 0.0)
+
+        avg_gain = np.mean(gain[:period])
+        avg_loss = np.mean(loss[:period])
+
+        for i in range(period, len(delta)):
+            avg_gain = (avg_gain * (period - 1) + gain[i]) / period
+            avg_loss = (avg_loss * (period - 1) + loss[i]) / period
+
+        if avg_loss == 0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return float(100.0 - (100.0 / (1.0 + rs)))
     except Exception:
         return 50.0
 
-def volatilite_hesapla(df: pd.DataFrame) -> float:
-    if df is None or df.empty or len(df) < 14:
-        return 0.0
+
+def rsi_hesapla_np(arr: np.ndarray, period: int = 14) -> float:
+    """Doğrudan NumPy array için alias."""
+    return rsi_hesapla(arr, period)
+
+
+def volatilite_hesapla(df_or_arr) -> float:
+    """NumPy volatilite (% std of returns)."""
     try:
-        returns = df['close'].pct_change().dropna()
-        if returns.empty:
+        if isinstance(df_or_arr, pd.DataFrame):
+            arr = _to_np(df_or_arr['close'])
+        else:
+            arr = _to_np(df_or_arr)
+        if len(arr) < 14:
             return 0.0
-        volatility = returns.std() * 100
-        return float(volatility) if not np.isnan(volatility) else 0.0
+        returns = np.diff(arr) / arr[:-1]
+        returns = returns[~np.isnan(returns)]
+        if len(returns) == 0:
+            return 0.0
+        vol = float(np.std(returns) * 100)
+        return vol if not np.isnan(vol) else 0.0
     except Exception:
         return 0.0
 
 
 def atr_hesapla(df: pd.DataFrame, period: int = 14) -> float:
-    """Gerçek ATR (Average True Range) hesaplar."""
+    """NumPy ATR (Average True Range)."""
     if df is None or df.empty or len(df) < period + 1:
         return 0.0
     try:
-        high = df['high']
-        low = df['low']
-        close = df['close'].shift(1)
-        tr1 = high - low
-        tr2 = (high - close).abs()
-        tr3 = (low - close).abs()
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = tr.rolling(window=period).mean().iloc[-1]
-        return float(atr) if not np.isnan(atr) else 0.0
+        high = df['high'].to_numpy(dtype=np.float64)
+        low = df['low'].to_numpy(dtype=np.float64)
+        close = df['close'].to_numpy(dtype=np.float64)
+
+        if _talib is not None:
+            atr_arr = _talib.ATR(high, low, close, timeperiod=period)
+            val = atr_arr[-1]
+            return float(val) if not np.isnan(val) else 0.0
+
+        prev_close = np.roll(close, 1)
+        prev_close[0] = close[0]
+        tr = np.maximum(high - low, np.maximum(np.abs(high - prev_close), np.abs(low - prev_close)))
+        atr_val = float(np.mean(tr[-period:]))
+        return atr_val if not np.isnan(atr_val) else 0.0
     except Exception:
         return 0.0
 
@@ -844,12 +911,34 @@ def grid_destek_direnc(df: pd.DataFrame) -> dict:
 
 
 # ─────────────────────────────────────────────
-# 8) Multi-Timeframe Analiz (5dk + 15dk + 1s)
+# 8) Multi-Timeframe Analiz (5dk + 15dk + 1s + 1w + 1M)
 # ─────────────────────────────────────────────
+def _makro_trend_belirle(df: pd.DataFrame) -> str:
+    """Haftalık/Aylık mumlardan makro trend yönünü hesaplar."""
+    if df is None or df.empty or len(df) < 5:
+        return "YATAY"
+    try:
+        close = _to_np(df['close'])
+        sma_k = sma_hesapla(close, 3)
+        sma_u = sma_hesapla(close, min(7, len(close)))
+        if np.isnan(sma_k[-1]) or np.isnan(sma_u[-1]):
+            return "YATAY"
+        rsi = rsi_hesapla(close, min(7, len(close) - 1))
+        if sma_k[-1] > sma_u[-1] and rsi > 50:
+            return "YUKARI"
+        elif sma_k[-1] < sma_u[-1] and rsi < 50:
+            return "ASAGI"
+        return "YATAY"
+    except Exception:
+        return "YATAY"
+
+
 def multi_timeframe_analiz(exchange, sembol: str) -> dict:
-    """3 zaman dilimini sentezleyerek güçlü sinyal üretir."""
+    """5 zaman dilimini sentezleyerek güçlü sinyal üretir. Haftalık/Aylık makro filtre dahil."""
     varsayilan = {"rsi": 50.0, "volatilite": 0.0, "sinyal": "BEKLE"}
     sonuclar = {}
+
+    # Kısa-orta vadeli zaman dilimleri (karar sinyalleri)
     for tf, label in [("5m", "5dk"), ("15m", "15dk"), ("1h", "1s")]:
         try:
             df = mum_verisi_cek(exchange, sembol, tf, limit=30)
@@ -862,27 +951,75 @@ def multi_timeframe_analiz(exchange, sembol: str) -> dict:
             sonuclar[label] = {"rsi": round(rsi, 1), "volatilite": round(vol, 2), "sinyal": sinyal}
         except Exception:
             sonuclar[label] = varsayilan.copy()
-    
-    # Konsensüs hesapla
-    sinyaller = [v.get("sinyal", "BEKLE") for v in sonuclar.values()]
-    al_sayisi = sinyaller.count("AL")
-    sat_sayisi = sinyaller.count("SAT")
-    
-    if al_sayisi >= 2: konsensus = "GÜÇLÜ AL"
-    elif sat_sayisi >= 2: konsensus = "GÜÇLÜ SAT"
-    elif al_sayisi == 1 and sat_sayisi == 0: konsensus = "ZAYIF AL"
-    elif sat_sayisi == 1 and al_sayisi == 0: konsensus = "ZAYIF SAT"
-    else: konsensus = "KARARSIZ"
-    
-    # Ortalama RSI
-    rsi_listesi = [v.get("rsi", 50.0) for v in sonuclar.values()]
+
+    # Makro zaman dilimleri (filtre + risk çarpanı)
+    makro_trend_haftalik = "YATAY"
+    makro_trend_aylik = "YATAY"
+
+    for tf, label in [("1w", "haftalik"), ("1M", "aylik")]:
+        try:
+            lim = 12 if tf == "1w" else 6
+            df = mum_verisi_cek(exchange, sembol, tf, limit=lim)
+            if df is not None and not df.empty and len(df) >= 3:
+                trend = _makro_trend_belirle(df)
+                rsi = rsi_hesapla(df, min(7, len(df) - 1))
+                vol = volatilite_hesapla(df)
+                sonuclar[label] = {"rsi": round(rsi, 1), "volatilite": round(vol, 2), "sinyal": trend}
+                if label == "haftalik":
+                    makro_trend_haftalik = trend
+                else:
+                    makro_trend_aylik = trend
+            else:
+                sonuclar[label] = varsayilan.copy()
+        except Exception:
+            sonuclar[label] = varsayilan.copy()
+
+    # Konsensüs — yalnızca kısa-orta vade (5dk, 15dk, 1s)
+    kisa_sinyaller = [sonuclar.get(l, {}).get("sinyal", "BEKLE") for l in ["5dk", "15dk", "1s"]]
+    al_sayisi = kisa_sinyaller.count("AL")
+    sat_sayisi = kisa_sinyaller.count("SAT")
+
+    if al_sayisi >= 2:
+        konsensus = "GÜÇLÜ AL"
+    elif sat_sayisi >= 2:
+        konsensus = "GÜÇLÜ SAT"
+    elif al_sayisi == 1 and sat_sayisi == 0:
+        konsensus = "ZAYIF AL"
+    elif sat_sayisi == 1 and al_sayisi == 0:
+        konsensus = "ZAYIF SAT"
+    else:
+        konsensus = "KARARSIZ"
+
+    # Ortalama RSI (kısa vadeler)
+    rsi_listesi = [sonuclar.get(l, {}).get("rsi", 50.0) for l in ["5dk", "15dk", "1s"]]
     ort_rsi = sum(rsi_listesi) / max(len(rsi_listesi), 1)
-    
+
+    # Makro risk çarpanı
+    # Aylık trend düşüşteyken LONG riski %50 azalt, SHORT riski %25 artır
+    risk_carpani = 1.0
+    makro_trend = "YATAY"
+    if makro_trend_aylik == "ASAGI":
+        risk_carpani = 0.5   # LONG margin yarıya düşer
+        makro_trend = "ASAGI"
+    elif makro_trend_aylik == "YUKARI":
+        risk_carpani = 1.0
+        makro_trend = "YUKARI"
+    elif makro_trend_haftalik == "ASAGI":
+        risk_carpani = 0.75  # Haftalık düşüş, aylık nötr → hafif baskı
+        makro_trend = "ASAGI"
+    elif makro_trend_haftalik == "YUKARI":
+        risk_carpani = 1.0
+        makro_trend = "YUKARI"
+
     return {
         "detay": sonuclar,
         "konsensus": konsensus,
         "ortalama_rsi": round(ort_rsi, 1),
-        "guc": al_sayisi - sat_sayisi
+        "guc": al_sayisi - sat_sayisi,
+        "makro_trend": makro_trend,
+        "makro_trend_haftalik": makro_trend_haftalik,
+        "makro_trend_aylik": makro_trend_aylik,
+        "risk_carpani": risk_carpani,
     }
 
 
@@ -962,3 +1099,152 @@ def haber_vetosu(haber_puanlari: dict, teknik_karar: str) -> dict:
         neden = f"⚠️ Teknik SAT sinyali var ama haberler pozitif ({risk}). Dikkatli ol."
     
     return {"veto": veto, "neden": neden, "haber_skoru": puan, "risk_seviyesi": risk}
+
+
+# ─────────────────────────────────────────────
+# 11) Yerel ML Model Yönetimi (XGBoost)
+# ─────────────────────────────────────────────
+_ml_model = None
+_ml_model_lock = threading.Lock()
+_ml_model_mtime = 0.0
+
+
+def _get_model_path() -> str:
+    base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, getattr(cfg, "ML_MODEL_PATH", "models/xgb_model.joblib"))
+
+
+def _load_ml_model():
+    """Model dosyasını yükle ve global cache'e al. Thread-safe."""
+    global _ml_model, _ml_model_mtime
+    model_path = _get_model_path()
+    if not os.path.exists(model_path):
+        return None
+    try:
+        import joblib
+        mtime = os.path.getmtime(model_path)
+        with _ml_model_lock:
+            if _ml_model is not None and mtime == _ml_model_mtime:
+                return _ml_model
+            _ml_model = joblib.load(model_path)
+            _ml_model_mtime = mtime
+            return _ml_model
+    except Exception as e:
+        print(f"⚠️ ML model yüklenemedi: {e}")
+        return None
+
+
+def _reload_ml_model():
+    """Model dosyası değişmişse yeniden yükle (hot-reload)."""
+    global _ml_model, _ml_model_mtime
+    model_path = _get_model_path()
+    if not os.path.exists(model_path):
+        return False
+    try:
+        mtime = os.path.getmtime(model_path)
+        if mtime != _ml_model_mtime:
+            import joblib
+            with _ml_model_lock:
+                _ml_model = joblib.load(model_path)
+                _ml_model_mtime = mtime
+            return True
+        return False
+    except Exception:
+        return False
+
+
+# ─────────────────────────────────────────────
+# 12) Yerel ML Karar Fonksiyonu
+# ─────────────────────────────────────────────
+def _build_feature_vector(pazar: dict, sma_sinyal: str, btc_trendi: str, fonlama: dict, mtf_guc: int = 0) -> np.ndarray:
+    """Pazar verisinden 12 özellikli feature vektörü oluşturur."""
+    sinyal_map = {"AL": 1.0, "SAT": -1.0, "BEKLE": 0.0}
+    btc_map = {"YUKARI": 1.0, "ASAGI": -1.0, "YATAY": 0.0, "BİLİNMİYOR": 0.0}
+
+    features = np.array([
+        pazar.get("rsi", 50.0),                                    # 0: RSI
+        pazar.get("volatilite", 0.0),                              # 1: Volatilite
+        pazar.get("duyarlilik", 0.0),                              # 2: Duyarlılık
+        1.0 if pazar.get("hacim_trend") == "Artıyor" else 0.0,     # 3: Hacim trendi
+        sinyal_map.get(sma_sinyal, 0.0),                           # 4: SMA sinyali
+        btc_map.get(btc_trendi, 0.0),                              # 5: BTC trendi
+        fonlama.get("oran", 0.0),                                  # 6: Fonlama oranı
+        1.0 if pazar.get("is_breakout") else 0.0,                  # 7: Breakout
+        pazar.get("atr", 0.0),                                     # 8: ATR
+        float(pazar.get("atr_spike_oran", 0.0)),                   # 9: ATR Spike oranı
+        float(mtf_guc),                                            # 10: MTF gücü
+        float(pazar.get("fg_index", {}).get("deger", 50)),         # 11: Fear & Greed
+    ], dtype=np.float64)
+
+    return features
+
+
+def local_ml_karar(sembol: str, pazar: dict, sma_sinyal: str, acik_pozisyon: str,
+                   btc_trendi: str, fonlama: dict, zaman_baski_carpani: float = 1.0,
+                   mod: str = "", mtf_guc: int = 0) -> dict:
+    """
+    Yerel ML model (XGBoost) ile anında karar verir.
+    Model yoksa mock_ai_karar'a fallback yapar.
+    Sınıf: 0=BEKLE, 1=LONG, 2=SHORT, 3=KAPAT
+    """
+    if not isinstance(pazar, dict):
+        return {"sembol": sembol, "karar": "BEKLE", "skor": 0, "dusunce": "Pazar verisi yok",
+                "aralik_sn": 30, "guven_skoru": 0, "expected_growth": 0,
+                "tavsiye_kaldirac": 10, "tavsiye_oran": 0.10, "ozet": "Veri yok"}
+    if not isinstance(fonlama, dict):
+        fonlama = {"oran": 0.0, "risk": "Yok"}
+
+    komp_skor = kompozit_skor_hesapla(pazar, sma_sinyal)
+    guven, beklenen_artis, kaldirac, oran = ai_metrikler(pazar, komp_skor, zaman_baski_carpani)
+
+    # Model yükleme
+    model = _load_ml_model()
+    if model is None:
+        # Model yok → mock fallback
+        return mock_ai_karar(sembol, pazar, komp_skor, acik_pozisyon, btc_trendi, fonlama, zaman_baski_carpani, mod=mod)
+
+    try:
+        features = _build_feature_vector(pazar, sma_sinyal, btc_trendi, fonlama, mtf_guc)
+        features_2d = features.reshape(1, -1)
+
+        sinif_map = {0: "BEKLE", 1: "LONG", 2: "SHORT", 3: "KAPAT"}
+        tahmin = int(model.predict(features_2d)[0])
+        karar = sinif_map.get(tahmin, "BEKLE")
+
+        # Olasılık tabanlı güven skoru
+        ml_guven = guven
+        if hasattr(model, "predict_proba"):
+            probas = model.predict_proba(features_2d)[0]
+            ml_guven = float(max(probas)) * 100.0
+
+        # Açık pozisyon mantığı: Aynı yönde tekrar açma, ters yöndeyse KAPAT
+        if acik_pozisyon != "YOK":
+            if karar == acik_pozisyon:
+                karar = "BEKLE"  # Zaten aynı yönde açık
+            elif karar in ["LONG", "SHORT"] and karar != acik_pozisyon:
+                karar = "KAPAT"  # Ters sinyal → önce kapat
+
+        vol = pazar.get("volatilite", 0) or 0
+        sonraki_sn = dinamik_analiz_araligi(vol, pazar.get("is_breakout", False))
+
+        neden = f"🧠 ML Model: {karar} (Güven: %{ml_guven:.1f}, Skor: {komp_skor:.1f})"
+        if karar == "LONG" and pazar.get("is_breakout"):
+            neden = "🚀 ML BREAKOUT LONG! " + neden
+        elif karar == "SHORT" and pazar.get("is_breakout"):
+            neden = "📉 ML BREAKOUT SHORT! " + neden
+
+        return {
+            "sembol": sembol,
+            "karar": karar,
+            "skor": komp_skor,
+            "dusunce": neden,
+            "aralik_sn": sonraki_sn,
+            "guven_skoru": ml_guven,
+            "expected_growth": beklenen_artis,
+            "tavsiye_kaldirac": kaldirac,
+            "tavsiye_oran": oran,
+            "ozet": f"ML | BTC: {btc_trendi} | Fonlama: {fonlama.get('risk', 'Yok')} | Güven: {ml_guven:.0f}%"
+        }
+    except Exception as e:
+        print(f"⚠️ ML inference hatası: {e}. Mock AI'ye dönülüyor.")
+        return mock_ai_karar(sembol, pazar, komp_skor, acik_pozisyon, btc_trendi, fonlama, zaman_baski_carpani, mod=mod)

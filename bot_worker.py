@@ -20,6 +20,7 @@ import ai_engine
 import config as cfg
 import persistent_state as ps
 import data_logger
+import train_model
 
 
 # ─────────────────────────────────────────────
@@ -624,7 +625,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
 
                 fonlama = ai_engine.fonlama_orani_getir(exchange, secilen_sembol)
 
-                # --- Multi-Timeframe Analiz ---
+                # --- Multi-Timeframe Analiz (v9: 5 zaman dilimi) ---
                 try:
                     mtf = ai_engine.multi_timeframe_analiz(exchange, secilen_sembol)
                     if isinstance(mtf, dict) and isinstance(mtf.get("detay"), dict):
@@ -632,13 +633,19 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         s5 = d.get("5dk", {}).get("sinyal", "?") if isinstance(d.get("5dk"), dict) else "?"
                         s15 = d.get("15dk", {}).get("sinyal", "?") if isinstance(d.get("15dk"), dict) else "?"
                         s1s = d.get("1s", {}).get("sinyal", "?") if isinstance(d.get("1s"), dict) else "?"
+                        s1w = d.get("haftalik", {}).get("sinyal", "?") if isinstance(d.get("haftalik"), dict) else "?"
+                        s1m = d.get("aylik", {}).get("sinyal", "?") if isinstance(d.get("aylik"), dict) else "?"
                         with lock:
                             state["mtf_konsensus"] = mtf.get("konsensus", "KARARSIZ")
+                            state["makro_trend"] = mtf.get("makro_trend", "YATAY")
+                            state["makro_risk_carpani"] = mtf.get("risk_carpani", 1.0)
                             log_ekle(f"🔬 Multi-TF: 5dk={s5} | 15dk={s15} | 1s={s1s} → {mtf.get('konsensus', '?')} (RSI Ort: {mtf.get('ortalama_rsi', 50)})", state)
+                            if s1w != "?" or s1m != "?":
+                                log_ekle(f"📈 Makro TF: Haftalık={s1w} | Aylık={s1m} → Trend: {mtf.get('makro_trend', 'YATAY')} (Risk: x{mtf.get('risk_carpani', 1.0):.2f})", state)
                     else:
-                        mtf = {"konsensus": "KARARSIZ", "guc": 0}
+                        mtf = {"konsensus": "KARARSIZ", "guc": 0, "risk_carpani": 1.0, "makro_trend": "YATAY"}
                 except Exception:
-                    mtf = {"konsensus": "KARARSIZ", "guc": 0}
+                    mtf = {"konsensus": "KARARSIZ", "guc": 0, "risk_carpani": 1.0, "makro_trend": "YATAY"}
 
                 # --- Grid Analizi ---
                 grid_trade_yapildi = False
@@ -736,11 +743,19 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         zaman_baski_carpani = 1.0 + (sure_orani * hedef_farki_pct * 2.0)
 
                 karar_paketi = {"karar": "BEKLE", "dusunce": kapat_sinyali_nedeni, "aralik_sn": 5}
+                mtf_guc = mtf.get("guc", 0) if isinstance(mtf, dict) else 0
                 if not pozisyonu_kapat:
                     if not isinstance(secilen_pazar, dict) or not secilen_pazar:
                         karar_paketi = {"karar": "BEKLE", "dusunce": "Pazar verisi alınamadı, bekleniyor.", "aralik_sn": 30, "guven_skoru": 0, "expected_growth": 0, "tavsiye_kaldirac": 10, "tavsiye_oran": 0.10, "ozet": "Veri yok"}
+                    elif state.get("ai_modu") == "Local ML":
+                        karar_paketi = ai_engine.local_ml_karar(
+                            secilen_sembol, secilen_pazar, secilen_sma, poz_durumu,
+                            btc_trend, fonlama, zaman_baski_carpani,
+                            mod=state.get("mod", ""), mtf_guc=mtf_guc
+                        )
                     elif state.get("ai_modu") == "OpenAI LLM" and state.get("openai_key"):
                         karar_paketi = ai_engine.llm_karar(secilen_sembol, secilen_pazar, secilen_sma, state["openai_key"], poz_durumu, btc_trend, fonlama, zaman_baski_carpani)
+                    else:
                         skor = ai_engine.kompozit_skor_hesapla(secilen_pazar, secilen_sma)
                         karar_paketi = ai_engine.mock_ai_karar(secilen_sembol, secilen_pazar, skor, poz_durumu, btc_trend, fonlama, zaman_baski_carpani, mod=state.get("mod", ""))
 
@@ -882,6 +897,17 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         tavsiye_kaldirac = karar_paketi.get("tavsiye_kaldirac", 10)
                         tavsiye_oran = karar_paketi.get("tavsiye_oran", 0.10)
 
+                        # v9: Makro Trend Risk Çarpanı
+                        makro_risk = state.get("makro_risk_carpani", 1.0)
+                        if sinyal == "LONG" and makro_risk < 1.0:
+                            tavsiye_oran = tavsiye_oran * makro_risk
+                            tavsiye_kaldirac = max(1, int(tavsiye_kaldirac * makro_risk))
+                            log_ekle(f"📈 MAKRO FİLTRE: Aylık/Haftalık trend düşüşte → LONG risk x{makro_risk:.2f} azaltıldı. Oran: {tavsiye_oran:.2f}, Kaldıraç: {tavsiye_kaldirac}x", state)
+                        elif sinyal == "SHORT" and makro_risk < 1.0:
+                            # Düşüş trendi SHORT'a avantaj → %25 artır
+                            tavsiye_oran = min(tavsiye_oran * 1.25, 0.50)
+                            log_ekle(f"📈 MAKRO FİLTRE: Düşüş trendi SHORT lehine → Oran: {tavsiye_oran:.2f}", state)
+
                         # v7: USDT.D LONG baskılama
                         if sinyal == "LONG" and state.get("usdt_d_trend") == "YUKARI":
                             tavsiye_oran = tavsiye_oran * 0.7  # %30 azalt
@@ -1021,18 +1047,56 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
 
 
 def korelasyon_rutini(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
-    """5 dakikada bir çalışarak en iyi geçmiş işlem koşullarını analiz edip önbelleğe alır."""
+    """
+    v9: Otonom Öz-Değerlendirme + Korelasyon Döngüsü
+    - Her 5 dakikada: Korelasyon güncelleme
+    - Her 24 saatte (veya gün dönümünde): ML model yeniden eğitimi + hot-reload
+    """
+    son_egitim_zamani = time.time()
+    retrain_interval = getattr(cfg, "ML_RETRAIN_INTERVAL_HOURS", 24) * 3600
+
     while not dur_sinyali.is_set():
         try:
+            # --- Korelasyon Güncellemesi (her 5dk) ---
             korelasyonlar = data_logger.en_iyi_korelasyonlari_getir(limit=50)
             if korelasyonlar:
                 with lock:
                     state["kesin_kar_parametreleri"] = korelasyonlar
                     log_ekle(f"🧠 Derin Analiz: Geçmiş işlemlere göre Kesin Kâr güncellendi. (A.Vol: %{korelasyonlar.get('ortalama_volatilite', 0):.1f}, Hacim: %{korelasyonlar.get('ortalama_hacim_artis', 0):.0f})", state)
+
+            # --- ML Model Eğitimi (her 24 saat) ---
+            if time.time() - son_egitim_zamani >= retrain_interval:
+                with lock:
+                    log_ekle("🧠 ML RETRAIN: 24 saatlik eğitim döngüsü başlatılıyor...", state)
+
+                try:
+                    sonuc = train_model.run_training()
+                    if sonuc.get("basarili"):
+                        # Hot-reload: Yeni model ağırlıklarını yükle
+                        reload_ok = ai_engine._reload_ml_model()
+                        detay = sonuc.get("detay", {})
+                        egitim_info = detay.get("egitim", {})
+                        with lock:
+                            state["son_ml_egitim"] = datetime.now(timezone.utc).isoformat()
+                            state["ml_accuracy"] = egitim_info.get("accuracy", 0)
+                            log_ekle(
+                                f"✅ ML RETRAIN TAMAMLANDI: Accuracy %{egitim_info.get('accuracy', 0):.1f}, "
+                                f"{'Model yüklendi ✓' if reload_ok else 'Yükleme bekliyor'}",
+                                state, is_breakout=True
+                            )
+                    else:
+                        with lock:
+                            log_ekle(f"⚠️ ML RETRAIN BAŞARISIZ: {sonuc.get('neden', '?')}", state)
+                except Exception as e:
+                    with lock:
+                        log_ekle(f"❌ ML RETRAIN HATA: {str(e)[:80]}", state)
+
+                son_egitim_zamani = time.time()
+
         except Exception:
             pass
         
-        # 300 saniye bekle
+        # 300 saniye (5 dakika) bekle
         dur_sinyali.wait(300)
 
 # ─────────────────────────────────────────────

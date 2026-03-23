@@ -43,3 +43,8 @@ TRADE_LOG_FILE = "trade_history.csv"
 # ───── Headless Bot (bot.py) ─────
 HEADLESS_CHECK_INTERVAL = 60  # Saniye (eski PC için 60s yeterli)
 HEADLESS_COIN_SCAN_LIMIT = 50  # CPU dostu: 50 coin tara (100 yerine)
+
+# ───── ML Engine (v9) ─────
+ML_MODEL_PATH = "models/xgb_model.joblib"
+ML_RETRAIN_INTERVAL_HOURS = 24    # Her 24 saatte bir model yeniden eğitilir
+ML_MIN_TRAINING_SAMPLES = 30     # Minimum eğitim örneği sayısı
