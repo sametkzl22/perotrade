@@ -107,17 +107,18 @@ DEFAULT_STATE = {
     "demo_max_drawdown": 0.0,
 
     # --- 94-Day Challenge (İzole) ---
-    "challenge": {
+    "challenge_session": {
         "aktif": False,
         "baslangic_bakiye": 10.0,
-        "gun_baslangic_bakiye": 10.0,
         "bakiye": 10.0,
+        "gun_baslangic_bakiye": 10.0,
         "pik_bakiye": 10.0,
-        "gun": 0,
+        "current_day": 1,
+        "target_achieved": False,
+        "accumulated_pnl": 0.0,
         "baslangic_zamani": 0.0,
         "gun_baslangic_zamani": 0.0,
         "toplam_islem": 0,
-        "toplam_kar": 0.0,
         "gunluk_pik_kar_pct": 0.0,
         "trailing_stop_seviyesi": 0.0,
         "islem_gecmisi": [],
@@ -270,18 +271,19 @@ def state_yukle(dosya: str = STATE_FILE) -> dict:
             state["islem_gecmisi"] = []
             state["toplam_islem_sayisi"] = 0
 
-            # v9: Challenge mod 24h bileşik reset
-            ch = state.get("challenge", {})
+            # v9/v10: Challenge mod 24h bileşik reset
+            ch = state.get("challenge_session", {})
             if isinstance(ch, dict) and ch.get("aktif"):
                 ch_bakiye = ch.get("bakiye", 10.0)
                 ch["gun_baslangic_bakiye"] = ch_bakiye
                 ch["pik_bakiye"] = max(ch.get("pik_bakiye", ch_bakiye), ch_bakiye)
-                ch["gun"] = ch.get("gun", 0) + 1
+                ch["current_day"] = ch.get("current_day", 1) + 1
                 ch["gun_baslangic_zamani"] = simdi
+                ch["target_achieved"] = False
                 ch["gunluk_pik_kar_pct"] = 0.0
                 ch["trailing_stop_seviyesi"] = 0.0
                 ch["islem_gecmisi"] = []
-                state["challenge"] = ch
+                state["challenge_session"] = ch
 
             state_kaydet(state, dosya)
         else:

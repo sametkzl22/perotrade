@@ -254,7 +254,7 @@ def islem_kapat(state, sembol, fiyat, neden, is_breakout=False, is_liq=False):
     is_challenge = state.get("mod") == "🚀 94-Day Challenge"
     etiket = ""
     if is_challenge:
-        ch = state.get("challenge", {})
+        ch = state.get("challenge_session", {})
         if isinstance(ch, dict) and ch.get("aktif"):
             komisyon_oran = getattr(cfg, "CHALLENGE_COMMISSION_RATE", 0.001)
             islem_hacmi = margin * kaldirac
@@ -266,7 +266,7 @@ def islem_kapat(state, sembol, fiyat, neden, is_breakout=False, is_liq=False):
             ch["toplam_islem"] = ch.get("toplam_islem", 0) + 1
             if ch["bakiye"] > ch.get("pik_bakiye", 0):
                 ch["pik_bakiye"] = ch["bakiye"]
-            state["challenge"] = ch
+            state["challenge_session"] = ch
             etiket = "CHALLENGE_MODE"
             log_ekle(f"🚀 CH KAPAT: {sembol} Net PNL: {net_pnl:+.4f} (Kom: {cikis_komisyon:.4f}). CH Bakiye: ${ch['bakiye']:.4f}", state)
 
@@ -559,6 +559,25 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
             log_ekle(f"❌ Exchange bağlantı hatası: {e}", state)
         return
 
+    # --- v10: Binance Position Sync (Prevent 0-price bug on restart) ---
+    if state.get("use_real_api", False) and state.get("aktif_pozisyonlar"):
+        try:
+            positions = exchange.fetch_positions()
+            with lock:
+                for s, poz in state["aktif_pozisyonlar"].items():
+                    for api_poz in positions:
+                        if api_poz.get("symbol") == s and float(api_poz.get("contracts", 0)) > 0:
+                            entry_price = float(api_poz.get("entryPrice", 0))
+                            if entry_price > 0:
+                                poz["giris_fiyati"] = entry_price
+                                if "guncel_fiyatlar" not in state:
+                                    state["guncel_fiyatlar"] = {}
+                                state["guncel_fiyatlar"][s] = float(api_poz.get("markPrice", entry_price))
+                            break
+        except Exception as e:
+            with lock:
+                log_ekle(f"⚠️ Pozisyon Senkronizasyon Hatası: {e}", state)
+
     son_kayit_zamani = time.time()
     son_kayit_bakiye = state.get("bakiye", 0.0)
 
@@ -834,7 +853,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                     # v10: 94-Day Challenge — Closed-Trade PNL + İzole Trailing Stop
                     is_challenge = state.get("mod") == "🚀 94-Day Challenge"
                     if is_challenge:
-                        ch = state.get("challenge", {})
+                        ch = state.get("challenge_session", {})
                         if isinstance(ch, dict) and ch.get("aktif"):
                             ch_gun_bas = ch.get("gun_baslangic_bakiye", 10.0)
                             ch_bakiye = ch.get("bakiye", ch_gun_bas)
@@ -856,8 +875,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                             ch_ts_activate = getattr(cfg, "CHALLENGE_TRAILING_STOP_ACTIVATE", 10.0)
                             ch_ts_step = getattr(cfg, "CHALLENGE_TRAILING_STOP_STEP", 2.0)
 
-                            # Trailing stop aktifleştirme: %10 hedeften sonra
+                            # Trailing stop aktifleştirme ve hedef durumunu güncelleme: %10 hedeften sonra
                             if ch_pik >= ch_ts_activate:
+                                ch["target_achieved"] = True
                                 yeni_stop = ch_pik - ch_ts_step
                                 eski_stop = ch.get("trailing_stop_seviyesi", 0.0)
                                 if yeni_stop > eski_stop:
@@ -871,7 +891,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                             else:
                                 pass  # Henüz %10'a ulaşmadı, normal işlem devam
 
-                            state["challenge"] = ch
+                            state["challenge_session"] = ch
                     elif pik_kar >= hedef_pct:
                         kilit_seviyesi = hedef_pct * getattr(cfg, "PROFIT_LOCK_RATIO", 0.8)
                         if gunluk_kar < kilit_seviyesi:
@@ -961,8 +981,8 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
 
                     if sinyal in ["LONG", "SHORT"] and secilen_sembol not in state.get("aktif_pozisyonlar", {}):
                         # v9: Challenge mod kaldıraç/risk override
-                        if is_challenge:
-                            ch_data = state.get("challenge", {})
+                        if state.get("mod") == "🚀 94-Day Challenge":
+                            ch_data = state.get("challenge_session", {})
                             ch_bakiye = ch_data.get("bakiye", 10.0) if isinstance(ch_data, dict) else 10.0
                             tavsiye_oran = getattr(cfg, "CHALLENGE_RISK_PER_TRADE", 0.20)
                             ch_min_lev = getattr(cfg, "CHALLENGE_MIN_LEVERAGE", 20)
@@ -1005,8 +1025,8 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         kullanilabilir_max = min(tavsiye_oran, risk_limit - (risk_pct / 100.0))
                         if kullanilabilir_max > 0:
                             # v10: Challenge modda margin'ı challenge bakiyesinden hesapla
-                            if is_challenge:
-                                ch_data_ac = state.get("challenge", {})
+                            if state.get("mod") == "🚀 94-Day Challenge":
+                                ch_data_ac = state.get("challenge_session", {})
                                 ch_bakiye_ac = ch_data_ac.get("bakiye", 10.0) if isinstance(ch_data_ac, dict) else 10.0
                                 margin = ch_bakiye_ac * kullanilabilir_max * mart_carpan
                                 margin = min(margin, ch_bakiye_ac * 0.5)

@@ -205,7 +205,7 @@ with st.sidebar:
         worker.state.set("mod", secilen_mod)
         # Challenge mod aktivasyonu
         if secilen_mod == "🚀 94-Day Challenge":
-            ch = worker.state.get("challenge", {})
+            ch = worker.state.get("challenge_session", {})
             if not isinstance(ch, dict):
                 ch = {}
             if not ch.get("aktif"):
@@ -244,7 +244,7 @@ with st.sidebar:
                 "cuzdan_gecmisi": [],
                 "max_drawdown": 0.0,
             }
-            worker.state.set("challenge", ch_yeni)
+            worker.state.set("challenge_session", ch_yeni)
             worker.state.save_to_persistent()
             st.session_state["_challenge_setup_pending"] = False
             st.sidebar.success(f"✅ Challenge başlatıldı! Sanal Sermaye: ${ch_baslangic_sermaye:.2f}")
@@ -297,7 +297,7 @@ with st.sidebar:
         st.rerun()
 
     # ====== 🚀 94-Day Challenge Dashboard ======
-    ch_data = S.get("challenge", {})
+    ch_data = S.get("challenge_session", {})
     if S.get("mod") == "🚀 94-Day Challenge" and isinstance(ch_data, dict) and ch_data.get("aktif"):
         st.sidebar.markdown("---")
         st.sidebar.markdown("### 🚀 94-Day Challenge")
@@ -382,7 +382,7 @@ with st.sidebar:
                 "cuzdan_gecmisi": [],
                 "max_drawdown": 0.0,
             }
-            worker.state.set("challenge", yeni_ch)
+            worker.state.set("challenge_session", yeni_ch)
             worker.state.save_to_persistent()
             st.sidebar.success("✅ Challenge sıfırlandı! $10'dan yeniden başlıyorsun.")
             time.sleep(1)
@@ -622,8 +622,8 @@ with tab_dash:
                     <span style='font-size: 20px; font-weight: 800; color: {pnl_renk};'>{anlik_pnl:+.2f} USDT ({pnl_pct:+.1f}%)</span>
                 </div>
                 <div style='display: flex; gap: 24px; color: #c5c6c7; font-size: 13px; margin-bottom: 6px;'>
-                    <span>💰 Giriş: <b>${p.get('giris_fiyati', 0):.4f}</b></span>
-                    <span>📊 Anlık: <b>${guncel_fiyat:.4f}</b></span>
+                    <span>💰 Giriş: <b>{f"${p.get('giris_fiyati', 0):.4f}" if p.get("giris_fiyati", 0) > 0 else "Yükleniyor..."}</b></span>
+                    <span>📊 Anlık: <b>{f"${guncel_fiyat:.4f}" if guncel_fiyat > 0 else "Yükleniyor..."}</b></span>
                     <span>🛡️ Margin: <b>${p.get('islem_margin', 0):.2f}</b></span>
                     <span>💣 Liq Riski: <b>%{liq_risk_pct:.1f}</b></span>
                 </div>
@@ -638,7 +638,7 @@ with tab_dash:
 
             poz_liste.append({
                 "Sembol": s,
-                "Giriş Fiyatı": f"${p.get('giris_fiyati', 0):.4f}",
+                "Giriş Fiyatı": f"${p.get('giris_fiyati', 0):.4f}" if p.get('giris_fiyati', 0) > 0 else "Yükleniyor",
                 "Kaldıraç": f"{p.get('islem_kaldirac', 0)}x",
                 "Kullanılan Margin": f"${p.get('islem_margin', 0):.2f}",
                 "Anlık K/Z ($)": f"{anlik_pnl:+.2f}",
