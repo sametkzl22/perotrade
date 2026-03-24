@@ -209,28 +209,47 @@ with st.sidebar:
             if not isinstance(ch, dict):
                 ch = {}
             if not ch.get("aktif"):
-                import time as _time
-                ch["aktif"] = True
-                ch["baslangic_bakiye"] = getattr(cfg, "CHALLENGE_INITIAL_BALANCE", 10.0)
-                ch["gun_baslangic_bakiye"] = ch["baslangic_bakiye"]
-                ch["bakiye"] = ch["baslangic_bakiye"]
-                ch["pik_bakiye"] = ch["baslangic_bakiye"]
-                ch["gun"] = 1
-                ch["baslangic_zamani"] = _time.time()
-                ch["gun_baslangic_zamani"] = _time.time()
-                ch["toplam_islem"] = 0
-                ch["toplam_kar"] = 0.0
-                ch["gunluk_pik_kar_pct"] = 0.0
-                ch["trailing_stop_seviyesi"] = 0.0
-                ch["islem_gecmisi"] = []
-                ch["cuzdan_gecmisi"] = []
-                ch["max_drawdown"] = 0.0
-                worker.state.set("challenge", ch)
+                # İlk kez aktifleştirme → sermaye girişi iste
+                st.session_state["_challenge_setup_pending"] = True
         else:
             # Başka moda geçildiğinde challenge durağan kalır (veriler silinmez)
             pass
         worker.state.save_to_persistent()
         st.rerun()
+
+    # Challenge başlangıç sermayesi kurulum dialogu
+    if st.session_state.get("_challenge_setup_pending", False):
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### 🚀 Challenge Kurulumu")
+        ch_baslangic_sermaye = st.sidebar.number_input(
+            "Başlangıç Sermayesi ($)", min_value=1.0, max_value=10000.0,
+            value=10.0, step=1.0, help="Challenge boyunca sanal bakiye olarak kullanılacak tutar."
+        )
+        if st.sidebar.button("✅ Challenge'ı Başlat", use_container_width=True, type="primary"):
+            import time as _time
+            ch_yeni = {
+                "aktif": True,
+                "baslangic_bakiye": ch_baslangic_sermaye,
+                "gun_baslangic_bakiye": ch_baslangic_sermaye,
+                "bakiye": ch_baslangic_sermaye,
+                "pik_bakiye": ch_baslangic_sermaye,
+                "gun": 1,
+                "baslangic_zamani": _time.time(),
+                "gun_baslangic_zamani": _time.time(),
+                "toplam_islem": 0,
+                "toplam_kar": 0.0,
+                "gunluk_pik_kar_pct": 0.0,
+                "trailing_stop_seviyesi": 0.0,
+                "islem_gecmisi": [],
+                "cuzdan_gecmisi": [],
+                "max_drawdown": 0.0,
+            }
+            worker.state.set("challenge", ch_yeni)
+            worker.state.save_to_persistent()
+            st.session_state["_challenge_setup_pending"] = False
+            st.sidebar.success(f"✅ Challenge başlatıldı! Sanal Sermaye: ${ch_baslangic_sermaye:.2f}")
+            time.sleep(1)
+            st.rerun()
 
     # Haber Veto Toggle
     haber_veto_aktif = st.toggle("🛡️ Haber Vetosunu Aktifleştir", value=cfg.ENABLE_NEWS_VETO,

@@ -250,6 +250,26 @@ def islem_kapat(state, sembol, fiyat, neden, is_breakout=False, is_liq=False):
     aktif_pnl = pnl_hesapla(eski_poz, poz["giris_fiyati"], fiyat, margin * kaldirac, kaldirac)
     poz_giris = poz["giris_fiyati"]  # v7: SQLite için sakla
 
+    # v10: Challenge mod — komisyon simülasyonu + izole bakiye
+    is_challenge = state.get("mod") == "🚀 94-Day Challenge"
+    etiket = ""
+    if is_challenge:
+        ch = state.get("challenge", {})
+        if isinstance(ch, dict) and ch.get("aktif"):
+            komisyon_oran = getattr(cfg, "CHALLENGE_COMMISSION_RATE", 0.001)
+            islem_hacmi = margin * kaldirac
+            cikis_komisyon = islem_hacmi * komisyon_oran
+            net_pnl = aktif_pnl - cikis_komisyon
+            # Challenge bakiyesini güncelle (margin geri dön + net PNL)
+            ch["bakiye"] = ch.get("bakiye", 10.0) + margin + net_pnl
+            ch["toplam_kar"] = ch.get("toplam_kar", 0.0) + net_pnl
+            ch["toplam_islem"] = ch.get("toplam_islem", 0) + 1
+            if ch["bakiye"] > ch.get("pik_bakiye", 0):
+                ch["pik_bakiye"] = ch["bakiye"]
+            state["challenge"] = ch
+            etiket = "CHALLENGE_MODE"
+            log_ekle(f"🚀 CH KAPAT: {sembol} Net PNL: {net_pnl:+.4f} (Kom: {cikis_komisyon:.4f}). CH Bakiye: ${ch['bakiye']:.4f}", state)
+
     reel_getiri = margin + aktif_pnl
     state["bakiye"] += reel_getiri
 
@@ -292,7 +312,8 @@ def islem_kapat(state, sembol, fiyat, neden, is_breakout=False, is_liq=False):
         data_logger.islem_kaydet(
             sembol=sembol, tip=eski_poz, giris_fiyati=poz_giris,
             cikis_fiyati=fiyat, pnl=aktif_pnl, pnl_pct=pnl_pct_val,
-            kaldirac=kaldirac, margin=margin, neden=neden
+            kaldirac=kaldirac, margin=margin, neden=neden,
+            etiket=etiket
         )
     except Exception:
         pass
@@ -808,16 +829,23 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
 
                     hedef_pct = getattr(cfg, "DAILY_TARGET_PCT", 10.0)
 
-                    # v9: 94-Day Challenge — İzole Trailing Stop ve Kilitlenmeme
+                    # v10: 94-Day Challenge — Closed-Trade PNL + İzole Trailing Stop
                     is_challenge = state.get("mod") == "🚀 94-Day Challenge"
                     if is_challenge:
                         ch = state.get("challenge", {})
                         if isinstance(ch, dict) and ch.get("aktif"):
                             ch_gun_bas = ch.get("gun_baslangic_bakiye", 10.0)
                             ch_bakiye = ch.get("bakiye", ch_gun_bas)
-                            ch_kar_pct = ((ch_bakiye - ch_gun_bas) / ch_gun_bas * 100) if ch_gun_bas > 0 else 0
 
-                            # Günlük pik takibi
+                            # v10: Hedef kontrolünü sadece KAPANMIŞ işlemler üzerinden yap (False Positive engelleme)
+                            ch_gun_baslangic_zamani = ch.get("gun_baslangic_zamani", ch.get("baslangic_zamani", 0))
+                            try:
+                                ch_realized_pnl = data_logger.challenge_pnl_getir(ch_gun_baslangic_zamani)
+                            except Exception:
+                                ch_realized_pnl = 0.0
+                            ch_kar_pct = (ch_realized_pnl / ch_gun_bas * 100) if ch_gun_bas > 0 else 0
+
+                            # Günlük pik takibi (realized PNL bazlı)
                             ch_pik = ch.get("gunluk_pik_kar_pct", 0.0)
                             if ch_kar_pct > ch_pik:
                                 ch["gunluk_pik_kar_pct"] = ch_kar_pct
@@ -828,17 +856,15 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
 
                             # Trailing stop aktifleştirme: %10 hedeften sonra
                             if ch_pik >= ch_ts_activate:
-                                # Stop seviyesi = pik - step (minimum = ch_ts_activate - step = %8)
                                 yeni_stop = ch_pik - ch_ts_step
                                 eski_stop = ch.get("trailing_stop_seviyesi", 0.0)
                                 if yeni_stop > eski_stop:
                                     ch["trailing_stop_seviyesi"] = yeni_stop
                                     log_ekle(f"🚀 CHALLENGE TS: Pik %{ch_pik:.1f} → Stop %{yeni_stop:.1f}", state)
 
-                                # Kâr stop seviyesinin altına düştüyse → pozisyonları kapat ama DURMA
                                 if ch_kar_pct < ch.get("trailing_stop_seviyesi", 0.0) and ch.get("trailing_stop_seviyesi", 0) > 0:
                                     karar_paketi["karar"] = "BEKLE"
-                                    karar_paketi["dusunce"] = f"🚀 CHALLENGE KORU: Kâr %{ch_kar_pct:.1f} < Stop %{ch.get('trailing_stop_seviyesi', 0):.1f}. Yeni işlem yok, kâr korunuyor."
+                                    karar_paketi["dusunce"] = f"🚀 CHALLENGE KORU: Realized Kâr %{ch_kar_pct:.1f} < Stop %{ch.get('trailing_stop_seviyesi', 0):.1f}. Yeni işlem yok."
                                     state["bot_durumu"] = "🚀 Challenge Koruma"
                             else:
                                 pass  # Henüz %10'a ulaşmadı, normal işlem devam
@@ -976,10 +1002,27 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         risk_limit = 0.40 if zaman_baski_carpani >= 4.0 else 0.30 if zaman_baski_carpani >= 3.0 else 0.20
                         kullanilabilir_max = min(tavsiye_oran, risk_limit - (risk_pct / 100.0))
                         if kullanilabilir_max > 0:
-                            margin = state["bakiye"] * kullanilabilir_max * mart_carpan
-                            # v7: Martingale güvenlik limiti: bakiyenin %50'sini geçemez
-                            margin = min(margin, state["bakiye"] * 0.5)
+                            # v10: Challenge modda margin'ı challenge bakiyesinden hesapla
+                            if is_challenge:
+                                ch_data_ac = state.get("challenge", {})
+                                ch_bakiye_ac = ch_data_ac.get("bakiye", 10.0) if isinstance(ch_data_ac, dict) else 10.0
+                                margin = ch_bakiye_ac * kullanilabilir_max * mart_carpan
+                                margin = min(margin, ch_bakiye_ac * 0.5)
+                            else:
+                                margin = state["bakiye"] * kullanilabilir_max * mart_carpan
+                                # v7: Martingale güvenlik limiti: bakiyenin %50'sini geçemez
+                                margin = min(margin, state["bakiye"] * 0.5)
                             buyukluk_usdt = margin * tavsiye_kaldirac
+
+                            # v10: Challenge açılış komisyonu
+                            if is_challenge:
+                                komisyon_oran = getattr(cfg, "CHALLENGE_COMMISSION_RATE", 0.001)
+                                acilis_komisyon = buyukluk_usdt * komisyon_oran
+                                ch_dt = state.get("challenge", {})
+                                if isinstance(ch_dt, dict):
+                                    ch_dt["bakiye"] = ch_dt.get("bakiye", 10.0) - margin - acilis_komisyon
+                                    state["challenge"] = ch_dt
+                                    log_ekle(f"🚀 CH AÇ: Margin ${margin:.4f} + Kom ${acilis_komisyon:.4f} düşüldü. CH Bakiye: ${ch_dt['bakiye']:.4f}", state)
 
                             # v6: ATR tabanlı dinamik stop-loss hesapla
                             try:

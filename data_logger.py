@@ -57,20 +57,38 @@ def _init_db():
                 pnl_pct REAL,
                 kaldirac INTEGER,
                 margin REAL,
-                neden TEXT
+                neden TEXT,
+                etiket TEXT DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_tarama_sembol ON tarama_log(sembol);
             CREATE INDEX IF NOT EXISTS idx_tarama_zaman ON tarama_log(zaman);
             CREATE INDEX IF NOT EXISTS idx_islem_sembol ON islem_log(sembol);
             CREATE INDEX IF NOT EXISTS idx_islem_zaman ON islem_log(zaman);
+            CREATE INDEX IF NOT EXISTS idx_islem_etiket ON islem_log(etiket);
         """)
         conn.close()
     except Exception as e:
         print(f"⚠️ data_logger init hatası: {e}")
 
 
-# Modül yüklenince tablo oluştur
+def _migrate_db():
+    """Mevcut veritabanına yeni kolonları güvenli ekler."""
+    try:
+        conn = _get_conn()
+        # etiket kolonu yoksa ekle
+        try:
+            conn.execute("ALTER TABLE islem_log ADD COLUMN etiket TEXT DEFAULT ''")
+            conn.commit()
+        except Exception:
+            pass  # Zaten var
+        conn.close()
+    except Exception:
+        pass
+
+
+# Modül yüklenince tablo oluştur ve migration çalıştır
 _init_db()
+_migrate_db()
 
 
 # ─────────────────────────────────────────────
@@ -98,15 +116,16 @@ def tarama_kaydet(sembol: str, fiyat: float, skor: float, atr: float = 0,
 
 def islem_kaydet(sembol: str, tip: str, giris_fiyati: float,
                  cikis_fiyati: float, pnl: float, pnl_pct: float,
-                 kaldirac: int = 1, margin: float = 0, neden: str = ""):
+                 kaldirac: int = 1, margin: float = 0, neden: str = "",
+                 etiket: str = ""):
     try:
         conn = _get_conn()
         conn.execute(
             """INSERT INTO islem_log
-               (zaman, sembol, tip, giris_fiyati, cikis_fiyati, pnl, pnl_pct, kaldirac, margin, neden)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (zaman, sembol, tip, giris_fiyati, cikis_fiyati, pnl, pnl_pct, kaldirac, margin, neden, etiket)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (datetime.now(timezone.utc).isoformat(), sembol, tip,
-             giris_fiyati, cikis_fiyati, pnl, pnl_pct, kaldirac, margin, neden)
+             giris_fiyati, cikis_fiyati, pnl, pnl_pct, kaldirac, margin, neden, etiket)
         )
         conn.commit()
         conn.close()
@@ -230,4 +249,23 @@ def gercek_pnl_getir(baslangic_zamani_timestamp: float) -> float:
         return 0.0
     except Exception as e:
         print(f"⚠️ PNL Doğrulama Hatası: {e}")
+        return 0.0
+
+
+def challenge_pnl_getir(baslangic_zamani_timestamp: float) -> float:
+    """Challenge modunda realize edilmiş (closed) işlemlerin toplam PNL'sini döner.
+    Sadece etiket='CHALLENGE_MODE' olan kayıtları filtreler."""
+    try:
+        dt_iso = datetime.fromtimestamp(baslangic_zamani_timestamp, tz=timezone.utc).isoformat()
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT SUM(pnl) FROM islem_log WHERE etiket='CHALLENGE_MODE' AND zaman >= ?",
+            (dt_iso,)
+        ).fetchone()
+        conn.close()
+        if row and row[0] is not None:
+            return float(row[0])
+        return 0.0
+    except Exception as e:
+        print(f"⚠️ Challenge PNL Doğrulama Hatası: {e}")
         return 0.0
