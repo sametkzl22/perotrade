@@ -811,21 +811,23 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 with lock:
                                     log_ekle(veto_sonuc["neden"], state)
                     # Bakiye Senkronizasyonu (Manual Injection Guard)
-                    # Eğer bakiye aniden %100 veya daha fazla fırlarsa, bu manuel eklemedir, kilitlenmeyi önle.
+                    # Challenge modunda bu kontrolü ATLA — challenge kendi izole bakiyesiyle çalışır
                     gun_baslangic = state.get("gun_baslangic_bakiye", state.get("baslangic_bakiye", cfg.INITIAL_BALANCE))
                     mevcut_bakiye = state.get("bakiye", gun_baslangic) + aktif_margin_toplami(state.get("aktif_pozisyonlar", {}))
                 
-                    if gun_baslangic > 0 and ((mevcut_bakiye - gun_baslangic) / gun_baslangic) * 100 >= 100.0:
+                    if not (state.get("mod") == "🚀 94-Day Challenge") and gun_baslangic > 0 and ((mevcut_bakiye - gun_baslangic) / gun_baslangic) * 100 >= 100.0:
                         with lock:
                             state["gun_baslangic_bakiye"] = mevcut_bakiye
                             log_ekle(f"🔄 Bakiye Senkronizasyonu: Manuel ekleme tespit edildi. Yeni Gün Başlangıç: ${mevcut_bakiye:.2f}", state)
 
                     # v8: Dinamik Kâr Kilidi & Zarar Kurtarma (Recovery Mode)
+                    # Challenge modunda bu karar mantığı ATLANIR — challenge'in kendi TS'si var
                     gunluk_kar = gunluk_kar_hesapla(state)
                     pik_kar = state.get("gunluk_pik_kar", 0.0)
-                    if gunluk_kar > pik_kar:
-                        state["gunluk_pik_kar"] = gunluk_kar
-                        pik_kar = gunluk_kar
+                    if not (state.get("mod") == "🚀 94-Day Challenge"):
+                        if gunluk_kar > pik_kar:
+                            state["gunluk_pik_kar"] = gunluk_kar
+                            pik_kar = gunluk_kar
 
                     hedef_pct = getattr(cfg, "DAILY_TARGET_PCT", 10.0)
 
@@ -881,7 +883,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                             pass
 
                     loss_stop = getattr(cfg, "DAILY_LOSS_STOP", -7.5)
-                    if gunluk_kar <= loss_stop:
+                    if not is_challenge and gunluk_kar <= loss_stop:
                         state["bot_durumu"] = "🩺 Kurtarma Modu"
                         # Sadece çok güvenli sinyalleri kabul et
                         if karar_paketi["karar"] in ["LONG", "SHORT"] and karar_paketi.get("guven_skoru", 0) < getattr(cfg, "RECOVERY_CONFIDENCE_THRESHOLD", 90):
@@ -1062,7 +1064,11 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         islem_kapat_with_retry(state, secilen_sembol, fiyat, karar_paketi.get("dusunce", ""), exchange)
 
                     if state.get("pik_bakiye", 0) >= state.get("hedef_bakiye", 100):
-                        if state.get("mod", "") == "💎 Ultra-Scalper":
+                        # v10: Challenge modunda bu hedef kontrolünü TAMAMEN ATLA
+                        # Challenge kendi izole bakiyesiyle çalışır, demo/real bakiye ile karıştırılmamalı
+                        if state.get("mod") == "🚀 94-Day Challenge":
+                            pass  # Challenge modunda hedefe ulaşma kontrolü kendi TS mekanizmasında
+                        elif state.get("mod", "") == "💎 Ultra-Scalper":
                             if not state.get("scalper_hedef_loglandi", False):
                                 log_ekle("💎 Günlük Hedef Aşıldı - İşlemlere Devam Ediliyor (Ultra-Scalper)", state)
                                 state["scalper_hedef_loglandi"] = True
@@ -1079,7 +1085,6 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                     islem_gecmisi_kaydet(state.get("islem_gecmisi", []))
                                     dur_sinyali.set()
                                 else:
-                                    # Açık kardan dolayı pik yapmış olabilir, henüz realize edilmedi
                                     state["pik_bakiye"] = max(state.get("bakiye", 0), state.get("hedef_bakiye", 100) - 2.0)
                             else:
                                 state["bot_durumu"] = "🎯 Hedefi Ulaştı!"
