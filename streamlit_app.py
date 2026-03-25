@@ -302,10 +302,11 @@ with st.sidebar:
         st.sidebar.markdown("---")
         st.sidebar.markdown("### 🚀 94-Day Challenge")
 
-        ch_gun = ch_data.get("gun", 1)
+        ch_gun = ch_data.get("gun", ch_data.get("current_day", 1))
         ch_toplam_gun = getattr(cfg, "CHALLENGE_TOTAL_DAYS", 94)
         ch_baslangic = ch_data.get("baslangic_bakiye", 10.0)
         ch_gun_bas = ch_data.get("gun_baslangic_bakiye", 10.0)
+        # v10: Challenge bakiyesi = Başlangıç + Sadece Challenge Net PNL
         ch_bakiye = ch_data.get("bakiye", ch_gun_bas)
         ch_hedef = getattr(cfg, "CHALLENGE_TARGET_BALANCE", 100000.0)
         ch_daily_target = getattr(cfg, "CHALLENGE_DAILY_TARGET_PCT", 10.0)
@@ -346,6 +347,10 @@ with st.sidebar:
                 <span style='color: #c5c6c7;'>📊 Günlük PNL:</span>
                 <span style='color: {ch_pnl_renk}; font-weight: 700;'>%{ch_gunluk_pnl:+.2f}</span>
             </div>
+            <div style='display: flex; justify-content: space-between; margin-bottom: 8px;'>
+                <span style='color: #c5c6c7;'>🏁 Başlangıç Sermayesi:</span>
+                <span style='color: #888; font-weight: 700;'>${ch_baslangic:,.2f}</span>
+            </div>
             <div style='display: flex; justify-content: space-between; margin-bottom: 12px;'>
                 <span style='color: #c5c6c7;'>🛡️ Trailing Stop:</span>
                 <span style='color: #f7971e; font-weight: 700;'>{'%' + f'{ch_ts:.1f}' if ch_ts > 0 else 'Pasif (< %10)'}</span>
@@ -362,15 +367,17 @@ with st.sidebar:
         </div>
         """, unsafe_allow_html=True)
 
-        # Challenge Reset butonu
-        if st.sidebar.button("🔄 Challenge'ı Sıfırla ($10'dan Tekrar)", use_container_width=True):
+        # v10: Challenge Verilerini Sıfırla butonu (sadece .json, .db korunur)
+        if st.sidebar.button("🔄 Challenge Verilerini Sıfırla", use_container_width=True,
+                             help="Sadece challenge gününü ve bakiyesini sıfırlar. AI eğitimi için kritik olan trade_logs.db veritabanına DOKUNMAZ."):
             import time as _time
             yeni_ch = {
                 "aktif": True,
-                "baslangic_bakiye": getattr(cfg, "CHALLENGE_INITIAL_BALANCE", 10.0),
-                "gun_baslangic_bakiye": getattr(cfg, "CHALLENGE_INITIAL_BALANCE", 10.0),
-                "bakiye": getattr(cfg, "CHALLENGE_INITIAL_BALANCE", 10.0),
-                "pik_bakiye": getattr(cfg, "CHALLENGE_INITIAL_BALANCE", 10.0),
+                "baslangic_bakiye": ch_baslangic,
+                "gun_baslangic_bakiye": ch_baslangic,
+                "bakiye": ch_baslangic,
+                "pik_bakiye": ch_baslangic,
+                "current_day": 1,
                 "gun": 1,
                 "baslangic_zamani": _time.time(),
                 "gun_baslangic_zamani": _time.time(),
@@ -378,13 +385,15 @@ with st.sidebar:
                 "toplam_kar": 0.0,
                 "gunluk_pik_kar_pct": 0.0,
                 "trailing_stop_seviyesi": 0.0,
+                "target_achieved": False,
+                "accumulated_pnl": 0.0,
                 "islem_gecmisi": [],
                 "cuzdan_gecmisi": [],
                 "max_drawdown": 0.0,
             }
             worker.state.set("challenge_session", yeni_ch)
             worker.state.save_to_persistent()
-            st.sidebar.success("✅ Challenge sıfırlandı! $10'dan yeniden başlıyorsun.")
+            st.sidebar.success(f"✅ Challenge sıfırlandı (${ch_baslangic:.0f}'dan tekrar)! 📊 trade_logs.db verileri korunuyor.")
             time.sleep(1)
             st.rerun()
 
@@ -622,8 +631,8 @@ with tab_dash:
                     <span style='font-size: 20px; font-weight: 800; color: {pnl_renk};'>{anlik_pnl:+.2f} USDT ({pnl_pct:+.1f}%)</span>
                 </div>
                 <div style='display: flex; gap: 24px; color: #c5c6c7; font-size: 13px; margin-bottom: 6px;'>
-                    <span>💰 Giriş: <b>{f"${p.get('giris_fiyati', 0):.4f}" if p.get("giris_fiyati", 0) > 0 else "Yükleniyor..."}</b></span>
-                    <span>📊 Anlık: <b>{f"${guncel_fiyat:.4f}" if guncel_fiyat > 0 else "Yükleniyor..."}</b></span>
+                    <span>💰 Giriş: <b>{f"${p.get('giris_fiyati', 0):.4f}" if p.get("giris_fiyati", 0) > 0 else "Veri Bekleniyor..."}</b></span>
+                    <span>📊 Anlık: <b>{f"${guncel_fiyat:.4f}" if guncel_fiyat > 0 else "Veri Bekleniyor..."}</b></span>
                     <span>🛡️ Margin: <b>${p.get('islem_margin', 0):.2f}</b></span>
                     <span>💣 Liq Riski: <b>%{liq_risk_pct:.1f}</b></span>
                 </div>
@@ -638,7 +647,7 @@ with tab_dash:
 
             poz_liste.append({
                 "Sembol": s,
-                "Giriş Fiyatı": f"${p.get('giris_fiyati', 0):.4f}" if p.get('giris_fiyati', 0) > 0 else "Yükleniyor",
+                "Giriş Fiyatı": f"${p.get('giris_fiyati', 0):.4f}" if p.get('giris_fiyati', 0) > 0 else "Veri Bekleniyor...",
                 "Kaldıraç": f"{p.get('islem_kaldirac', 0)}x",
                 "Kullanılan Margin": f"${p.get('islem_margin', 0):.2f}",
                 "Anlık K/Z ($)": f"{anlik_pnl:+.2f}",
@@ -655,7 +664,7 @@ with tab_dash:
     # Finansal Metrikler
     k1, k2, k3, k4 = st.columns(4)
     with k1:
-        st.metric("Anlık Fiyat", f"${S.get('fiyat', 0):,.4f}" if S.get("fiyat") else "—", f"%{S.get('degisim_24s', 0):+.2f}")
+        st.metric("Anlık Fiyat", f"${S.get('fiyat', 0):,.4f}" if S.get("fiyat") else "Veri Bekleniyor...", f"%{S.get('degisim_24s', 0):+.2f}" if S.get("fiyat") else None)
     with k2:
         hacim = S.get("hacim_24s", 0)
         hacim_str = f"${hacim/1e6:,.1f}M" if hacim > 1e6 else f"${hacim:,.0f}" if hacim else "—"

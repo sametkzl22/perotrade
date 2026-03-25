@@ -432,3 +432,37 @@ def gun_sonu_raporu(state: dict) -> str:
         f"├─ Toplam Büyüme: %{toplam_buyume:+.2f}\n"
         f"└─ İşlem Sayısı: {state.get('toplam_islem_sayisi', 0)}"
     )
+
+
+def challenge_sifirla(state: dict, dosya: str = STATE_FILE) -> dict:
+    """
+    v10: Challenge verilerini SADECE .json dosyasında sıfırlar.
+    ⚠️ trade_logs.db'ye KESİNLİKLE DOKUNMAZ — AI eğitim verileri korunur.
+    
+    Döndürdüğü state, sıfırlanmış challenge_session içerir.
+    """
+    import time as _time
+
+    ch_yeni = {
+        "aktif": True,
+        "baslangic_bakiye": state.get("challenge_session", {}).get("baslangic_bakiye", 10.0),
+        "gun_baslangic_bakiye": state.get("challenge_session", {}).get("baslangic_bakiye", 10.0),
+        "bakiye": state.get("challenge_session", {}).get("baslangic_bakiye", 10.0),
+        "pik_bakiye": state.get("challenge_session", {}).get("baslangic_bakiye", 10.0),
+        "current_day": 1,
+        "target_achieved": False,
+        "accumulated_pnl": 0.0,
+        "baslangic_zamani": _time.time(),
+        "gun_baslangic_zamani": _time.time(),
+        "toplam_islem": 0,
+        "gunluk_pik_kar_pct": 0.0,
+        "trailing_stop_seviyesi": 0.0,
+        "islem_gecmisi": [],
+        "cuzdan_gecmisi": [],
+        "max_drawdown": 0.0,
+    }
+
+    state["challenge_session"] = ch_yeni
+    state_kaydet(state, dosya)
+    print(f"🔄 Challenge sıfırlandı (sadece .json). trade_logs.db korunuyor.")
+    return state

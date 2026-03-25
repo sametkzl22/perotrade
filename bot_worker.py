@@ -150,6 +150,13 @@ class GlobalBotState:
                 self._data["use_real_api"] = loaded.get("use_real_api", False)
                 self._data["baslangic_zamani"] = loaded.get("baslangic_zamani", 0.0)
                 self._data["hedef_bakiye"] = loaded.get("hedef_bakiye", cfg.TARGET_BALANCE)
+                # v10: Challenge session'ı persistent state'den yükle
+                ch_loaded = loaded.get("challenge_session", {})
+                if isinstance(ch_loaded, dict) and ch_loaded:
+                    self._data["challenge_session"] = ch_loaded
+                # v10: Mod bilgisini de yükle
+                if loaded.get("mod"):
+                    self._data["mod"] = loaded["mod"]
 
     def save_to_persistent(self):
         """Disk'e serialize-safe kaydet."""
@@ -1040,10 +1047,10 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                             if is_challenge:
                                 komisyon_oran = getattr(cfg, "CHALLENGE_COMMISSION_RATE", 0.001)
                                 acilis_komisyon = buyukluk_usdt * komisyon_oran
-                                ch_dt = state.get("challenge", {})
-                                if isinstance(ch_dt, dict):
+                                ch_dt = state.get("challenge_session", {})
+                                if isinstance(ch_dt, dict) and ch_dt.get("aktif"):
                                     ch_dt["bakiye"] = ch_dt.get("bakiye", 10.0) - margin - acilis_komisyon
-                                    state["challenge"] = ch_dt
+                                    state["challenge_session"] = ch_dt
                                     log_ekle(f"🚀 CH AÇ: Margin ${margin:.4f} + Kom ${acilis_komisyon:.4f} düşüldü. CH Bakiye: ${ch_dt['bakiye']:.4f}", state)
 
                             # v6: ATR tabanlı dinamik stop-loss hesapla

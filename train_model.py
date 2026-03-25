@@ -290,12 +290,22 @@ def run_training(min_samples: int = None) -> dict:
 if __name__ == "__main__":
     print("🧠 PeroTrade ML Training Pipeline")
     print("=" * 40)
-    sonuc = run_training()
-    if sonuc["basarili"]:
-        print(f"✅ {sonuc['neden']}")
-        print(f"   Model: {sonuc.get('model_path', '?')}")
-        detay = sonuc.get("detay", {})
-        if "egitim" in detay:
-            print(f"   Top Features: {detay['egitim'].get('top_features', [])}")
-    else:
-        print(f"❌ Eğitim başarısız: {sonuc['neden']}")
+    try:
+        sonuc = run_training()
+        if sonuc["basarili"]:
+            print(f"✅ {sonuc['neden']}")
+            print(f"   Model: {sonuc.get('model_path', '?')}")
+            detay = sonuc.get("detay", {})
+            if "egitim" in detay:
+                print(f"   Top Features: {detay['egitim'].get('top_features', [])}")
+        else:
+            neden = sonuc.get("neden", "Bilinmeyen hata")
+            if "Yetersiz" in neden or "bulunamadı" in neden or "Eşleşen" in neden:
+                print(f"⚠️ Yeterli eğitim verisi henüz toplanmadı.")
+                print(f"   Detay: {neden}")
+                print(f"   Bot işlem yaptıkça trade_logs.db'ye veri birikecek ve model eğitilebilir hale gelecektir.")
+            else:
+                print(f"❌ Eğitim başarısız: {neden}")
+    except Exception as e:
+        print(f"⚠️ Yeterli eğitim verisi henüz toplanmadı veya beklenmeyen bir hata oluştu.")
+        print(f"   Hata: {e}")
