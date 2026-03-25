@@ -60,3 +60,10 @@ CHALLENGE_RISK_PER_TRADE = 0.20     # İşlem başına kasanın %20'si
 CHALLENGE_TRAILING_STOP_ACTIVATE = 10.0   # %10'da trailing stop aktifleşir
 CHALLENGE_TRAILING_STOP_STEP = 2.0        # Her %2 artışta stop %2 yukarı kayar
 CHALLENGE_COMMISSION_RATE = 0.001         # %0.1 Binance standart komisyon (giriş + çıkış)
+
+# ───── Evolutionary Trainer ─────
+EVO_REWARD_POINTS = 10          # Kârlı işlem ödülü
+EVO_PENALTY_POINTS = -15        # Zararlı işlem cezası
+EVO_WAIT_MULTIPLIER = 0.30      # Bekleme süresi çarpanı (%70 azalma)
+EVO_LOSS_STOP_OVERRIDE = -50.0  # Gevşetilmiş zarar durdurma (sadece EVO mod)
+EVO_MIN_SCORE_THRESHOLD = 10    # Sinyal eşiği (düşük = daha fazla işlem)

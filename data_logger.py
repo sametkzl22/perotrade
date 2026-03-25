@@ -58,7 +58,11 @@ def _init_db():
                 kaldirac INTEGER,
                 margin REAL,
                 neden TEXT,
-                etiket TEXT DEFAULT ''
+                etiket TEXT DEFAULT '',
+                rsi REAL,
+                bollinger_ust REAL,
+                bollinger_alt REAL,
+                hacim_oran REAL
             );
             CREATE INDEX IF NOT EXISTS idx_tarama_sembol ON tarama_log(sembol);
             CREATE INDEX IF NOT EXISTS idx_tarama_zaman ON tarama_log(zaman);
@@ -75,12 +79,19 @@ def _migrate_db():
     """Mevcut veritabanına yeni kolonları güvenli ekler."""
     try:
         conn = _get_conn()
-        # etiket kolonu yoksa ekle
-        try:
-            conn.execute("ALTER TABLE islem_log ADD COLUMN etiket TEXT DEFAULT ''")
-            conn.commit()
-        except Exception:
-            pass  # Zaten var
+        migrations = [
+            "ALTER TABLE islem_log ADD COLUMN etiket TEXT DEFAULT ''",
+            "ALTER TABLE islem_log ADD COLUMN rsi REAL",
+            "ALTER TABLE islem_log ADD COLUMN bollinger_ust REAL",
+            "ALTER TABLE islem_log ADD COLUMN bollinger_alt REAL",
+            "ALTER TABLE islem_log ADD COLUMN hacim_oran REAL",
+        ]
+        for sql in migrations:
+            try:
+                conn.execute(sql)
+                conn.commit()
+            except Exception:
+                pass  # Zaten var
         conn.close()
     except Exception:
         pass
@@ -117,15 +128,19 @@ def tarama_kaydet(sembol: str, fiyat: float, skor: float, atr: float = 0,
 def islem_kaydet(sembol: str, tip: str, giris_fiyati: float,
                  cikis_fiyati: float, pnl: float, pnl_pct: float,
                  kaldirac: int = 1, margin: float = 0, neden: str = "",
-                 etiket: str = ""):
+                 etiket: str = "",
+                 rsi: float = None, bollinger_ust: float = None,
+                 bollinger_alt: float = None, hacim_oran: float = None):
     try:
         conn = _get_conn()
         conn.execute(
             """INSERT INTO islem_log
-               (zaman, sembol, tip, giris_fiyati, cikis_fiyati, pnl, pnl_pct, kaldirac, margin, neden, etiket)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (zaman, sembol, tip, giris_fiyati, cikis_fiyati, pnl, pnl_pct,
+                kaldirac, margin, neden, etiket, rsi, bollinger_ust, bollinger_alt, hacim_oran)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (datetime.now(timezone.utc).isoformat(), sembol, tip,
-             giris_fiyati, cikis_fiyati, pnl, pnl_pct, kaldirac, margin, neden, etiket)
+             giris_fiyati, cikis_fiyati, pnl, pnl_pct, kaldirac, margin, neden, etiket,
+             rsi, bollinger_ust, bollinger_alt, hacim_oran)
         )
         conn.commit()
         conn.close()
@@ -269,3 +284,28 @@ def challenge_pnl_getir(baslangic_zamani_timestamp: float) -> float:
     except Exception as e:
         print(f"⚠️ Challenge PNL Doğrulama Hatası: {e}")
         return 0.0
+
+
+def evo_islemler_getir(limit: int = 200) -> list:
+    """Evolutionary Trainer için genişletilmiş işlem verileri (RSI, Bollinger, hacim dahil)."""
+    try:
+        conn = _get_conn()
+        rows = conn.execute(
+            """SELECT zaman, sembol, tip, giris_fiyati, cikis_fiyati,
+                      pnl, pnl_pct, kaldirac, margin, neden,
+                      rsi, bollinger_ust, bollinger_alt, hacim_oran
+               FROM islem_log
+               WHERE etiket = 'EVO_TRAINER'
+               ORDER BY id DESC LIMIT ?""", (limit,)
+        ).fetchall()
+        conn.close()
+        return [
+            {"zaman": r[0], "sembol": r[1], "tip": r[2],
+             "giris": r[3], "cikis": r[4], "pnl": r[5],
+             "pnl_pct": r[6], "kaldirac": r[7], "margin": r[8],
+             "neden": r[9], "rsi": r[10], "bollinger_ust": r[11],
+             "bollinger_alt": r[12], "hacim_oran": r[13]}
+            for r in rows
+        ]
+    except Exception:
+        return []

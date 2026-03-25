@@ -179,6 +179,7 @@ MOD_PRESETLERI = {
     "🌱 Soft Kar Modu": {"risk": 0.30, "sma_kisa": 14, "sma_uzun": 50, "aralik_carpan": 1.5},
     "💎 Ultra-Scalper": {"risk": 0.10, "sma_kisa": 3, "sma_uzun": 10, "aralik_carpan": 0.05},
     "🚀 94-Day Challenge": {"risk": 0.20, "sma_kisa": 5, "sma_uzun": 14, "aralik_carpan": 0.3},
+    "🚀 Evolutionary Trainer": {"risk": 0.15, "sma_kisa": 5, "sma_uzun": 14, "aralik_carpan": 0.30},
 }
 
 
@@ -314,13 +315,50 @@ def islem_kapat(state, sembol, fiyat, neden, is_breakout=False, is_liq=False):
         state["martingale_carpan"] = 1.0
 
     # v7: SQLite'a işlem kapanışı kaydet
+    # 🚀 Evolutionary Trainer: Genişletilmiş teknik indikatör verileri + ödül/ceza
+    evo_rsi = None
+    evo_boll_ust = None
+    evo_boll_alt = None
+    evo_hacim_oran = None
+    is_evo = state.get("mod") == "🚀 Evolutionary Trainer"
+
+    if is_evo:
+        try:
+            # Ödül/Ceza sistemi: perotrade_model.pkl güncelle
+            ai_engine.evo_reward_update(aktif_pnl, sembol)
+            puan_str = f"+{cfg.EVO_REWARD_POINTS}" if aktif_pnl > 0 else str(cfg.EVO_PENALTY_POINTS)
+            log_ekle(f"🧪 EVO {'ÖDÜL' if aktif_pnl > 0 else 'CEZA'}: {sembol} PNL {aktif_pnl:+.4f} → Model Puan: {puan_str}", state)
+        except Exception:
+            pass
+        # Genişletilmiş analiz: RSI, Bollinger, Hacim oranı hesapla
+        try:
+            import ccxt
+            _evo_exchange = getattr(ccxt, state.get("exchange_adi", "binance"))({"enableRateLimit": True})
+            evo_df = ai_engine.mum_verisi_cek(_evo_exchange, sembol, "1h", limit=30)
+            if evo_df is not None and not evo_df.empty:
+                evo_rsi = ai_engine.rsi_hesapla(evo_df)
+                evo_boll = ai_engine.bollinger_hesapla(evo_df)
+                evo_boll_ust = evo_boll.get("ust", 0.0)
+                evo_boll_alt = evo_boll.get("alt", 0.0)
+                if len(evo_df) >= 14:
+                    son_hacim = float(evo_df['volume'].iloc[-1])
+                    ort_hacim = float(evo_df['volume'].iloc[-14:].mean())
+                    evo_hacim_oran = round(son_hacim / ort_hacim, 2) if ort_hacim > 0 else 0.0
+                neden_detay = (f"RSI:{evo_rsi:.1f} | Boll:[{evo_boll_alt:.2f}-{evo_boll_ust:.2f}] | H.Oran:{evo_hacim_oran or 0:.2f}x")
+                log_ekle(f"🧪 EVO DETAY: {sembol} {neden_detay}", state)
+        except Exception:
+            pass
+
     try:
         pnl_pct_val = (aktif_pnl / margin * 100) if margin > 0 else 0
+        evo_etiket = "EVO_TRAINER" if is_evo else etiket
         data_logger.islem_kaydet(
             sembol=sembol, tip=eski_poz, giris_fiyati=poz_giris,
             cikis_fiyati=fiyat, pnl=aktif_pnl, pnl_pct=pnl_pct_val,
             kaldirac=kaldirac, margin=margin, neden=neden,
-            etiket=etiket
+            etiket=evo_etiket,
+            rsi=evo_rsi, bollinger_ust=evo_boll_ust,
+            bollinger_alt=evo_boll_alt, hacim_oran=evo_hacim_oran
         )
     except Exception:
         pass
@@ -980,6 +1018,11 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         elif sinyal == "SHORT" and mtf_k in ["GÜÇLÜ SAT", "ZAYIF SAT"]:
                             mtf_gecti = True
                         
+                        # 🚀 Evolutionary Trainer: MTF gate bypass — maksimum veri toplama
+                        if state.get("mod") == "🚀 Evolutionary Trainer":
+                            mtf_gecti = True
+                            log_ekle(f"🧪 EVO MTF BYPASS: {secilen_sembol} {sinyal} MTF gate atlandı (veri toplama modu).", state)
+
                         if not mtf_gecti:
                             log_ekle(f"🔬 MTF GATE REDDETTİ: {secilen_sembol} {sinyal} kararı MTF ({mtf_k}) ile çelişiyor. İşlem iptal.", state)
                             sinyal = "BEKLE"  # MTF onaylamıyor, işlem iptal
@@ -1140,6 +1183,13 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
 
             # --- BEKLEME (EVENT-DRIVEN) ---
             bekleme_suresi = 1 # Berserker Mode: Bekleme süresi daima 1 saniye
+            
+            # 🚀 Evolutionary Trainer: Bekleme süresi zaten 1s ise daha da azaltılmaz (sleep'te sıfır olmasın),
+            # ama bot başka modda yavaş çalıştırılırsa bu çarpan devreye girer.
+            if state.get("mod") == "🚀 Evolutionary Trainer":
+                evo_carpan = getattr(cfg, "EVO_WAIT_MULTIPLIER", 0.30)
+                bekleme_suresi = max(1, int(bekleme_suresi * evo_carpan))
+                
             with lock:
                 state["sonraki_analiz_sn"] = bekleme_suresi
 

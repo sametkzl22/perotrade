@@ -197,7 +197,7 @@ with st.sidebar:
 
     # Mod seçimi
     st.markdown("---")
-    mod_listesi = ["⚡ Agresif Mod", "🌱 Soft Kar Modu", "💎 Ultra-Scalper", "🚀 94-Day Challenge"]
+    mod_listesi = ["⚡ Agresif Mod", "🌱 Soft Kar Modu", "💎 Ultra-Scalper", "🚀 94-Day Challenge", "🚀 Evolutionary Trainer"]
     mevcut_mod = S.get("mod", "⚡ Agresif Mod")
     mevcut_idx = mod_listesi.index(mevcut_mod) if mevcut_mod in mod_listesi else 0
     secilen_mod = st.selectbox("🎯 İşlem Modu", mod_listesi, index=mevcut_idx)

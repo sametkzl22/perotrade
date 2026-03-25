@@ -32,6 +32,41 @@ import config as cfg
 import data_logger
 
 # ─────────────────────────────────────────────
+# 0) Evolutionary Trainer — Ödül/Ceza Sistemi
+# ─────────────────────────────────────────────
+import pickle as _pickle
+
+_EVO_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "perotrade_model.pkl")
+_evo_lock = threading.Lock()
+
+
+def evo_reward_update(pnl: float, sembol: str):
+    """Kârlı işlemlere ödül, zararlı işlemlere ceza vererek perotrade_model.pkl'yi anlık günceller."""
+    try:
+        with _evo_lock:
+            # Mevcut modeli yükle veya yeni oluştur
+            if os.path.exists(_EVO_MODEL_PATH):
+                with open(_EVO_MODEL_PATH, "rb") as f:
+                    model_data = _pickle.load(f)
+            else:
+                model_data = {"toplam_skor": 0, "sembol_skorlari": {}, "islem_sayisi": 0, "guncelleme_zamani": ""}
+
+            puan = getattr(cfg, "EVO_REWARD_POINTS", 10) if pnl > 0 else getattr(cfg, "EVO_PENALTY_POINTS", -15)
+            model_data["toplam_skor"] = model_data.get("toplam_skor", 0) + puan
+            model_data["islem_sayisi"] = model_data.get("islem_sayisi", 0) + 1
+            model_data["guncelleme_zamani"] = datetime.now(timezone.utc).isoformat()
+
+            # Sembol bazlı skor takibi
+            s_skorlar = model_data.get("sembol_skorlari", {})
+            s_skorlar[sembol] = s_skorlar.get(sembol, 0) + puan
+            model_data["sembol_skorlari"] = s_skorlar
+
+            with open(_EVO_MODEL_PATH, "wb") as f:
+                _pickle.dump(model_data, f)
+    except Exception as e:
+        print(f"⚠️ EVO Reward Update hatası: {e}")
+
+# ─────────────────────────────────────────────
 # 1) Teknik Analiz Göstergeleri & Veri Çekme
 # ─────────────────────────────────────────────
 def mum_verisi_cek(exchange, symbol, timeframe="1h", limit=55):
@@ -173,6 +208,29 @@ def atr_hesapla(df: pd.DataFrame, period: int = 14) -> float:
         return atr_val if not np.isnan(atr_val) else 0.0
     except Exception:
         return 0.0
+
+
+def bollinger_hesapla(df: pd.DataFrame, period: int = 20, std_dev: float = 2.0) -> dict:
+    """Bollinger Bands hesaplar. Üst/Alt band + bant genişliği döner."""
+    bos = {"ust": 0.0, "alt": 0.0, "orta": 0.0, "genislik": 0.0}
+    if df is None or df.empty or len(df) < period:
+        return bos
+    try:
+        close = _to_np(df['close'])
+        if _talib is not None:
+            upper, middle, lower = _talib.BBANDS(close, timeperiod=period, nbdevup=std_dev, nbdevdn=std_dev)
+            u, m, l = float(upper[-1]), float(middle[-1]), float(lower[-1])
+            if np.isnan(u) or np.isnan(l):
+                return bos
+            return {"ust": round(u, 6), "alt": round(l, 6), "orta": round(m, 6), "genislik": round(u - l, 6)}
+        # Saf NumPy fallback
+        sma = np.mean(close[-period:])
+        std = np.std(close[-period:])
+        upper = sma + std_dev * std
+        lower = sma - std_dev * std
+        return {"ust": round(upper, 6), "alt": round(lower, 6), "orta": round(sma, 6), "genislik": round(upper - lower, 6)}
+    except Exception:
+        return bos
 
 
 def volatilite_spike_kontrol(df: pd.DataFrame, period: int = 14) -> dict:
@@ -712,8 +770,13 @@ def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon:
     fg_korku_var_mi = fg.get("durum", "Neutral") in ["Fear", "Extreme Fear"]
     makro = pazar.get("makro") or {"durum": "Normal", "neden": ""}
 
-    # 💎 Ultra-Scalper: Eşik 40 → 15
-    esik = 15 if mod == "💎 Ultra-Scalper" else 40
+    # 💎 Ultra-Scalper: Eşik 40 → 15  |  🚀 EVO Trainer: Eşik 40 → EVO_MIN_SCORE_THRESHOLD
+    if mod == "💎 Ultra-Scalper":
+        esik = 15
+    elif mod == "🚀 Evolutionary Trainer":
+        esik = getattr(cfg, "EVO_MIN_SCORE_THRESHOLD", 10)
+    else:
+        esik = 40
 
     if cfg.ENABLE_NEWS_VETO and makro.get("durum") == "Risk-Off":
         # Makro risk durumunda tamamen durmak/(sadece short) yerine riskleri kısıyoruz
