@@ -144,8 +144,9 @@ def islem_kaydet(sembol: str, tip: str, giris_fiyati: float,
         )
         conn.commit()
         conn.close()
-    except Exception:
-        pass
+        print(f"✅ Trade logged to DB: {sembol} {tip} (PNL: ${pnl:.2f})")
+    except Exception as e:
+        print(f"⚠️ data_logger islem_kaydet hatasi: {e}")
 
 
 # ─────────────────────────────────────────────

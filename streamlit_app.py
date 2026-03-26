@@ -187,9 +187,13 @@ with st.sidebar:
     # Start / Stop
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("▶️ Başlat", use_container_width=True, type="primary", disabled=worker.is_running):
-            worker.start()
-            st.rerun()
+        start_disabled = worker.is_running
+        if st.button("▶️ Başlat", use_container_width=True, type="primary", disabled=start_disabled):
+            if cur_is_real and (not S.get("api_key_enc", "") or not S.get("api_secret_enc", "")):
+                st.warning("⚠️ Lütfen gerçek işlem (Real Mode) için Binance API Key ve Secret bilgilerini girin!")
+            else:
+                worker.start()
+                st.rerun()
     with col2:
         if st.button("⏹️ Durdur", use_container_width=True, disabled=not worker.is_running):
             worker.stop()
