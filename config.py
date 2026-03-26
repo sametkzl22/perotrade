@@ -1,6 +1,6 @@
 # ─────────────────────────────────────────────
-# PeroTrade Pro — Konfigürasyon v5
-# 7/24 Bileşik Faiz Sistemi + Binance API
+# PeroTrade Pro — Konfigürasyon v11
+# 7/24 Bileşik Faiz Sistemi + Binance Futures
 # ─────────────────────────────────────────────
 
 # ───── Binance API (Gerçek İşlem İçin) ─────
@@ -11,6 +11,14 @@ SECRET_KEY = ""
 # ───── Exchange ─────
 EXCHANGE_NAME = "binance"
 USE_REAL_API = False  # True = gerçek Binance Futures, False = paper trade
+
+# ───── Futures (v11) ─────
+FUTURES_TYPE = "future"                # ccxt defaultType: spot → future
+FUTURES_SYMBOL_SUFFIX = ":USDT"        # Perpetual sembol uzantısı (BTC/USDT:USDT)
+
+# ───── Kaynak Yönetimi (v11) ─────
+COOLING_SLEEP_SECONDS = 10             # Her analiz döngüsü sonunda zorunlu dinlenme (sn)
+GC_COLLECT_INTERVAL = 100              # Her N döngüde gc.collect() çağır
 
 # ───── Paper-Trade Bakiye ─────
 INITIAL_BALANCE = 10.0

@@ -1,11 +1,11 @@
 """
-AI Karar Motoru (AI Decision Engine) v9
+AI Karar Motoru (AI Decision Engine) v11
 ========================================
 Breakout Tarayıcı, Hacim Anormallikleri, Trend/Web Simülasyonu,
 Twitter (X) Duyarlılık Analizi, Güven Skoru & Beklenen Artış,
 Vadeli İşlemler (Long/Short) stratejisi, ATR Volatilite Scanner,
 Likidite Filtresi, USDT Dominance Kontrolü, Local ML Inference
-ve SQLite Loglama.
+ve SQLite Loglama. v11: Binance Futures Perpetual desteği.
 """
 
 import math
@@ -298,11 +298,16 @@ def dinamik_analiz_araligi(volatilite: float, is_breakout: bool = False) -> int:
 # 2) Piyasa Lideri (BTC) ve Fonlama Oranı (PRO)
 # ─────────────────────────────────────────────
 def btc_trendi_analiz_et(exchange) -> str:
-    """ Genel piyasa sağlığını (BTC yönünü) analiz eder. """
+    """ Genel piyasa sağlığını (BTC yönünü) analiz eder. v11: Futures sembol desteği. """
     try:
         if exchange is None:
             return "BİLİNMİYOR"
-        df = mum_verisi_cek(exchange, "BTC/USDT", "1h", limit=15)
+        # v11: Futures sembolü kullan
+        btc_symbol = "BTC/USDT"
+        suffix = getattr(cfg, "FUTURES_SYMBOL_SUFFIX", ":USDT")
+        if suffix and getattr(cfg, "FUTURES_TYPE", None) == "future":
+            btc_symbol = btc_symbol + suffix
+        df = mum_verisi_cek(exchange, btc_symbol, "1h", limit=15)
         if df is None or df.empty or len(df) < 14:
             return "BİLİNMİYOR"
         sma_k = sma_hesapla(df['close'], 7).iloc[-1]
@@ -507,7 +512,10 @@ def fear_and_greed_simulasyonu() -> dict:
 # 4) Dinamik Coin Seçimi (Top 20 + Breakout Scanner)
 # ─────────────────────────────────────────────
 def top_coinleri_tara(exchange, limit=100) -> list:
-    standart_liste = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT"]
+    """v11: Futures piyasasından coin listesi çeker. Perpetual (:USDT) sembollerini kullanır."""
+    suffix = getattr(cfg, "FUTURES_SYMBOL_SUFFIX", ":USDT")
+    is_futures = getattr(cfg, "FUTURES_TYPE", None) == "future"
+    standart_liste = [f"BTC/USDT{suffix}", f"ETH/USDT{suffix}", f"SOL/USDT{suffix}", f"XRP/USDT{suffix}", f"ADA/USDT{suffix}"] if is_futures else ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT"]
     yasakli_kelimeler = ["USDC", "FDUSD", "TUSD", "DAI", "EUR", "GBP", "BUSD", "USDP", "TRUE", "PAXG", "USDD", "PYUSD"]
     try:
         if exchange is None:
@@ -526,10 +534,17 @@ def top_coinleri_tara(exchange, limit=100) -> list:
             vol = v.get('quoteVolume', 0)
             if vol is None:
                 vol = 0
-            if '/USDT' in k and vol > 0:
-                is_yasakli = any(yasak in k for yasak in yasakli_kelimeler)
-                if not is_yasakli:
-                    usdt_tickers[k] = v
+            # v11: Futures modda ':USDT' suffix'li sembolleri ara
+            if is_futures:
+                if ':USDT' in k and vol > 0:
+                    is_yasakli = any(yasak in k for yasak in yasakli_kelimeler)
+                    if not is_yasakli:
+                        usdt_tickers[k] = v
+            else:
+                if '/USDT' in k and vol > 0:
+                    is_yasakli = any(yasak in k for yasak in yasakli_kelimeler)
+                    if not is_yasakli:
+                        usdt_tickers[k] = v
         # Hacme göre sırala
         sirali = sorted(usdt_tickers.items(), key=lambda x: (x[1].get('quoteVolume', 0) or 0), reverse=True)
         if not sirali:

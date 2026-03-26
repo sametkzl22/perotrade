@@ -1,11 +1,13 @@
 """
-Bot Worker — Global Singleton + Background Thread Manager
-==========================================================
+Bot Worker — Global Singleton + Background Thread Manager (v11)
+================================================================
 Streamlit UI'dan bağımsız çalışan arka plan işçisi.
 @st.cache_resource ile oluşturulur, sekme kapansa bile process
 yaşadığı sürece bellekte kalır ve bot 7/24 çalışmaya devam eder.
+v11: Binance Futures entegrasyonu, Cooling, GC, Auto-Reconnect.
 """
 
+import gc
 import threading
 import time
 import csv
@@ -21,6 +23,44 @@ import config as cfg
 import persistent_state as ps
 import data_logger
 import train_model
+
+
+# ─────────────────────────────────────────────
+# v11: Futures Sembol Dönüştürücü
+# ─────────────────────────────────────────────
+def futures_sembol_donustur(sembol: str) -> str:
+    """Spot sembolü Futures Perpetual formatına çevirir.
+    BTC/USDT → BTC/USDT:USDT
+    Zaten ':USDT' içeriyorsa dokunmaz.
+    """
+    if not sembol:
+        return sembol
+    suffix = getattr(cfg, "FUTURES_SYMBOL_SUFFIX", ":USDT")
+    if suffix and suffix not in sembol and "/USDT" in sembol:
+        return sembol + suffix
+    return sembol
+
+
+def _exchange_olustur(state: dict, pro: bool = False) -> object:
+    """v11: Futures-uyumlu exchange nesnesi oluşturur. Real API ise credentials ekler."""
+    exchange_adi = state.get("exchange_adi", "binance")
+    futures_type = getattr(cfg, "FUTURES_TYPE", "future")
+
+    params = {
+        "enableRateLimit": True,
+        "options": {"defaultType": futures_type},
+    }
+
+    # Real API ise credential ekle
+    if state.get("use_real_api", False):
+        api_key = ps.decode_key(state.get("api_key_enc", ""))
+        api_secret = ps.decode_key(state.get("api_secret_enc", ""))
+        if api_key and api_secret:
+            params["apiKey"] = api_key
+            params["secret"] = api_secret
+
+    lib = ccxtpro if pro else ccxt
+    return getattr(lib, exchange_adi)(params)
 
 
 # ─────────────────────────────────────────────
@@ -409,14 +449,33 @@ def islem_kapat_with_retry(state, sembol, fiyat, neden, exchange=None, max_retry
 
 
 # ─────────────────────────────────────────────
-# WebSocket Fiyat Dinleyici
+# WebSocket Fiyat Dinleyici (v11: Futures + Auto-Reconnect)
 # ─────────────────────────────────────────────
 def ws_fiyat_dinleyici(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
     async def dinle():
-        try:
-            exchange = getattr(ccxtpro, state["exchange_adi"])({"enableRateLimit": True})
-        except Exception:
-            return
+        exchange = None
+        reconnect_count = 0
+        max_reconnects = 50  # Sonsuz çökme yerine sınırlı tekrar deneme
+
+        while not dur_sinyali.is_set() and reconnect_count < max_reconnects:
+            try:
+                if exchange is not None:
+                    try:
+                        await exchange.close()
+                    except Exception:
+                        pass
+                exchange = _exchange_olustur(state, pro=True)
+                with lock:
+                    if reconnect_count > 0:
+                        log_ekle(f"🔄 WebSocket yeniden bağlandı (deneme #{reconnect_count})", state)
+                    else:
+                        log_ekle("🌐 WebSocket Futures bağlantısı kuruldu.", state)
+            except Exception as e:
+                reconnect_count += 1
+                with lock:
+                    log_ekle(f"❌ WebSocket bağlantı hatası (#{reconnect_count}): {str(e)[:80]}. 5sn sonra tekrar deneniyor...", state)
+                await asyncio.sleep(5)
+                continue
 
         guncel_fiyatlar = {}
 
@@ -594,15 +653,32 @@ def ws_fiyat_dinleyici(state: dict, lock: threading.Lock, dur_sinyali: threading
 
 
 # ─────────────────────────────────────────────
-# Bot Engine (Ana Karar Döngüsü)
+# Bot Engine (Ana Karar Döngüsü) — v11 Futures
 # ─────────────────────────────────────────────
 def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
-    try:
-        exchange = getattr(ccxt, state.get("exchange_adi", "binance"))({"enableRateLimit": True})
-    except Exception as e:
+    # v11: Futures exchange init + auto-reconnect
+    exchange = None
+    def _baglanti_kur():
+        nonlocal exchange
+        for attempt in range(5):
+            try:
+                exchange = _exchange_olustur(state, pro=False)
+                with lock:
+                    log_ekle(f"🌐 Futures REST API bağlantısı kuruldu (defaultType: {getattr(cfg, 'FUTURES_TYPE', 'future')})", state)
+                return True
+            except Exception as e:
+                with lock:
+                    log_ekle(f"❌ Exchange bağlantı hatası (deneme {attempt+1}/5): {str(e)[:80]}", state)
+                time.sleep(5)
+        return False
+
+    if not _baglanti_kur():
         with lock:
-            log_ekle(f"❌ Exchange bağlantı hatası: {e}", state)
+            log_ekle("❌ Exchange bağlantısı 5 denemede kurulamadı. Bot durduruluyor.", state)
         return
+
+    # v11: Döngü sayacı (GC + Cooling)
+    _dongü_sayaci = 0
 
     # --- v10: Binance Position Sync (Prevent 0-price bug on restart) ---
     if state.get("use_real_api", False) and state.get("aktif_pozisyonlar"):
@@ -1181,14 +1257,24 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                 son_kayit_zamani = time.time()
                 son_kayit_bakiye = guncel_bakiye
 
-            # --- BEKLEME (EVENT-DRIVEN) ---
-            bekleme_suresi = 1 # Berserker Mode: Bekleme süresi daima 1 saniye
+            # --- v11: ZORUNLU COOLING + GC ---
+            _dongü_sayaci += 1
+            cooling_sn = getattr(cfg, "COOLING_SLEEP_SECONDS", 10)
+            gc_interval = getattr(cfg, "GC_COLLECT_INTERVAL", 100)
+
+            # Bellek temizliği: Her N döngüde gc.collect()
+            if _dongü_sayaci % gc_interval == 0:
+                gc.collect()
+                with lock:
+                    log_ekle(f"🧹 GC: Bellek temizlendi (döngü #{_dongü_sayaci})", state)
+
+            # --- BEKLEME (EVENT-DRIVEN + COOLING) ---
+            bekleme_suresi = cooling_sn  # v11: Zorunlu 10s dinlenme
             
-            # 🚀 Evolutionary Trainer: Bekleme süresi zaten 1s ise daha da azaltılmaz (sleep'te sıfır olmasın),
-            # ama bot başka modda yavaş çalıştırılırsa bu çarpan devreye girer.
+            # 🚀 Evolutionary Trainer: Bekleme süresini çarpanla azalt
             if state.get("mod") == "🚀 Evolutionary Trainer":
                 evo_carpan = getattr(cfg, "EVO_WAIT_MULTIPLIER", 0.30)
-                bekleme_suresi = max(1, int(bekleme_suresi * evo_carpan))
+                bekleme_suresi = max(3, int(bekleme_suresi * evo_carpan))  # En az 3s
                 
             with lock:
                 state["sonraki_analiz_sn"] = bekleme_suresi
@@ -1210,7 +1296,18 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
             with lock:
                 log_ekle(f"❌ Döngü Hatası (devam ediyor): {str(e)[:100]}", state)
                 print(f"⚠️ bot_engine döngü hatası: {e}")
-            time.sleep(5)
+            # v11: Bağlantı hatası ise yeniden bağlan
+            if "ExchangeNotAvailable" in str(e) or "NetworkError" in str(e) or "RequestTimeout" in str(e):
+                with lock:
+                    log_ekle("🔄 Bağlantı hatası tespit edildi, exchange yeniden bağlanıyor...", state)
+                if not _baglanti_kur():
+                    with lock:
+                        log_ekle("❌ Yeniden bağlantı başarısız. 30sn bekleniyor.", state)
+                    time.sleep(30)
+                else:
+                    time.sleep(2)
+            else:
+                time.sleep(5)
 
     # Bot durdurulduğunda son kayıt
     try:
