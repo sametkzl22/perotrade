@@ -106,21 +106,46 @@ def api_kurulum_ekrani():
     st.markdown("<h2 style='text-align: center; color: #f3ba2f;'>🔶 Binance API Kurulumu</h2>", unsafe_allow_html=True)
     st.markdown("<p style='text-align: center; color: #c5c6c7;'>Gerçek işlem yapmak istiyorsanız API bilgilerinizi girin.</p>", unsafe_allow_html=True)
 
+    err_placeholder = st.empty()
+
     with st.container(border=True):
         use_real = st.checkbox("Gerçek Bakiye (Real API) Kullan", value=False)
-        api_k = st.text_input("Binance API Key", type="password", disabled=not use_real)
-        sec_k = st.text_input("Binance Secret Key", type="password", disabled=not use_real)
-
-        b1, b2, b3 = st.columns([1, 2, 1])
-        with b2:
-            if st.button("💾 Kaydet ve Başla", use_container_width=True, type="primary"):
-                worker.state.set("use_real_api", use_real)
+        with st.form("onb_form"):
+            api_k = st.text_input("Binance API Key", type="password", key="onb_api", disabled=not use_real)
+            sec_k = st.text_input("Binance Secret Key", type="password", key="onb_sec", disabled=not use_real)
+            
+            b1, b2, b3 = st.columns([1, 2, 1])
+            with b2:
+                submitted = st.form_submit_button("💾 Kaydet ve Başla", type="primary", use_container_width=True)
+            
+            if submitted:
                 if use_real:
-                    worker.state.set("api_key_enc", ps.encode_key(api_k))
-                    worker.state.set("api_secret_enc", ps.encode_key(sec_k))
-                worker.state.save_to_persistent()
-                st.session_state._onboarding_passed = True
-                st.rerun()
+                    if not api_k or not sec_k:
+                        err_placeholder.error("⚠️ Lütfen Binance API Key ve Secret Key bilgilerini girin!")
+                    else:
+                        try:
+                            import ccxt
+                            test_exc = ccxt.binance({
+                                'apiKey': api_k,
+                                'secret': sec_k,
+                                'enableRateLimit': True,
+                                'options': {'defaultType': getattr(cfg, "FUTURES_TYPE", "future")}
+                            })
+                            test_exc.fetch_balance()
+                            
+                            worker.state.set("use_real_api", True)
+                            worker.state.set("api_key_enc", ps.encode_key(api_k))
+                            worker.state.set("api_secret_enc", ps.encode_key(sec_k))
+                            worker.state.save_to_persistent()
+                            st.session_state._onboarding_passed = True
+                            st.rerun()
+                        except Exception as e:
+                            err_placeholder.error(f"❌ API Bağlantı Hatası: Lütfen anahtarlarınızı kontrol edin. ({e})")
+                else:
+                    worker.state.set("use_real_api", False)
+                    worker.state.save_to_persistent()
+                    st.session_state._onboarding_passed = True
+                    st.rerun()
     st.stop()
 
 
@@ -174,23 +199,43 @@ with st.sidebar:
     # API Key gösterimi
     if cur_is_real:
         st.markdown("### 🔑 API Anahtarları")
-        api_key_input = st.text_input("API Key", type="password", value=ps.decode_key(S.get("api_key_enc", "")), disabled=worker.is_running)
-        api_secret_input = st.text_input("Secret Key", type="password", value=ps.decode_key(S.get("api_secret_enc", "")), disabled=worker.is_running)
-
-        if api_key_input:
-            worker.state.set("api_key_enc", ps.encode_key(api_key_input))
-        if api_secret_input:
-            worker.state.set("api_secret_enc", ps.encode_key(api_secret_input))
+        sb_err = st.empty()
+        with st.form("sb_api_form"):
+            api_key_input = st.text_input("API Key", type="password", value=ps.decode_key(S.get("api_key_enc", "")), disabled=worker.is_running, key="sb_api_key")
+            api_secret_input = st.text_input("Secret Key", type="password", value=ps.decode_key(S.get("api_secret_enc", "")), disabled=worker.is_running, key="sb_sec_key")
+            
+            sb_submit = st.form_submit_button("💾 Bilgileri Uygula", disabled=worker.is_running)
+            if sb_submit:
+                if not api_key_input or not api_secret_input:
+                    sb_err.error("⚠️ API Key/Secret boş bırakılamaz.")
+                else:
+                    try:
+                        import ccxt
+                        test_exc = ccxt.binance({
+                            'apiKey': api_key_input,
+                            'secret': api_secret_input,
+                            'enableRateLimit': True,
+                            'options': {'defaultType': getattr(cfg, "FUTURES_TYPE", "future")}
+                        })
+                        test_exc.fetch_balance()
+                        
+                        worker.state.set("api_key_enc", ps.encode_key(api_key_input))
+                        worker.state.set("api_secret_enc", ps.encode_key(api_secret_input))
+                        worker.state.save_to_persistent()
+                        st.rerun()
+                    except Exception as e:
+                        sb_err.error(f"❌ Geçersiz API: Lütfen bilgilerinizi (ve Futures yetkisini) kontrol edin. ({e})")
 
     st.markdown("---")
 
     # Start / Stop
     col1, col2 = st.columns(2)
+    start_err = st.empty()
     with col1:
         start_disabled = worker.is_running
         if st.button("▶️ Başlat", use_container_width=True, type="primary", disabled=start_disabled):
             if cur_is_real and (not S.get("api_key_enc", "") or not S.get("api_secret_enc", "")):
-                st.warning("⚠️ Lütfen gerçek işlem (Real Mode) için Binance API Key ve Secret bilgilerini girin!")
+                start_err.error("⚠️ Lütfen gerçek işlem (Real Mode) için Binance API Key ve Secret bilgilerini girin!")
             else:
                 worker.start()
                 st.rerun()
