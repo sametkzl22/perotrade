@@ -205,35 +205,41 @@ with st.sidebar:
     if "binance_secret_input" not in st.session_state:
         st.session_state.binance_secret_input = ps.decode_key(S.get("api_secret_enc", ""))
         
-    api_k = st.text_input("API Key", type="password", key="binance_key_input")
-    sec_k = st.text_input("Secret Key", type="password", key="binance_secret_input")
-    
-    # Eğer değiştirilmişse (herhangi bir anda) direkt worker state'i güncelle
-    if api_k != ps.decode_key(worker.state.get("api_key_enc", "")):
-        worker.state.set("api_key_enc", ps.encode_key(api_k))
-        worker.state.save_to_persistent()
-    if sec_k != ps.decode_key(worker.state.get("api_secret_enc", "")):
-        worker.state.set("api_secret_enc", ps.encode_key(sec_k))
-        worker.state.save_to_persistent()
-
-    # Ping Test Butonu
     ping_res = st.empty()
-    if st.button("📡 Bağlantıyı Test Et", use_container_width=True):
-        if not api_k or not sec_k:
-            ping_res.error("⚠️ Lütfen API Key ve Secret Key girin!")
-        else:
-            try:
-                import ccxt
-                test_exc = ccxt.binance({
-                    'apiKey': api_k,
-                    'secret': sec_k,
-                    'enableRateLimit': True,
-                    'options': {'defaultType': getattr(cfg, "FUTURES_TYPE", "future")}
-                })
-                test_exc.fetch_balance()
-                ping_res.success("✅ Bağlantı Başarılı!")
-            except Exception as e:
-                ping_res.error(f"❌ Bağlantı Başarısız: {e}")
+    
+    with st.form(key='api_form'):
+        api_k = st.text_input("API Key", type="password", key="binance_key_input")
+        sec_k = st.text_input("Secret Key", type="password", key="binance_secret_input")
+        submitted = st.form_submit_button(label='Ayarları Uygula ve Kaydet')
+        
+        if submitted:
+            # Kaydet
+            worker.state.set("api_key_enc", ps.encode_key(api_k))
+            worker.state.set("api_secret_enc", ps.encode_key(sec_k))
+            worker.state.save_to_persistent()
+            
+            # Zorunlu Bakiye Çekme
+            if not api_k or not sec_k:
+                if cur_is_real:
+                    ping_res.error("⚠️ Binance Verisi Alınamadı, API Yetkilerini Kontrol Edin")
+            else:
+                try:
+                    import ccxt
+                    test_exc = ccxt.binance({
+                        'apiKey': api_k,
+                        'secret': sec_k,
+                        'enableRateLimit': True,
+                        'options': {'defaultType': getattr(cfg, "FUTURES_TYPE", "future")}
+                    })
+                    bal_data = test_exc.fetch_balance()
+                    free_usdt = bal_data.get('USDT', {}).get('free', 0.0)
+                    st.session_state.balance = free_usdt
+                    ping_res.success(f"✅ Ayarlar Kaydedildi! Bakiye: ${free_usdt:.2f}")
+                except Exception:
+                    if cur_is_real:
+                        ping_res.error("⚠️ Binance Verisi Alınamadı, API Yetkilerini Kontrol Edin")
+                    else:
+                        ping_res.error("❌ Bağlantı Başarısız: API anahtarlarınızı kontrol edin.")
 
     st.markdown("---")
 
