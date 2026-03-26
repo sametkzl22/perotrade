@@ -641,8 +641,9 @@ with tab_dash:
     fiyat_haritasi = S.get("guncel_fiyatlar", {})
     
     aktif_toplam_pnl = 0.0
-    for s, p in aktif_pozlar.items():
+    for tid, p in aktif_pozlar.items():
         try:
+            s = p.get("sembol", tid)
             gf = fiyat_haritasi.get(s, S.get("fiyat", 0) if s == S.get("aktif_sembol") else p.get('giris_fiyati', 0))
             if gf > 0 and p.get('giris_fiyati', 0) > 0:
                 pnl = pnl_hesapla(p.get('pozisyon', 'YOK'), p.get('giris_fiyati', 0), gf, 
@@ -666,8 +667,9 @@ with tab_dash:
     else:
         st.markdown("#### ⚡ Anlık Durum Kartları")
         poz_liste = []
-        for idx, (s, p) in enumerate(aktif_pozlar.items()):
+        for idx, (tid, p) in enumerate(aktif_pozlar.items()):
             try:
+                s = p.get("sembol", tid)
                 fiyat_haritasi = S.get("guncel_fiyatlar", {})
                 guncel_fiyat = fiyat_haritasi.get(s, S.get("fiyat", 0) if s == S.get("aktif_sembol") else p.get('giris_fiyati', 0))
                 if guncel_fiyat <= 0 or p.get('giris_fiyati', 0) <= 0:
@@ -695,7 +697,7 @@ with tab_dash:
             st.markdown(f"""
             <div style='background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 16px; margin-bottom: 12px; border-left: 4px solid {pnl_renk};'>
                 <div style='display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;'>
-                    <span style='font-size: 18px; font-weight: 700; color: #66fcf1;'>{s} ({p.get('pozisyon', '?')} {p.get('islem_kaldirac', 0)}x)</span>
+                    <span style='font-size: 18px; font-weight: 700; color: #66fcf1;'>{s} ({p.get('pozisyon', '?')} {p.get('islem_kaldirac', 0)}x) <span style='font-size: 11px; color: #888;'>#{tid}</span></span>
                     <span style='font-size: 20px; font-weight: 800; color: {pnl_renk};'>{anlik_pnl:+.2f} USDT ({pnl_pct:+.1f}%)</span>
                 </div>
                 <div style='display: flex; gap: 24px; color: #c5c6c7; font-size: 13px; margin-bottom: 6px;'>
@@ -714,6 +716,7 @@ with tab_dash:
             """, unsafe_allow_html=True)
 
             poz_liste.append({
+                "Trade ID": tid,
                 "Sembol": s,
                 "Giriş Fiyatı": f"${p.get('giris_fiyati', 0):.4f}" if p.get('giris_fiyati', 0) > 0 else "Veri Bekleniyor...",
                 "Kaldıraç": f"{p.get('islem_kaldirac', 0)}x",

@@ -8,6 +8,7 @@ v11: Binance Futures entegrasyonu, Cooling, GC, Auto-Reconnect.
 """
 
 import gc
+import uuid
 import threading
 import time
 import csv
@@ -251,14 +252,33 @@ def likidasyon_hesapla(pozisyon, giris, kaldirac) -> float:
     return 0.0
 
 
+def trade_id_olustur() -> str:
+    """Benzersiz trade_id üretir (8 karakter hex)."""
+    return uuid.uuid4().hex[:8]
+
+
+def sembol_acik_mi(pozisyonlar: dict, sembol: str) -> bool:
+    """Verilen sembolde açık pozisyon var mı kontrol eder."""
+    return any(p.get("sembol") == sembol for p in pozisyonlar.values())
+
+
+def sembol_icin_trade_id_bul(pozisyonlar: dict, sembol: str) -> str | None:
+    """Verilen semboldeki ilk açık pozisyonun trade_id'sini döner."""
+    for tid, p in pozisyonlar.items():
+        if p.get("sembol") == sembol:
+            return tid
+    return None
+
+
 def aktif_margin_toplami(pozisyonlar: dict) -> float:
     return sum(p.get("islem_margin", 0) for p in pozisyonlar.values())
 
 
 def pnl_hesapla_coklu(pozlar, guncel_fiyatlar: dict) -> float:
     toplam_pnl = 0.0
-    for sembol, poz in pozlar.items():
-        anlik = guncel_fiyatlar.get(sembol, poz.get("giris_fiyati", 0))
+    for tid, poz in pozlar.items():
+        s = poz.get("sembol", tid)  # Geriye uyum: eski format sembol key ise tid=sembol
+        anlik = guncel_fiyatlar.get(s, poz.get("giris_fiyati", 0))
         p_pnl = pnl_hesapla(poz.get("pozisyon", "YOK"), poz.get("giris_fiyati", 0), anlik,
                              poz.get("islem_margin", 0) * poz.get("islem_kaldirac", 1),
                              poz.get("islem_kaldirac", 1))
@@ -287,11 +307,12 @@ def islem_gecmisi_kaydet(gecmis: list, dosya="trade_history.csv"):
         pass
 
 
-def islem_kapat(state, sembol, fiyat, neden, is_breakout=False, is_liq=False):
-    poz = state["aktif_pozisyonlar"].get(sembol)
+def islem_kapat(state, trade_id, fiyat, neden, is_breakout=False, is_liq=False):
+    poz = state["aktif_pozisyonlar"].get(trade_id)
     if not poz:
         return
 
+    sembol = poz.get("sembol", trade_id)  # Geriye uyum
     eski_poz = poz["pozisyon"]
     margin = poz["islem_margin"]
     kaldirac = poz["islem_kaldirac"]
@@ -321,7 +342,7 @@ def islem_kapat(state, sembol, fiyat, neden, is_breakout=False, is_liq=False):
     reel_getiri = margin + aktif_pnl
     state["bakiye"] += reel_getiri
 
-    del state["aktif_pozisyonlar"][sembol]
+    del state["aktif_pozisyonlar"][trade_id]
 
     kz_str = f"{aktif_pnl:+.2f} USDT"
     icon = "☠️" if is_liq else "🛡️" if "TS" in neden or "SL" in neden else "🔴"
@@ -397,6 +418,7 @@ def islem_kapat(state, sembol, fiyat, neden, is_breakout=False, is_liq=False):
             cikis_fiyati=fiyat, pnl=aktif_pnl, pnl_pct=pnl_pct_val,
             kaldirac=kaldirac, margin=margin, neden=neden,
             etiket=evo_etiket,
+            trade_id=trade_id,
             rsi=evo_rsi, bollinger_ust=evo_boll_ust,
             bollinger_alt=evo_boll_alt, hacim_oran=evo_hacim_oran
         )
@@ -422,8 +444,10 @@ def dinamik_stop_loss_hesapla(exchange, sembol: str, pozisyon_tipi: str, giris_f
         return likidasyon_hesapla(pozisyon_tipi, giris_fiyati, kaldirac)
 
 
-def islem_kapat_with_retry(state, sembol, fiyat, neden, exchange=None, max_retry=3, slippage_tolerance=0.005, is_breakout=False, is_liq=False):
+def islem_kapat_with_retry(state, trade_id, fiyat, neden, exchange=None, max_retry=3, slippage_tolerance=0.005, is_breakout=False, is_liq=False):
     """v6: Slippage kontrollü kapama. Fiyat kayarsa retry yapar."""
+    poz_ref = state.get("aktif_pozisyonlar", {}).get(trade_id, {})
+    sembol = poz_ref.get("sembol", trade_id)
     for attempt in range(max_retry):
         try:
             guncel_fiyat = fiyat
@@ -436,14 +460,14 @@ def islem_kapat_with_retry(state, sembol, fiyat, neden, exchange=None, max_retry
                     pass
             if attempt > 0 and abs(guncel_fiyat - fiyat) / max(fiyat, 0.0001) > slippage_tolerance:
                 log_ekle(f"⚠️ SLIPPAGE #{attempt}: {sembol} fiyat kaydı ${fiyat:.4f}→${guncel_fiyat:.4f}. Yeniden deneniyor...", state)
-            islem_kapat(state, sembol, guncel_fiyat, neden, is_breakout, is_liq)
+            islem_kapat(state, trade_id, guncel_fiyat, neden, is_breakout, is_liq)
             return True
         except Exception as e:
             if attempt < max_retry - 1:
-                log_ekle(f"⚠️ RETRY #{attempt+1}: {sembol} kapama hatası: {str(e)[:60]}", state)
+                log_ekle(f"⚠️ RETRY #{attempt+1}: {sembol} [{trade_id}] kapama hatası: {str(e)[:60]}", state)
                 time.sleep(0.5)
             else:
-                log_ekle(f"❌ KAPAMA BAŞARISIZ: {sembol} {max_retry} deneme sonrası kapanamadı!", state)
+                log_ekle(f"❌ KAPAMA BAŞARISIZ: {sembol} [{trade_id}] {max_retry} deneme sonrası kapanamadı!", state)
                 return False
     return False
 
@@ -484,7 +508,7 @@ def ws_fiyat_dinleyici(state: dict, lock: threading.Lock, dur_sinyali: threading
         while not dur_sinyali.is_set():
             try:
                 sembol = state.get("aktif_sembol")
-                dinlenecekler = list(state.get("aktif_pozisyonlar", {}).keys())
+                dinlenecekler = list(set(p.get("sembol", tid) for tid, p in state.get("aktif_pozisyonlar", {}).items()))
                 if sembol and sembol != "Bekleniyor..." and sembol not in dinlenecekler:
                     dinlenecekler.insert(0, sembol)
                 
@@ -521,14 +545,17 @@ def ws_fiyat_dinleyici(state: dict, lock: threading.Lock, dur_sinyali: threading
                             max_izin_verilir_risk = anlik_varlik * 0.20
 
                             if top_pnl_anlik < 0 and abs(top_pnl_anlik) >= max_izin_verilir_risk:
-                                acik_syms = list(state.get("aktif_pozisyonlar", {}).keys())
-                                for s in acik_syms:
-                                    f_s = guncel_fiyatlar.get(s, state["aktif_pozisyonlar"][s]["giris_fiyati"])
-                                    islem_kapat(state, s, f_s, "🚨 GLOBAL STOP-LOSS TETİKLENDİ! Toplam zarar %20'yi aştı.")
+                                acik_tids = list(state.get("aktif_pozisyonlar", {}).keys())
+                                for tid in acik_tids:
+                                    poz_gs = state["aktif_pozisyonlar"].get(tid, {})
+                                    s_gs = poz_gs.get("sembol", tid)
+                                    f_s = guncel_fiyatlar.get(s_gs, poz_gs.get("giris_fiyati", 0))
+                                    islem_kapat(state, tid, f_s, "🚨 GLOBAL STOP-LOSS TETİKLENDİ! Toplam zarar %20'yi aştı.")
                                 log_ekle("🚨 GLOBAL STOP-LOSS TETİKLENDİ! Toplam Bakiye Korundu.", state, is_breakout=True)
 
                             kapanacak_semboller = []
-                            for p_sembol, poz in list(state.get("aktif_pozisyonlar", {}).items()):
+                            for p_tid, poz in list(state.get("aktif_pozisyonlar", {}).items()):
+                                p_sembol = poz.get("sembol", p_tid)
                                 f_s = guncel_fiyatlar.get(p_sembol, poz.get("giris_fiyati", 0))
                                 if f_s == 0:
                                     continue
@@ -543,7 +570,7 @@ def ws_fiyat_dinleyici(state: dict, lock: threading.Lock, dur_sinyali: threading
                                 pnl_pct = (aktif_pnl_val / poz.get("islem_margin", 1)) * 100 if poz.get("islem_margin", 0) > 0 else 0
 
                                 if (is_long and f_s <= liq_price) or (is_short and f_s >= liq_price):
-                                    islem_kapat(state, p_sembol, f_s, "Liquidation", is_liq=True)
+                                    islem_kapat(state, p_tid, f_s, "Liquidation", is_liq=True)
                                     if state["bakiye"] <= 0:
                                         state["bot_durumu"] = "💀 İflas"
                                         state["bot_calisiyor"] = False
@@ -553,22 +580,22 @@ def ws_fiyat_dinleyici(state: dict, lock: threading.Lock, dur_sinyali: threading
                                     dsl = poz["dinamik_sl_fiyat"]
                                     dsl_hit = (is_long and f_s <= dsl) or (is_short and f_s >= dsl)
                                     if dsl_hit:
-                                        islem_kapat(state, p_sembol, f_s, f"🛡️ DİNAMİK SL TETİKLENDİ: ATR Stop ${dsl:.4f}")
+                                        islem_kapat(state, p_tid, f_s, f"🛡️ DİNAMİK SL TETİKLENDİ: ATR Stop ${dsl:.4f}")
                                 else:
                                     is_scalper = state.get("mod") == "💎 Ultra-Scalper"
 
                                     # v8: 💎 Ultra-Scalper: Kesintisiz %1.5 ROE TP, %0.5 SL, 5dk timeout
                                     if is_scalper:
                                         if pnl_pct >= 1.5:
-                                            kapanacak_semboller.append(p_sembol)
+                                            kapanacak_semboller.append(p_tid)
                                             poz["kapat_nedeni"] = f"💎 SCALPER TP: %{pnl_pct:.1f} ROE Kâr yakalandı!"
                                             log_ekle(f"💎 SCALPER TP: {p_sembol} %{pnl_pct:.1f} ROE → Kâr alındı, yeni fırsat aranıyor.", state, is_breakout=True)
                                         elif pnl_pct <= -0.5:
-                                            kapanacak_semboller.append(p_sembol)
+                                            kapanacak_semboller.append(p_tid)
                                             poz["kapat_nedeni"] = f"💎 SCALPER SL: %{pnl_pct:.1f} ROE zararla durduruldu."
                                             log_ekle(f"💎 SCALPER SL: {p_sembol} %{pnl_pct:.1f} ROE → Pozisyon kapatıldı.", state)
                                         elif (time.time() - poz.get("acilis_zamani", 0)) > 300:  # 5 dakika
-                                            kapanacak_semboller.append(p_sembol)
+                                            kapanacak_semboller.append(p_tid)
                                             poz["kapat_nedeni"] = f"💎 SCALPER TIMEOUT: 5 dakika doldu, hareket yetersiz."
                                             log_ekle(f"💎 SCALPER TIMEOUT: {p_sembol} 5dk süre doldu. Kapatılıyor.", state)
                                     elif is_scalper and pnl_pct >= 0.5 and not poz.get("ts_aktif"):
@@ -615,20 +642,22 @@ def ws_fiyat_dinleyici(state: dict, lock: threading.Lock, dur_sinyali: threading
                                             if f_s >= poz.get("trailing_stop_fiyat", float('inf')):
                                                 ts_hit = True
                                         if ts_hit:
-                                            kapanacak_semboller.append(p_sembol)
+                                            kapanacak_semboller.append(p_tid)
 
                                     gecen_dk = (time.time() - poz.get("acilis_zamani", time.time())) / 60.0
                                     zaman_limit = 5.0 if state.get("mod") == "💎 Ultra-Scalper" else 60.0
                                     pnl_esik = 0.3 if state.get("mod") == "💎 Ultra-Scalper" else 0.5
                                     if gecen_dk >= zaman_limit and abs(pnl_pct) < pnl_esik:
-                                        if p_sembol not in kapanacak_semboller:
-                                            kapanacak_semboller.append(p_sembol)
+                                        if p_tid not in kapanacak_semboller:
+                                            kapanacak_semboller.append(p_tid)
                                             poz["kapat_nedeni"] = f"Zaman Maliyeti: {gecen_dk:.0f}dk'da yetersiz hareket" if state.get("mod") == "💎 Ultra-Scalper" else "Zaman Maliyeti: Yetersiz Volatilite"
 
-                            for ks in kapanacak_semboller:
-                                f_ks = guncel_fiyatlar.get(ks, state["aktif_pozisyonlar"].get(ks, {}).get("giris_fiyati", 0))
-                                rsn = state["aktif_pozisyonlar"].get(ks, {}).get("kapat_nedeni", "🛡️ TS KAPAT - İz Süren Stop")
-                                islem_kapat(state, ks, f_ks, rsn)
+                            for ks_tid in kapanacak_semboller:
+                                ks_poz = state["aktif_pozisyonlar"].get(ks_tid, {})
+                                ks_sembol = ks_poz.get("sembol", ks_tid)
+                                f_ks = guncel_fiyatlar.get(ks_sembol, ks_poz.get("giris_fiyati", 0))
+                                rsn = ks_poz.get("kapat_nedeni", "🛡️ TS KAPAT - İz Süren Stop")
+                                islem_kapat(state, ks_tid, f_ks, rsn)
 
                             anlik_v = state["bakiye"] + aktif_margin_toplami(state.get("aktif_pozisyonlar", {})) + pnl_hesapla_coklu(state.get("aktif_pozisyonlar", {}), guncel_fiyatlar)
                             if anlik_v > state.get("pik_bakiye", 0):
@@ -689,7 +718,8 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
         try:
             positions = exchange.fetch_positions()
             with lock:
-                for s, poz in state["aktif_pozisyonlar"].items():
+                for tid, poz in state["aktif_pozisyonlar"].items():
+                    s = poz.get("sembol", tid)
                     for api_poz in positions:
                         if api_poz.get("symbol") == s and float(api_poz.get("contracts", 0)) > 0:
                             entry_price = float(api_poz.get("entryPrice", 0))
@@ -819,7 +849,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                 try:
                     df_grid = ai_engine.mum_verisi_cek(exchange, secilen_sembol, "1h", limit=30)
                     grid_bilgi = ai_engine.grid_destek_direnc(df_grid)
-                    if grid_bilgi.get("grid_uygun") and secilen_sembol not in state.get("aktif_pozisyonlar", {}):
+                    if grid_bilgi.get("grid_uygun") and not sembol_acik_mi(state.get("aktif_pozisyonlar", {}), secilen_sembol):
                         with lock:
                             log_ekle(f"📏 GRID MODU: {secilen_sembol} yatay seyirde. Destek: ${grid_bilgi.get('destek', 0)}, Direnç: ${grid_bilgi.get('direnc', 0)}", state)
                             if fiyat <= grid_bilgi.get("destek", 0) * 1.01:
@@ -858,12 +888,13 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         # Tüm pozisyonları kapat
                         kapanacak_24 = list(state.get("aktif_pozisyonlar", {}).keys())
                         fiyatlar_24 = state.get("guncel_fiyatlar", {})
-                        for s24 in kapanacak_24:
-                            p24 = state["aktif_pozisyonlar"].get(s24)
+                        for tid24 in kapanacak_24:
+                            p24 = state["aktif_pozisyonlar"].get(tid24)
                             if p24:
+                                s24 = p24.get("sembol", tid24)
                                 f24 = fiyatlar_24.get(s24, p24.get("giris_fiyati", 0))
                                 if f24 > 0:
-                                    islem_kapat(state, s24, f24, "🔄 24S DÖNGÜ: Otomatik kapama")
+                                    islem_kapat(state, tid24, f24, "🔄 24S DÖNGÜ: Otomatik kapama")
                         # Botu Berserker'dan çıkar, tamamen yenile
                         state["gun_baslangic_bakiye"] = state["bakiye"]
                         state["baslangic_bakiye"] = state["bakiye"]
@@ -885,7 +916,8 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
 
                 # --- YAPAY ZEKA TAHMİNİ ---
                 with lock:
-                    poz_durumu = state.get("aktif_pozisyonlar", {}).get(secilen_sembol, {}).get("pozisyon", "YOK")
+                    _aktif_tid = sembol_icin_trade_id_bul(state.get("aktif_pozisyonlar", {}), secilen_sembol)
+                    poz_durumu = state["aktif_pozisyonlar"][_aktif_tid].get("pozisyon", "YOK") if _aktif_tid else "YOK"
 
                 # Zaman Baskısı
                 zaman_baski_carpani = 1.0
@@ -1036,17 +1068,18 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                             karar_paketi["dusunce"] = f"🩺 KURTARMA MODU: SKOR {karar_paketi.get('guven_skoru',0):.1f} YETERSİZ (>90 Gerek). İptal."
 
                     # DCA
-                    if secilen_sembol in state.get("aktif_pozisyonlar", {}):
-                        poz = state["aktif_pozisyonlar"][secilen_sembol]
+                    dca_tid = sembol_icin_trade_id_bul(state.get("aktif_pozisyonlar", {}), secilen_sembol)
+                    if dca_tid:
+                        poz = state["aktif_pozisyonlar"][dca_tid]
                         dca = ai_engine.dca_hesapla(poz, fiyat, state.get("bakiye", 0))
                         if dca.get("uygun"):
                             with lock:
                                 log_ekle(f"💱 DCA ÖNERİ: {secilen_sembol} - {dca.get('neden', '')}", state)
                                 ekleme = dca.get("ekleme_margin", 0)
                                 if ekleme <= state.get("bakiye", 0):
-                                    state["aktif_pozisyonlar"][secilen_sembol]["islem_margin"] += ekleme
-                                    state["aktif_pozisyonlar"][secilen_sembol]["giris_fiyati"] = dca.get("yeni_ortalama", poz.get("giris_fiyati", 0))
-                                    state["aktif_pozisyonlar"][secilen_sembol]["dca_sayisi"] = dca.get("dca_sayisi", 1)
+                                    state["aktif_pozisyonlar"][dca_tid]["islem_margin"] += ekleme
+                                    state["aktif_pozisyonlar"][dca_tid]["giris_fiyati"] = dca.get("yeni_ortalama", poz.get("giris_fiyati", 0))
+                                    state["aktif_pozisyonlar"][dca_tid]["dca_sayisi"] = dca.get("dca_sayisi", 1)
                                     state["bakiye"] -= ekleme
                                     log_ekle(f"✅ DCA UYGULANDI: ${ekleme:.2f} eklendi.", state)
                 else:
@@ -1090,7 +1123,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                     zaman = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
                     # v6: MTF Konsensüs Gate — LONG/SHORT sadece MTF onaylıysa geçer
-                    if sinyal in ["LONG", "SHORT"] and secilen_sembol not in state.get("aktif_pozisyonlar", {}):
+                    if sinyal in ["LONG", "SHORT"] and not sembol_acik_mi(state.get("aktif_pozisyonlar", {}), secilen_sembol):
                         mtf_k = mtf.get("konsensus", "KARARSIZ") if isinstance(mtf, dict) else "KARARSIZ"
                         mtf_gecti = False
                         if sinyal == "LONG" and mtf_k in ["GÜÇLÜ AL", "ZAYIF AL"]:
@@ -1109,7 +1142,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         else:
                             log_ekle(f"✅ MTF GATE ONAYLADI: {secilen_sembol} {sinyal} → MTF: {mtf_k}", state)
 
-                    if sinyal in ["LONG", "SHORT"] and secilen_sembol not in state.get("aktif_pozisyonlar", {}):
+                    if sinyal in ["LONG", "SHORT"] and not sembol_acik_mi(state.get("aktif_pozisyonlar", {}), secilen_sembol):
                         # v9: Challenge mod kaldıraç/risk override
                         if state.get("mod") == "🚀 94-Day Challenge":
                             ch_data = state.get("challenge_session", {})
@@ -1182,7 +1215,10 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                             except Exception:
                                 dsl_fiyat = likidasyon_hesapla(sinyal, fiyat, tavsiye_kaldirac)
 
+                            tid = trade_id_olustur()
                             yeni_poz = {
+                                "trade_id": tid,
+                                "sembol": secilen_sembol,
                                 "pozisyon": sinyal,
                                 "coin_miktar": buyukluk_usdt,
                                 "giris_fiyati": fiyat,
@@ -1197,7 +1233,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 "giris_nedeni": karar_paketi.get("dusunce", "")[:120],
                                 "beklenen_hedef": karar_paketi.get("expected_growth", 0.0)
                             }
-                            state["aktif_pozisyonlar"][secilen_sembol] = yeni_poz
+                            state["aktif_pozisyonlar"][tid] = yeni_poz
                             state["bakiye"] -= margin
 
                             sl_mesafe_pct = abs(fiyat - dsl_fiyat) / fiyat * 100 if fiyat > 0 else 0
@@ -1210,8 +1246,10 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         else:
                             log_ekle(f"🛡️ {secilen_sembol} Fırsatı Boş Geçildi: Global Risk Limiti Dolu.", state)
 
-                    elif sinyal == "KAPAT" and secilen_sembol in state.get("aktif_pozisyonlar", {}):
-                        islem_kapat_with_retry(state, secilen_sembol, fiyat, karar_paketi.get("dusunce", ""), exchange)
+                    elif sinyal == "KAPAT" and sembol_acik_mi(state.get("aktif_pozisyonlar", {}), secilen_sembol):
+                        kapat_tid = sembol_icin_trade_id_bul(state.get("aktif_pozisyonlar", {}), secilen_sembol)
+                        if kapat_tid:
+                            islem_kapat_with_retry(state, kapat_tid, fiyat, karar_paketi.get("dusunce", ""), exchange)
 
                     if state.get("pik_bakiye", 0) >= state.get("hedef_bakiye", 100):
                         # v10: Challenge modunda bu hedef kontrolünü TAMAMEN ATLA
@@ -1448,17 +1486,18 @@ class BotWorker:
             kapanacaklar = list(raw.get("aktif_pozisyonlar", {}).keys())
             fiyatlar = raw.get("guncel_fiyatlar", {})
             toplam_shutdown_pnl = 0.0
-            for s in kapanacaklar:
-                poz = raw["aktif_pozisyonlar"].get(s)
+            for tid in kapanacaklar:
+                poz = raw["aktif_pozisyonlar"].get(tid)
                 if not poz:
                     continue
+                s = poz.get("sembol", tid)
                 f = fiyatlar.get(s, poz.get("giris_fiyati", 0))
                 if f > 0:
                     margin = poz.get("islem_margin", 0)
                     kaldirac = poz.get("islem_kaldirac", 1)
                     pnl = pnl_hesapla(poz.get("pozisyon", "YOK"), poz.get("giris_fiyati", 0), f, margin * kaldirac, kaldirac)
                     toplam_shutdown_pnl += pnl
-                    islem_kapat(raw, s, f, "🚨 BOT DURDURULDU: Kullanıcı İsteği")
+                    islem_kapat(raw, tid, f, "🚨 BOT DURDURULDU: Kullanıcı İsteği")
             if kapanacaklar:
                 log_ekle(f"🚨 GRACEFUL SHUTDOWN: {len(kapanacaklar)} pozisyon kapatıldı. Toplam PNL: {toplam_shutdown_pnl:+.2f} USDT", raw, is_breakout=True)
 

@@ -85,6 +85,7 @@ def _migrate_db():
             "ALTER TABLE islem_log ADD COLUMN bollinger_ust REAL",
             "ALTER TABLE islem_log ADD COLUMN bollinger_alt REAL",
             "ALTER TABLE islem_log ADD COLUMN hacim_oran REAL",
+            "ALTER TABLE islem_log ADD COLUMN trade_id TEXT DEFAULT ''",
         ]
         for sql in migrations:
             try:
@@ -128,7 +129,7 @@ def tarama_kaydet(sembol: str, fiyat: float, skor: float, atr: float = 0,
 def islem_kaydet(sembol: str, tip: str, giris_fiyati: float,
                  cikis_fiyati: float, pnl: float, pnl_pct: float,
                  kaldirac: int = 1, margin: float = 0, neden: str = "",
-                 etiket: str = "",
+                 etiket: str = "", trade_id: str = "",
                  rsi: float = None, bollinger_ust: float = None,
                  bollinger_alt: float = None, hacim_oran: float = None):
     try:
@@ -136,15 +137,15 @@ def islem_kaydet(sembol: str, tip: str, giris_fiyati: float,
         conn.execute(
             """INSERT INTO islem_log
                (zaman, sembol, tip, giris_fiyati, cikis_fiyati, pnl, pnl_pct,
-                kaldirac, margin, neden, etiket, rsi, bollinger_ust, bollinger_alt, hacim_oran)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                kaldirac, margin, neden, etiket, trade_id, rsi, bollinger_ust, bollinger_alt, hacim_oran)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (datetime.now(timezone.utc).isoformat(), sembol, tip,
-             giris_fiyati, cikis_fiyati, pnl, pnl_pct, kaldirac, margin, neden, etiket,
+             giris_fiyati, cikis_fiyati, pnl, pnl_pct, kaldirac, margin, neden, etiket, trade_id,
              rsi, bollinger_ust, bollinger_alt, hacim_oran)
         )
         conn.commit()
         conn.close()
-        print(f"✅ Trade logged to DB: {sembol} {tip} (PNL: ${pnl:.2f})")
+        print(f"✅ Trade logged to DB: {sembol} {tip} [tid:{trade_id}] (PNL: ${pnl:.2f})")
     except Exception as e:
         print(f"⚠️ data_logger islem_kaydet hatasi: {e}")
 
