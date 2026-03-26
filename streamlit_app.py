@@ -335,10 +335,9 @@ with st.sidebar:
 
     # Bot durumu gösterge
     if worker.is_running:
-        st.success(f"🟢 Bot Çalışıyor: {S.get('bot_durumu', 'Çalışıyor')}")
-        st.markdown(f"**Sonraki Analiz:** {S.get('sonraki_analiz_sn', 0)} sn")
+        st.markdown(f"**🔵 Durum:** {S.get('bot_durumu', 'Çalışıyor')} (Analiz: {S.get('sonraki_analiz_sn', 0)}sn)")
     else:
-        st.warning(f"🔴 Bot Durdu: {S.get('bot_durumu', 'Durduruldu')}")
+        st.markdown(f"**🔴 Durum:** {S.get('bot_durumu', 'Durduruldu')}")
 
     # BTC Trendi, Fonlama, MTF
     st.markdown("---")

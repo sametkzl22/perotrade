@@ -469,7 +469,9 @@ def ws_fiyat_dinleyici(state: dict, lock: threading.Lock, dur_sinyali: threading
                     if reconnect_count > 0:
                         log_ekle(f"🔄 WebSocket yeniden bağlandı (deneme #{reconnect_count})", state)
                     else:
-                        log_ekle("🌐 WebSocket Futures bağlantısı kuruldu.", state)
+                        if not state.get("ws_connected_logged"):
+                            log_ekle("🌐 WebSocket Futures bağlantısı kuruldu.", state)
+                            state["ws_connected_logged"] = True
             except Exception as e:
                 reconnect_count += 1
                 with lock:
@@ -664,7 +666,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
             try:
                 exchange = _exchange_olustur(state, pro=False)
                 with lock:
-                    log_ekle(f"🌐 Futures REST API bağlantısı kuruldu (defaultType: {getattr(cfg, 'FUTURES_TYPE', 'future')})", state)
+                    if not state.get("rest_connected_logged"):
+                        log_ekle(f"🌐 Futures REST API bağlantısı kuruldu (defaultType: {getattr(cfg, 'FUTURES_TYPE', 'future')})", state)
+                        state["rest_connected_logged"] = True
                 return True
             except Exception as e:
                 with lock:

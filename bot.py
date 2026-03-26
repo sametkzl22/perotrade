@@ -37,16 +37,23 @@ signal.signal(signal.SIGTERM, signal_handler)
 # ─────────────────────────────────────────────
 # Exchange Oluşturma (API destekli)
 # ─────────────────────────────────────────────
+_exchange_logged = False
+
 def exchange_olustur() -> ccxt.Exchange:
+    global _exchange_logged
     params = {"enableRateLimit": True}
     
     if cfg.USE_REAL_API and cfg.API_KEY and cfg.SECRET_KEY:
         params["apiKey"] = cfg.API_KEY
         params["secret"] = cfg.SECRET_KEY
         params["options"] = {"defaultType": "future"}
-        print("🔑 Binance Futures API bağlantısı (GERÇEK İŞLEM)")
+        if not _exchange_logged:
+            print("🔑 Binance Futures API bağlantısı (GERÇEK İŞLEM)")
+            _exchange_logged = True
     else:
-        print("📄 Paper Trading modu (API anahtarı yok)")
+        if not _exchange_logged:
+            print("📄 Paper Trading modu (API anahtarı yok)")
+            _exchange_logged = True
     
     exchange = getattr(ccxt, cfg.EXCHANGE_NAME)(params)
     return exchange
