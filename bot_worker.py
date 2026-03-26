@@ -1293,11 +1293,24 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                     state["sonraki_analiz_sn"] -= 1
 
         except Exception as e:
+            err_str = str(e)
+            is_auth = "Authentication" in err_str or "API-key" in err_str or "Invalid credentials" in err_str
+            
             with lock:
-                log_ekle(f"❌ Döngü Hatası (devam ediyor): {str(e)[:100]}", state)
-                print(f"⚠️ bot_engine döngü hatası: {e}")
-            # v11: Bağlantı hatası ise yeniden bağlan
-            if "ExchangeNotAvailable" in str(e) or "NetworkError" in str(e) or "RequestTimeout" in str(e):
+                if is_auth:
+                    if not state.get("auth_error_notified"):
+                        log_ekle("❌ API Kimlik Doğrulama Hatası! Geçerli bakiye/veri çekilemiyor.", state)
+                        state["auth_error_notified"] = True
+                        state["auth_error_msg"] = err_str[:150]
+                else:
+                    if state.get("auth_error_notified"):
+                        state["auth_error_notified"] = False
+                    log_ekle(f"❌ Döngü Hatası (devam ediyor): {err_str[:100]}", state)
+                    print(f"⚠️ bot_engine döngü hatası: {e}")
+
+            if is_auth:
+                time.sleep(10)
+            elif "ExchangeNotAvailable" in err_str or "NetworkError" in err_str or "RequestTimeout" in err_str:
                 with lock:
                     log_ekle("🔄 Bağlantı hatası tespit edildi, exchange yeniden bağlanıyor...", state)
                 if not _baglanti_kur():

@@ -195,6 +195,9 @@ with st.sidebar:
     st.markdown("---")
 
     st.title("🎛️ AI v5 (7/24 Arka Plan)")
+    
+    if S.get("auth_error_notified"):
+        st.error(f"⚠️ API Kimlik Hatası: {S.get('auth_error_msg', 'Bağlantı/Yetki hatası')}")
 
     # API Key gösterimi (Tüm Modlarda Görünür)
     st.markdown("### 🔑 API Anahtarları")

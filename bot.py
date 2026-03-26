@@ -145,11 +145,6 @@ def main():
             except:
                 fiyat = pazar.get("fiyat", 0)
             
-            if rapor:
-                print(f"\n{'─'*50}")
-                for satir in rapor.split('\n'):
-                    print(f"  📊 {satir}")
-            
             # ─── AI Karar ───
             poz_durumu = state["aktif_pozisyonlar"].get(secilen, {}).get("pozisyon", "YOK")
             fonlama = ai_engine.fonlama_orani_getir(exchange, secilen)
@@ -160,12 +155,20 @@ def main():
             if haber_p:
                 veto = ai_engine.haber_vetosu(haber_p, karar["karar"])
                 if veto["veto"]:
-                    print(f"  {veto['neden']}")
                     karar["karar"] = "BEKLE"
-            
+
             sinyal = karar["karar"]
-            print(f"  🎯 [{secilen}] Sinyal: {sinyal} | Skor: {skor:.1f} | BTC: {btc_trend}")
-            print(f"     {karar['dusunce'][:100]}")
+            dusunce = karar.get("dusunce", "")[:100]
+            curr_hash = f"{secilen}_{sinyal}_{skor:.1f}_{dusunce}"
+            
+            if curr_hash != state.get("last_analysis_hash"):
+                if rapor:
+                    print(f"\n{'─'*50}")
+                    for satir in rapor.split('\n'):
+                        print(f"  📊 {satir}")
+                print(f"  🎯 [{secilen}] Sinyal: {sinyal} | Skor: {skor:.1f} | BTC: {btc_trend}")
+                print(f"     {dusunce}")
+                state["last_analysis_hash"] = curr_hash
             
             # ─── İşlem Aç ───
             if sinyal in ["LONG", "SHORT"] and secilen not in state["aktif_pozisyonlar"]:
@@ -236,7 +239,15 @@ def main():
             time.sleep(wait)
             
         except Exception as e:
-            print(f"  ❌ Hata: {e}")
+            err_str = str(e)
+            is_auth = "Authentication" in err_str or "API-key" in err_str or "Invalid credentials" in err_str
+            if is_auth:
+                if not state.get("auth_error_notified"):
+                    print(f"\n❌ [AUTH ERROR] API Yetki/Bağlantı Hatası: {err_str[:100]}")
+                    state["auth_error_notified"] = True
+            else:
+                print(f"  ❌ Hata: {err_str[:100]}")
+                state["auth_error_notified"] = False
             time.sleep(10)
     
     # ─── Temiz Çıkış ───
