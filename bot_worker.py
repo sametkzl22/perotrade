@@ -490,12 +490,9 @@ def ws_fiyat_dinleyici(state: dict, lock: threading.Lock, dur_sinyali: threading
                         pass
                 exchange = _exchange_olustur(state, pro=True)
                 with lock:
+                    # v12: WebSocket log spamming removed. Only debug or error messages kept.
                     if reconnect_count > 0:
                         log_ekle(f"🔄 WebSocket yeniden bağlandı (deneme #{reconnect_count})", state)
-                    else:
-                        if not state.get("ws_connected_logged"):
-                            log_ekle("🌐 WebSocket Futures bağlantısı kuruldu.", state)
-                            state["ws_connected_logged"] = True
             except Exception as e:
                 reconnect_count += 1
                 with lock:
@@ -513,12 +510,11 @@ def ws_fiyat_dinleyici(state: dict, lock: threading.Lock, dur_sinyali: threading
                     dinlenecekler.insert(0, sembol)
                 
                 if dinlenecekler:
-                    poz_tasks = [asyncio.create_task(exchange.watch_ticker(s)) for s in dinlenecekler]
                     try:
-                        res = await asyncio.wait_for(asyncio.gather(*poz_tasks, return_exceptions=True), timeout=5.0)
+                        # v12: Her işlem için ayrı sorgu atmak yerine Binance Ticker üzerinden toplu fiyat çekimi
+                        res = await asyncio.wait_for(exchange.watch_tickers(dinlenecekler), timeout=5.0)
                         
-                        for i, s in enumerate(dinlenecekler):
-                            tck = res[i]
+                        for s, tck in res.items():
                             if isinstance(tck, dict):
                                 guncel_fiyatlar[s] = tck.get("last", guncel_fiyatlar.get(s, 0))
                                 if s == sembol:
@@ -530,7 +526,6 @@ def ws_fiyat_dinleyici(state: dict, lock: threading.Lock, dur_sinyali: threading
                                         
                                         sf = state.get("son_fiyat_tick", 0)
                                         if sf > 0 and f != sf:
-                                            # v8: tick değişimi
                                             degisim_tick = abs((f - sf) / sf) * 100
                                             if degisim_tick >= 0.3:
                                                 state["analiz_tetikleyici"].set()
@@ -682,6 +677,35 @@ def ws_fiyat_dinleyici(state: dict, lock: threading.Lock, dur_sinyali: threading
     asyncio.set_event_loop(loop)
     loop.run_until_complete(dinle())
 
+
+def bakiye_guncelleyici(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
+    """v12: Fiyat donmalarını engellemek için bakiye kontrollerini ayrı bir Thread üzerinden yapar."""
+    exchange = None
+    while not dur_sinyali.is_set():
+        if state.get("use_real_api", False) and state.get("api_key_enc", ""):
+            if exchange is None:
+                try:
+                    exchange = _exchange_olustur(state, pro=False)
+                except Exception:
+                    time.sleep(5)
+                    continue
+            try:
+                bal = exchange.fetch_balance()
+                free_usdt = float(bal.get('USDT', {}).get('free', 0.0))
+                with lock:
+                    state["gercek_bakiye"] = free_usdt
+            except ccxt.AuthenticationError:
+                with lock:
+                    state["bot_durumu"] = "API Kimlik Hatası"
+                    state["bot_calisiyor"] = False
+                    state["auth_error_notified"] = True
+                    state["auth_error_msg"] = "API anahtarlarınızın süresi dolmuş veya Futures erişimi kapalıdır."
+                    log_ekle("🚨 [KRİTİK HATA] Binance API Kimlik Doğrulama Başarısız. Profil>API yönetimi kısmından 'Enable Futures' iznini kontrol edin.", state)
+                dur_sinyali.set()
+                break
+            except Exception:
+                pass
+        time.sleep(10)
 
 # ─────────────────────────────────────────────
 # Bot Engine (Ana Karar Döngüsü) — v11 Futures
@@ -1470,6 +1494,9 @@ class BotWorker:
 
         self._ws_thread = threading.Thread(target=ws_fiyat_dinleyici, args=(raw, lock, dur), daemon=True)
         self._ws_thread.start()
+
+        self._balance_thread = threading.Thread(target=bakiye_guncelleyici, args=(raw, lock, dur), daemon=True)
+        self._balance_thread.start()
 
         self._engine_thread = threading.Thread(target=bot_engine, args=(raw, lock, dur), daemon=True)
         self._engine_thread.start()

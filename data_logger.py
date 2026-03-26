@@ -12,26 +12,43 @@ import sys
 from datetime import datetime, timezone
 
 
+import sqlite3
+import os
+import sys
+from datetime import datetime, timezone
+import settings_manager
+
+_initialized_dbs = set()
+
 def _get_db_path() -> str:
     if getattr(sys, 'frozen', False):
         base = os.path.dirname(sys.executable)
     else:
         base = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base, "trade_logs.db")
-
-
-DB_PATH = _get_db_path()
+    
+    is_real = settings_manager.is_real_mode_active()
+    folder_name = "real" if is_real else "demo"
+    file_name = "real_trades.db" if is_real else "demo_trades.db"
+    
+    os.makedirs(os.path.join(base, "data", folder_name), exist_ok=True)
+    return os.path.join(base, "data", folder_name, file_name)
 
 
 def _get_conn():
-    conn = sqlite3.connect(DB_PATH, timeout=5)
+    db_path = _get_db_path()
+    if db_path not in _initialized_dbs:
+        _init_db(db_path)
+        _migrate_db(db_path)
+        _initialized_dbs.add(db_path)
+        
+    conn = sqlite3.connect(db_path, timeout=5)
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 
-def _init_db():
+def _init_db(db_path: str):
     try:
-        conn = _get_conn()
+        conn = sqlite3.connect(db_path, timeout=5)
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS tarama_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,6 +76,7 @@ def _init_db():
                 margin REAL,
                 neden TEXT,
                 etiket TEXT DEFAULT '',
+                trade_id TEXT DEFAULT '',
                 rsi REAL,
                 bollinger_ust REAL,
                 bollinger_alt REAL,
@@ -75,10 +93,10 @@ def _init_db():
         print(f"⚠️ data_logger init hatası: {e}")
 
 
-def _migrate_db():
+def _migrate_db(db_path: str):
     """Mevcut veritabanına yeni kolonları güvenli ekler."""
     try:
-        conn = _get_conn()
+        conn = sqlite3.connect(db_path, timeout=5)
         migrations = [
             "ALTER TABLE islem_log ADD COLUMN etiket TEXT DEFAULT ''",
             "ALTER TABLE islem_log ADD COLUMN rsi REAL",
@@ -96,11 +114,6 @@ def _migrate_db():
         conn.close()
     except Exception:
         pass
-
-
-# Modül yüklenince tablo oluştur ve migration çalıştır
-_init_db()
-_migrate_db()
 
 
 # ─────────────────────────────────────────────

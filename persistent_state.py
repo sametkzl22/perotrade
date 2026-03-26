@@ -20,6 +20,7 @@ import tempfile
 import shutil
 import time
 from datetime import datetime, timezone
+import settings_manager
 
 # ──────────────────────────────────────────────
 # STREAMLIT CLOUD IN-MEMORY YEDEK
@@ -56,8 +57,16 @@ def get_app_path():
     return os.path.dirname(os.path.abspath(__file__))
 
 
-STATE_FILE = os.path.join(get_app_path(), "persistent_state.json")
-
+def get_state_file() -> str:
+    """Moda göre izole dosya yolunu döner."""
+    base_dir = get_app_path()
+    is_real = settings_manager.is_real_mode_active()
+    folder_name = "real" if is_real else "demo"
+    file_name = "real_state.json" if is_real else "demo_state.json"
+    
+    folder_path = os.path.join(base_dir, "data", folder_name)
+    os.makedirs(folder_path, exist_ok=True)
+    return os.path.join(folder_path, file_name)
 
 def encode_key(key: str) -> str:
     if not key:
@@ -217,13 +226,16 @@ def _safe_write_json(data: dict, dosya: str) -> bool:
 # ──────────────────────────────────────────────
 # ANA FONKSİYONLAR
 # ──────────────────────────────────────────────
-def state_yukle(dosya: str = STATE_FILE) -> dict:
+def state_yukle(dosya: str = None) -> dict:
     """
     State yükler (3 katmanlı fallback):
-      1. Disk (persistent_state.json)
+      1. Disk (data/demo/demo_state.json veya data/real/real_state.json)
       2. Bulut Hafızası (st.cache_resource)
       3. Varsayılan default değerler
     """
+    if dosya is None:
+        dosya = get_state_file()
+
     memory = get_memory()
 
     # ─── KATMAN 1: Disk ───
@@ -232,17 +244,11 @@ def state_yukle(dosya: str = STATE_FILE) -> dict:
     if state is not None:
         state = _ensure_keys(state)
 
-        # Demo / Real yönlendirmesi
-        if not state.get("use_real_api", False):
-            state["bakiye"] = state.get("Demo_Bakiye", 100.0)
-            state["baslangic_bakiye"] = 100.0
-            state["gun_baslangic_bakiye"] = state.get("demo_gun_baslangic", 100.0)
-            state["aktif_pozisyonlar"] = state.get("demo_aktif_pozisyonlar", {})
-            state["islem_gecmisi"] = state.get("demo_islem_gecmisi", [])
-            state["cuzdan_gecmisi"] = state.get("demo_cuzdan_gecmisi", [])
-            state["max_drawdown"] = state.get("demo_max_drawdown", 0.0)
-            state["pik_bakiye"] = state.get("demo_pik_bakiye", 100.0)
-            state["baslangic_zamani"] = state.get("demo_baslangic_zamani", 0.0)
+        # Mod bilgisi settings_manager'dan (tek doğru kaynak)
+        is_real = settings_manager.is_real_mode_active()
+        state["use_real_api"] = is_real
+
+        if not is_real:
             print(f"🎮 DEMO Modu Yüklendi! (Sanal Bakiye: ${state.get('bakiye', 0):.2f})")
         else:
             print(f"💰 REAL Mod Yüklendi! (Bakiye: ${state.get('bakiye', 0):.2f})")
@@ -316,19 +322,20 @@ def state_yukle(dosya: str = STATE_FILE) -> dict:
     return state
 
 
-def state_kaydet(state: dict, dosya: str = STATE_FILE):
+def state_kaydet(state: dict, dosya: str = None):
     """
-    State'i diske yazar (atomic). Demo ve Real verileri birbirini ezmez.
+    State'i diske yazar (atomic).
+    Dosya belirtilmemişse aktif moda göre doğru klasörü bulur.
     Her yazma işlemi aynı zamanda Bulut Hafızasına yedeklenir.
     """
+    if dosya is None:
+        dosya = get_state_file()
+
     if not isinstance(state, dict):
         print("❌ state_kaydet: Geçersiz state tipi, kaydetme iptal.")
         return
 
     try:
-        # Mevcut disk verisini oku (varsa) — mod arası koruma için
-        eski_kayit = _safe_read_json(dosya) or {}
-
         # Serializable filtreleme
         kayit = {}
         for k, v in state.items():
@@ -336,33 +343,7 @@ def state_kaydet(state: dict, dosya: str = STATE_FILE):
                 kayit[k] = v
 
         kayit = _ensure_keys(kayit)
-
-        is_demo = not kayit.get("use_real_api", False)
-
-        if is_demo:
-            # Demo modunda, ana motor "bakiye" kullanır ama aslında sanal paradır
-            kayit["Demo_Bakiye"] = kayit.get("bakiye", 100.0)
-            kayit["demo_aktif_pozisyonlar"] = kayit.get("aktif_pozisyonlar", {})
-            kayit["demo_islem_gecmisi"] = kayit.get("islem_gecmisi", [])
-            kayit["demo_cuzdan_gecmisi"] = kayit.get("cuzdan_gecmisi", [])
-            kayit["demo_gun_baslangic"] = kayit.get("gun_baslangic_bakiye", 100.0)
-            kayit["demo_pik_bakiye"] = kayit.get("pik_bakiye", 100.0)
-            kayit["demo_max_drawdown"] = kayit.get("max_drawdown", 0.0)
-            kayit["demo_baslangic_zamani"] = kayit.get("baslangic_zamani", 0.0)
-
-            # Real verileri koruma (üzerine yazma)
-            for key in ["bakiye", "baslangic_bakiye", "gun_baslangic_bakiye",
-                         "aktif_pozisyonlar", "islem_gecmisi", "cuzdan_gecmisi",
-                         "max_drawdown", "pik_bakiye"]:
-                if key in eski_kayit:
-                    kayit[key] = eski_kayit[key]
-        else:
-            # Real moddayken Demo verilerini koruma
-            for key in ["Demo_Bakiye", "demo_aktif_pozisyonlar", "demo_islem_gecmisi",
-                         "demo_cuzdan_gecmisi", "demo_gun_baslangic", "demo_pik_bakiye",
-                         "demo_max_drawdown", "demo_baslangic_zamani"]:
-                if key in eski_kayit:
-                    kayit[key] = eski_kayit[key]
+        kayit["use_real_api"] = settings_manager.is_real_mode_active()
 
         # Atomic write (güvenli)
         success = _safe_write_json(kayit, dosya)
@@ -434,7 +415,7 @@ def gun_sonu_raporu(state: dict) -> str:
     )
 
 
-def challenge_sifirla(state: dict, dosya: str = STATE_FILE) -> dict:
+def challenge_sifirla(state: dict, dosya: str = None) -> dict:
     """
     v10: Challenge verilerini SADECE .json dosyasında sıfırlar.
     ⚠️ trade_logs.db'ye KESİNLİKLE DOKUNMAZ — AI eğitim verileri korunur.

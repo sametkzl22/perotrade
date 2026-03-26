@@ -216,33 +216,37 @@ with st.sidebar:
         submitted = st.form_submit_button(label='Ayarları Uygula ve Kaydet')
         
         if submitted:
-            # Kaydet
-            worker.state.set("api_key_enc", ps.encode_key(api_k))
-            worker.state.set("api_secret_enc", ps.encode_key(sec_k))
-            worker.state.save_to_persistent()
-            
-            # Zorunlu Bakiye Çekme
             if not api_k or not sec_k:
                 if cur_is_real:
-                    ping_res.error("⚠️ Binance Verisi Alınamadı, API Yetkilerini Kontrol Edin")
+                    ping_res.error("⚠️ Lütfen API Key ve Secret Key giriniz.")
             else:
                 try:
                     import ccxt
+                    ping_res.info("🔄 API bağlantısı test ediliyor...")
                     test_exc = ccxt.binance({
                         'apiKey': api_k,
                         'secret': sec_k,
                         'enableRateLimit': True,
                         'options': {'defaultType': getattr(cfg, "FUTURES_TYPE", "future")}
                     })
+                    
+                    # Test Bağlantısı - BAŞARISIZ OLURSA EXCEPTION ATACAKTIR
                     bal_data = test_exc.fetch_balance()
-                    free_usdt = bal_data.get('USDT', {}).get('free', 0.0)
+                    free_usdt = float(bal_data.get('USDT', {}).get('free', 0.0))
+                    
+                    # BAŞARILI -> Şimdi Kaydet
+                    worker.state.set("api_key_enc", ps.encode_key(api_k))
+                    worker.state.set("api_secret_enc", ps.encode_key(sec_k))
+                    worker.state.save_to_persistent()
+                    
                     st.session_state.balance = free_usdt
-                    ping_res.success(f"✅ Ayarlar Kaydedildi! Bakiye: ${free_usdt:.2f}")
-                except Exception:
-                    if cur_is_real:
-                        ping_res.error("⚠️ Binance Verisi Alınamadı, API Yetkilerini Kontrol Edin")
-                    else:
-                        ping_res.error("❌ Bağlantı Başarısız: API anahtarlarınızı kontrol edin.")
+                    ping_res.success(f"✅ Doğrulandı ve Kaydedildi! Gerçek Bakiye: ${free_usdt:.2f}")
+                    time.sleep(1)
+                    st.rerun()
+                except ccxt.AuthenticationError:
+                    ping_res.error("❌ Kimlik Doğrulama Hatası (Authentication Error): API anahtarlarınız geçersiz, IP kısıtlaması var veya süresi dolmuş.")
+                except Exception as e:
+                    ping_res.error(f"❌ Bağlantı Başarısız: Futures erişimi (Enable Futures) kapalı olabilir veya bakiye okunamadı. ({str(e)[:60]})")
 
     st.markdown("---")
 
