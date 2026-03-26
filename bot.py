@@ -96,6 +96,14 @@ def main():
     
     # Exchange bağlantısı
     exchange = exchange_olustur()
+    # Market Yükleme Güvencesi: try-except + retry
+    for _mkt_attempt in range(3):
+        try:
+            exchange.load_markets()
+            break
+        except Exception as _mkt_err:
+            print(f"⚠️ Market data fetch failed, retrying... ({_mkt_attempt+1}/3): {str(_mkt_err)[:60]}")
+            time.sleep(5)
     print(f"  Exchange  : {cfg.EXCHANGE_NAME}")
     print(f"  Bakiye    : ${state['bakiye']:.2f}")
     print(f"  Gün #     : {state.get('gun_sayaci', 0)}")
@@ -104,6 +112,9 @@ def main():
     print("=" * 60)
     
     dongusayaci = 0
+    _son_bilinen_fiyatlar = {}  # Fallback price cache
+    _error_counts = {}  # Error throttling
+    _last_error_log_time = time.time()
     
     while running:
         dongusayaci += 1
@@ -145,12 +156,25 @@ def main():
             rapor = tarama.get("karar_raporu", "")
             haber_p = tarama.get("haber_puanlari", {})
             
+            # ─── Bulk Ticker Cache (Rate Limit %90 azalır) ───
+            try:
+                _bulk_tickers = exchange.fetch_tickers()
+            except Exception:
+                _bulk_tickers = {}
+
             # ─── Fiyat ───
             try:
-                ticker = exchange.fetch_ticker(secilen)
+                ticker = _bulk_tickers.get(secilen, {})
+                if not isinstance(ticker, dict) or not ticker.get("last"):
+                    ticker = exchange.fetch_ticker(secilen)
                 fiyat = ticker.get("last", pazar.get("fiyat", 0))
-            except:
+            except Exception:
                 fiyat = pazar.get("fiyat", 0)
+            # Fallback: Son bilinen fiyat
+            if not fiyat or fiyat == 0:
+                fiyat = _son_bilinen_fiyatlar.get(secilen, pazar.get("fiyat", 0))
+            elif fiyat > 0:
+                _son_bilinen_fiyatlar[secilen] = fiyat
             
             # ─── AI Karar ───
             poz_durumu = state["aktif_pozisyonlar"].get(secilen, {}).get("pozisyon", "YOK")
@@ -210,10 +234,12 @@ def main():
             # ─── DCA Kontrolü ───
             for sym, poz in list(state["aktif_pozisyonlar"].items()):
                 try:
-                    t = exchange.fetch_ticker(sym)
+                    t = _bulk_tickers.get(sym, {})
+                    if not isinstance(t, dict) or not t.get("last"):
+                        t = exchange.fetch_ticker(sym)
                     g_fiyat = t.get("last", poz["giris_fiyati"])
-                except:
-                    g_fiyat = poz["giris_fiyati"]
+                except Exception:
+                    g_fiyat = _son_bilinen_fiyatlar.get(sym, poz["giris_fiyati"])
                 
                 dca = ai_engine.dca_hesapla(poz, g_fiyat, state["bakiye"])
                 if dca["uygun"]:
@@ -253,8 +279,16 @@ def main():
                     print(f"\n❌ [AUTH ERROR] API Yetki/Bağlantı Hatası: {err_str[:100]}")
                     state["auth_error_notified"] = True
             else:
-                print(f"  ❌ Hata: {err_str[:100]}")
+                # Error Throttling: 30sn'de bir özet log (spam engelleme)
                 state["auth_error_notified"] = False
+                err_key = err_str[:50]
+                _error_counts[err_key] = _error_counts.get(err_key, 0) + 1
+                now = time.time()
+                if now - _last_error_log_time >= 30:
+                    for ek, ec in _error_counts.items():
+                        print(f"  ❌ Hata Özeti ({ec}x/30s): {ek}")
+                    _error_counts.clear()
+                    _last_error_log_time = now
             time.sleep(10)
     
     # ─── Temiz Çıkış ───

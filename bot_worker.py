@@ -718,6 +718,14 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
         for attempt in range(5):
             try:
                 exchange = _exchange_olustur(state, pro=False)
+                # Market Yükleme Güvencesi: try-except + retry
+                for _mkt_attempt in range(3):
+                    try:
+                        exchange.load_markets()
+                        break
+                    except Exception as _mkt_err:
+                        print(f"⚠️ Market data fetch failed, retrying... ({_mkt_attempt+1}/3): {str(_mkt_err)[:60]}")
+                        time.sleep(5)
                 with lock:
                     if not state.get("rest_connected_logged"):
                         log_ekle(f"🌐 Futures REST API bağlantısı kuruldu (defaultType: {getattr(cfg, 'FUTURES_TYPE', 'future')})", state)
@@ -736,6 +744,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
 
     # v11: Döngü sayacı (GC + Cooling)
     _dongü_sayaci = 0
+    # Error throttling: 30sn'de bir özet log
+    _error_counts = {}
+    _last_error_log_time = time.time()
 
     # --- v10: Binance Position Sync (Prevent 0-price bug on restart) ---
     if state.get("use_real_api", False) and state.get("aktif_pozisyonlar"):
@@ -797,6 +808,12 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
             bekleme_suresi_global = 30
             karar_paketi = {}
 
+            # Bulk Ticker: Tüm fiyatları tek istekte çek (Rate Limit %90 azalır)
+            try:
+                _bulk_tickers = exchange.fetch_tickers()
+            except Exception:
+                _bulk_tickers = {}
+
             for index, c_data in enumerate(secilen_coinler):
                 if dur_sinyali.is_set():
                     break
@@ -830,17 +847,26 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         for rapor_satiri in karar_raporu.split('\n'):
                             log_ekle(f"📊 {rapor_satiri}", state)
 
-                # Fiyat Senkronizasyonu: Her zaman Binance'den en güncel fiyatı çek
-                try:
-                    ticker = exchange.fetch_ticker(secilen_sembol)
-                    if isinstance(ticker, dict):
-                        fiyat = ticker.get("last", 0) or (secilen_pazar.get("fiyat", 0) if secilen_pazar else 0)
-                        degisim = ticker.get("percentage", 0) or 0
-                        hacim = ticker.get("quoteVolume", 0) or 0
-                    else:
-                        raise ValueError("Ticker is not a dict")
-                except Exception:
-                    fiyat = secilen_pazar.get("fiyat", 0) if isinstance(secilen_pazar, dict) else 0
+                # Fiyat Senkronizasyonu: Bulk cache → tekil fallback → son bilinen fiyat
+                ticker = _bulk_tickers.get(secilen_sembol, {})
+                if not isinstance(ticker, dict) or not ticker.get("last"):
+                    try:
+                        ticker = exchange.fetch_ticker(secilen_sembol)
+                    except Exception:
+                        ticker = {}
+                if isinstance(ticker, dict) and ticker.get("last"):
+                    fiyat = ticker.get("last", 0)
+                    degisim = ticker.get("percentage", 0) or 0
+                    hacim = ticker.get("quoteVolume", 0) or 0
+                    # Başarılı fiyatı cache'e yaz
+                    with lock:
+                        state.setdefault("guncel_fiyatlar", {})[secilen_sembol] = fiyat
+                else:
+                    # Fallback: Son bilinen fiyat (Proxy/IP kısıtlaması durumu)
+                    with lock:
+                        fiyat = state.get("guncel_fiyatlar", {}).get(secilen_sembol, 0)
+                    if not fiyat:
+                        fiyat = secilen_pazar.get("fiyat", 0) if isinstance(secilen_pazar, dict) else 0
                     degisim, hacim = 0, 0
 
                 fonlama = ai_engine.fonlama_orani_getir(exchange, secilen_sembol)
@@ -1361,20 +1387,13 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
         except Exception as e:
             err_str = str(e)
             is_auth = "Authentication" in err_str or "API-key" in err_str or "Invalid credentials" in err_str
-            
-            with lock:
-                if is_auth:
+
+            if is_auth:
+                with lock:
                     if not state.get("auth_error_notified"):
                         log_ekle("❌ API Kimlik Doğrulama Hatası! Geçerli bakiye/veri çekilemiyor.", state)
                         state["auth_error_notified"] = True
                         state["auth_error_msg"] = err_str[:150]
-                else:
-                    if state.get("auth_error_notified"):
-                        state["auth_error_notified"] = False
-                    log_ekle(f"❌ Döngü Hatası (devam ediyor): {err_str[:100]}", state)
-                    print(f"⚠️ bot_engine döngü hatası: {e}")
-
-            if is_auth:
                 time.sleep(10)
             elif "ExchangeNotAvailable" in err_str or "NetworkError" in err_str or "RequestTimeout" in err_str:
                 with lock:
@@ -1386,6 +1405,19 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                 else:
                     time.sleep(2)
             else:
+                # Error Throttling: 30sn'de bir özet log (spam engelleme)
+                if state.get("auth_error_notified"):
+                    with lock:
+                        state["auth_error_notified"] = False
+                err_key = err_str[:50]
+                _error_counts[err_key] = _error_counts.get(err_key, 0) + 1
+                now = time.time()
+                if now - _last_error_log_time >= 30:
+                    with lock:
+                        for ek, ec in _error_counts.items():
+                            log_ekle(f"❌ Hata Özeti ({ec}x/30s): {ek}", state)
+                    _error_counts.clear()
+                    _last_error_log_time = now
                 time.sleep(5)
 
     # Bot durdurulduğunda son kayıt
