@@ -196,35 +196,44 @@ with st.sidebar:
 
     st.title("🎛️ AI v5 (7/24 Arka Plan)")
 
-    # API Key gösterimi
-    if cur_is_real:
-        st.markdown("### 🔑 API Anahtarları")
-        sb_err = st.empty()
-        with st.form("sb_api_form"):
-            api_key_input = st.text_input("API Key", type="password", value=ps.decode_key(S.get("api_key_enc", "")), disabled=worker.is_running, key="sb_api_key")
-            api_secret_input = st.text_input("Secret Key", type="password", value=ps.decode_key(S.get("api_secret_enc", "")), disabled=worker.is_running, key="sb_sec_key")
-            
-            sb_submit = st.form_submit_button("💾 Bilgileri Uygula", disabled=worker.is_running)
-            if sb_submit:
-                if not api_key_input or not api_secret_input:
-                    sb_err.error("⚠️ API Key/Secret boş bırakılamaz.")
-                else:
-                    try:
-                        import ccxt
-                        test_exc = ccxt.binance({
-                            'apiKey': api_key_input,
-                            'secret': api_secret_input,
-                            'enableRateLimit': True,
-                            'options': {'defaultType': getattr(cfg, "FUTURES_TYPE", "future")}
-                        })
-                        test_exc.fetch_balance()
-                        
-                        worker.state.set("api_key_enc", ps.encode_key(api_key_input))
-                        worker.state.set("api_secret_enc", ps.encode_key(api_secret_input))
-                        worker.state.save_to_persistent()
-                        st.rerun()
-                    except Exception as e:
-                        sb_err.error(f"❌ Geçersiz API: Lütfen bilgilerinizi (ve Futures yetkisini) kontrol edin. ({e})")
+    # API Key gösterimi (Tüm Modlarda Görünür)
+    st.markdown("### 🔑 API Anahtarları")
+    
+    # st.session_state ile persistence sağlanıyor
+    if "binance_key_input" not in st.session_state:
+        st.session_state.binance_key_input = ps.decode_key(S.get("api_key_enc", ""))
+    if "binance_secret_input" not in st.session_state:
+        st.session_state.binance_secret_input = ps.decode_key(S.get("api_secret_enc", ""))
+        
+    api_k = st.text_input("API Key", type="password", key="binance_key_input")
+    sec_k = st.text_input("Secret Key", type="password", key="binance_secret_input")
+    
+    # Eğer değiştirilmişse (herhangi bir anda) direkt worker state'i güncelle
+    if api_k != ps.decode_key(worker.state.get("api_key_enc", "")):
+        worker.state.set("api_key_enc", ps.encode_key(api_k))
+        worker.state.save_to_persistent()
+    if sec_k != ps.decode_key(worker.state.get("api_secret_enc", "")):
+        worker.state.set("api_secret_enc", ps.encode_key(sec_k))
+        worker.state.save_to_persistent()
+
+    # Ping Test Butonu
+    ping_res = st.empty()
+    if st.button("📡 Bağlantıyı Test Et", use_container_width=True):
+        if not api_k or not sec_k:
+            ping_res.error("⚠️ Lütfen API Key ve Secret Key girin!")
+        else:
+            try:
+                import ccxt
+                test_exc = ccxt.binance({
+                    'apiKey': api_k,
+                    'secret': sec_k,
+                    'enableRateLimit': True,
+                    'options': {'defaultType': getattr(cfg, "FUTURES_TYPE", "future")}
+                })
+                test_exc.fetch_balance()
+                ping_res.success("✅ Bağlantı Başarılı!")
+            except Exception as e:
+                ping_res.error(f"❌ Bağlantı Başarısız: {e}")
 
     st.markdown("---")
 
@@ -234,7 +243,9 @@ with st.sidebar:
     with col1:
         start_disabled = worker.is_running
         if st.button("▶️ Başlat", use_container_width=True, type="primary", disabled=start_disabled):
-            if cur_is_real and (not S.get("api_key_enc", "") or not S.get("api_secret_enc", "")):
+            k_val = st.session_state.get("binance_key_input", "")
+            s_val = st.session_state.get("binance_secret_input", "")
+            if cur_is_real and (not k_val or not s_val):
                 start_err.error("⚠️ Lütfen gerçek işlem (Real Mode) için Binance API Key ve Secret bilgilerini girin!")
             else:
                 worker.start()
