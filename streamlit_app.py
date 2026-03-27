@@ -76,6 +76,10 @@ st.markdown("""
 # ─────────────────────────────────────────────
 worker = get_bot_worker()
 
+# Auto-Start Logic
+if worker.state.get("bot_calisiyor", False) and getattr(worker, "_engine_thread", None) is None:
+    worker.start()
+
 # UI-only session state (görünüm modu gibi)
 if "view_mode" not in st.session_state:
     st.session_state.view_mode = "📊 Profesyonel Dashboard"

@@ -1065,6 +1065,16 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                             }
                             state["aktif_pozisyonlar"][tid] = yeni_poz
                             state["bakiye"] -= margin
+                            
+                            # Immediate Save: Açılan pozisyon sonrasında anında atomik kaydet
+                            try:
+                                temiz_save = {}
+                                for save_k, save_v in state.items():
+                                    if isinstance(save_v, (str, int, float, bool, list, dict, type(None))):
+                                        temiz_save[save_k] = save_v
+                                ps.state_kaydet(temiz_save)
+                            except Exception:
+                                pass
 
                             sl_mesafe_pct = abs(fiyat - dsl_fiyat) / fiyat * 100 if fiyat > 0 else 0
                             state["islem_gecmisi"].append({
@@ -1292,7 +1302,7 @@ class BotWorker:
         return self.state.get("bot_calisiyor", False)
 
     def start(self):
-        if self.is_running:
+        if self.is_running and getattr(self, "_engine_thread", None) is not None:
             return
 
         raw = self.state.raw()
@@ -1304,6 +1314,9 @@ class BotWorker:
         raw["bot_durumu"] = "Çalışıyor"
         if raw.get("baslangic_zamani", 0) == 0.0:
             raw["baslangic_zamani"] = time.time()
+            
+        # Immediate Save: Bot ilk başladığında anında kaydet
+        self.state.save_to_persistent()
 
         # API Entegrasyonu
         if raw.get("use_real_api"):

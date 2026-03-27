@@ -119,8 +119,14 @@ def decode_key(encoded_key: str) -> str:
     try:
         return get_fernet().decrypt(encoded_key.encode('utf-8')).decode('utf-8')
     except InvalidToken:
-        print("🚨 [GÜVENLİK İHLALİ] Geçersiz Şifreleme Anahtarı (InvalidToken). Veri güvenliğini korumak için bot durduruluyor!")
-        sys.exit(1)
+        warning_msg = "Kritik Hata: Veri şifresi çözülemedi, lütfen MASTER_KEY kontrolü yapın"
+        print(f"🚨 [GÜVENLİK İHLALİ] {warning_msg}")
+        if st is not None:
+            try:
+                st.error(warning_msg)
+            except Exception:
+                pass
+        return ""
     except (ccxt.BaseError, sqlite3.Error, Exception) as e:
         print(f"⚠️ Decryption error: {e}")
         try:
