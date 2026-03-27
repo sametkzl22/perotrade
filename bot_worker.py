@@ -14,6 +14,7 @@ import time
 import csv
 import asyncio
 import os
+import sqlite3
 from datetime import datetime, timezone
 
 import ccxt
@@ -170,7 +171,7 @@ class GlobalBotState:
         """Persistent state'den yükle."""
         try:
             loaded = ps.state_yukle(ps.STATE_FILE)
-        except Exception as e:
+        except (ccxt.BaseError, sqlite3.Error, Exception) as e:
             print(f"⚠️ state_yukle hata: {e}")
             loaded = ps.DEFAULT_STATE.copy()
 
@@ -209,7 +210,7 @@ class GlobalBotState:
                     if isinstance(v, (str, int, float, bool, list, dict, type(None))):
                         temiz[k] = v
             ps.state_kaydet(temiz)
-        except Exception as e:
+        except (ccxt.BaseError, sqlite3.Error, Exception) as e:
             print(f"⚠️ save_to_persistent hata: {e}")
 
 
@@ -304,7 +305,7 @@ def islem_gecmisi_kaydet(gecmis: list, dosya="trade_history.csv"):
             writer = csv.DictWriter(f, fieldnames=headers)
             writer.writeheader()
             writer.writerows(gecmis)
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         pass
 
 
@@ -390,7 +391,7 @@ def islem_kapat(state, trade_id, fiyat, neden, is_breakout=False, is_liq=False):
             ai_engine.evo_reward_update(aktif_pnl, sembol)
             puan_str = f"+{cfg.EVO_REWARD_POINTS}" if aktif_pnl > 0 else str(cfg.EVO_PENALTY_POINTS)
             log_ekle(f"🧪 EVO {'ÖDÜL' if aktif_pnl > 0 else 'CEZA'}: {sembol} PNL {aktif_pnl:+.4f} → Model Puan: {puan_str}", state)
-        except Exception:
+        except (ccxt.BaseError, sqlite3.Error, Exception):
             pass
         # Genişletilmiş analiz: RSI, Bollinger, Hacim oranı hesapla
         try:
@@ -408,7 +409,7 @@ def islem_kapat(state, trade_id, fiyat, neden, is_breakout=False, is_liq=False):
                     evo_hacim_oran = round(son_hacim / ort_hacim, 2) if ort_hacim > 0 else 0.0
                 neden_detay = (f"RSI:{evo_rsi:.1f} | Boll:[{evo_boll_alt:.2f}-{evo_boll_ust:.2f}] | H.Oran:{evo_hacim_oran or 0:.2f}x")
                 log_ekle(f"🧪 EVO DETAY: {sembol} {neden_detay}", state)
-        except Exception:
+        except (ccxt.BaseError, sqlite3.Error, Exception):
             pass
 
     try:
@@ -423,7 +424,7 @@ def islem_kapat(state, trade_id, fiyat, neden, is_breakout=False, is_liq=False):
             rsi=evo_rsi, bollinger_ust=evo_boll_ust,
             bollinger_alt=evo_boll_alt, hacim_oran=evo_hacim_oran
         )
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         pass
 
 
@@ -441,7 +442,7 @@ def dinamik_stop_loss_hesapla(exchange, sembol: str, pozisyon_tipi: str, giris_f
             return giris_fiyati - sl_mesafe
         else:
             return giris_fiyati + sl_mesafe
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         return likidasyon_hesapla(pozisyon_tipi, giris_fiyati, kaldirac)
 
 
@@ -457,13 +458,13 @@ def islem_kapat_with_retry(state, trade_id, fiyat, neden, exchange=None, max_ret
                     ticker = exchange.fetch_ticker(sembol)
                     if isinstance(ticker, dict) and ticker.get("last"):
                         guncel_fiyat = float(ticker["last"])
-                except Exception:
+                except (ccxt.BaseError, sqlite3.Error, Exception):
                     pass
             if attempt > 0 and abs(guncel_fiyat - fiyat) / max(fiyat, 0.0001) > slippage_tolerance:
                 log_ekle(f"⚠️ SLIPPAGE #{attempt}: {sembol} fiyat kaydı ${fiyat:.4f}→${guncel_fiyat:.4f}. Yeniden deneniyor...", state)
             islem_kapat(state, trade_id, guncel_fiyat, neden, is_breakout, is_liq)
             return True
-        except Exception as e:
+        except (ccxt.BaseError, sqlite3.Error, Exception) as e:
             if attempt < max_retry - 1:
                 log_ekle(f"⚠️ RETRY #{attempt+1}: {sembol} [{trade_id}] kapama hatası: {str(e)[:60]}", state)
                 time.sleep(0.5)
@@ -494,7 +495,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         log_ekle(f"🌐 Futures REST API bağlantısı kuruldu (defaultType: {getattr(cfg, 'FUTURES_TYPE', 'future')})", state)
                         state["rest_connected_logged"] = True
                 return True
-            except Exception as e:
+            except (ccxt.BaseError, sqlite3.Error, Exception) as e:
                 with lock:
                     log_ekle(f"❌ Exchange bağlantı hatası (deneme {attempt+1}/5): {str(e)[:80]}", state)
                 time.sleep(5)
@@ -527,7 +528,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                     state["guncel_fiyatlar"] = {}
                                 state["guncel_fiyatlar"][s] = float(api_poz.get("markPrice", entry_price))
                             break
-        except Exception as e:
+        except (ccxt.BaseError, sqlite3.Error, Exception) as e:
             with lock:
                 log_ekle(f"⚠️ Pozisyon Senkronizasyon Hatası: {e}", state)
 
@@ -545,17 +546,17 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
 
             try:
                 btc_trend = ai_engine.btc_trendi_analiz_et(exchange)
-            except Exception:
+            except (ccxt.BaseError, sqlite3.Error, Exception):
                 btc_trend = "BİLİNMİYOR"
 
             try:
                 top_coinler = ai_engine.top_coinleri_tara(exchange, limit=100)
-            except Exception:
+            except (ccxt.BaseError, sqlite3.Error, Exception):
                 top_coinler = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
 
             try:
                 tarama_sonucu = ai_engine.anormallik_tara_ve_sec(exchange, top_coinler, preset["sma_kisa"], preset["sma_uzun"])
-            except Exception:
+            except (ccxt.BaseError, sqlite3.Error, Exception):
                 tarama_sonucu = {"secilen_sembol": "BTC/USDT", "secilen_pazar": {}, "secilen_sma": "BEKLE", "secilen_breakout": False, "taranan_liste": [], "karar_raporu": "", "haber_puanlari": {}}
 
             # --- MULTI-POSITION DÖNGÜSÜ ---
@@ -574,7 +575,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
             # Bulk Ticker: Tüm fiyatları tek istekte çek (Rate Limit %90 azalır)
             try:
                 _bulk_tickers = exchange.fetch_tickers()
-            except Exception:
+            except (ccxt.BaseError, sqlite3.Error, Exception):
                 _bulk_tickers = {}
 
             for index, c_data in enumerate(secilen_coinler):
@@ -615,7 +616,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                 if not isinstance(ticker, dict) or not ticker.get("last"):
                     try:
                         ticker = exchange.fetch_ticker(secilen_sembol)
-                    except Exception:
+                    except (ccxt.BaseError, sqlite3.Error, Exception):
                         ticker = {}
                 if isinstance(ticker, dict) and ticker.get("last"):
                     fiyat = ticker.get("last", 0)
@@ -653,7 +654,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 log_ekle(f"📈 Makro TF: Haftalık={s1w} | Aylık={s1m} → Trend: {mtf.get('makro_trend', 'YATAY')} (Risk: x{mtf.get('risk_carpani', 1.0):.2f})", state)
                     else:
                         mtf = {"konsensus": "KARARSIZ", "guc": 0, "risk_carpani": 1.0, "makro_trend": "YATAY"}
-                except Exception:
+                except (ccxt.BaseError, sqlite3.Error, Exception):
                     mtf = {"konsensus": "KARARSIZ", "guc": 0, "risk_carpani": 1.0, "makro_trend": "YATAY"}
 
                 # --- Grid Analizi ---
@@ -673,7 +674,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 karar_override = "SHORT"
                                 log_ekle(f"📏 GRID SHORT: Fiyat (${fiyat:.4f}) direnç seviyesine yakın.", state)
                                 grid_trade_yapildi = True
-                except Exception:
+                except (ccxt.BaseError, sqlite3.Error, Exception):
                     grid_bilgi = {"grid_uygun": False}
 
                 # --- DURUM KONTROLÜ ---
@@ -692,7 +693,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         state["usdt_d_trend"] = usdt_d.get("trend", "YATAY")
                         if usdt_d.get("etki") == "LONG_AZALT":
                             log_ekle(f"📊 USDT.D YÜKSELİYOR: %{usdt_d.get('deger', 0):.1f} → LONG iştahı azaltılıyor.", state)
-                    except Exception:
+                    except (ccxt.BaseError, sqlite3.Error, Exception):
                         pass
 
                     # v8: 24 Saatlik Akıllı Döngü Reset Kontrolü
@@ -832,7 +833,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                             ch_gun_baslangic_zamani = ch.get("gun_baslangic_zamani", ch.get("baslangic_zamani", 0))
                             try:
                                 ch_realized_pnl = data_logger.challenge_pnl_getir(ch_gun_baslangic_zamani)
-                            except Exception:
+                            except (ccxt.BaseError, sqlite3.Error, Exception):
                                 ch_realized_pnl = 0.0
                             ch_kar_pct = (ch_realized_pnl / ch_gun_bas * 100) if ch_gun_bas > 0 else 0
 
@@ -1007,9 +1008,25 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 margin = ch_bakiye_ac * kullanilabilir_max * mart_carpan
                                 margin = min(margin, ch_bakiye_ac * 0.5)
                             else:
-                                margin = state["bakiye"] * kullanilabilir_max * mart_carpan
-                                # v7: Martingale güvenlik limiti: bakiyenin %50'sini geçemez
-                                margin = min(margin, state["bakiye"] * 0.5)
+                                # V19 Gelişmiş Risk Yönetimi
+                                c_max_wallet_risk = float(state.get("max_wallet_risk_pct", getattr(cfg, "MAX_WALLET_RISK_PCT", 100.0))) / 100.0
+                                c_trade_risk = float(state.get("trade_risk_pct", getattr(cfg, "TRADE_RISK_PCT", 10.0))) / 100.0
+                                
+                                aktif_kullanilan_margin = sum(p.get("islem_margin", 0) for p in state.get("aktif_pozisyonlar", {}).values())
+                                mevcut_bakiye = state["bakiye"]
+                                toplam_equity = mevcut_bakiye + aktif_kullanilan_margin
+                                kullanilabilir_hedef_kasa = toplam_equity * c_max_wallet_risk
+                                
+                                # İşlem başına risk, toplam equity üzerinden
+                                margin_hedef = toplam_equity * c_trade_risk * mart_carpan
+                                
+                                # Eğer mevcut açık margin + yeni margin cüzdan maksimum riskini aşıyorsa limitlenir
+                                kalan_risk_limiti = max(0.0, kullanilabilir_hedef_kasa - aktif_kullanilan_margin)
+                                margin = min(margin_hedef, kalan_risk_limiti)
+                                margin = min(margin, mevcut_bakiye)  # Fiziksel Bakiye kontrolü
+                                
+                                # v7 Fallback: Martingale güvenlik limiti
+                                margin = min(margin, mevcut_bakiye * 0.5)
                             buyukluk_usdt = margin * tavsiye_kaldirac
 
                             # v10: Challenge açılış komisyonu
@@ -1025,7 +1042,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                             # v6: ATR tabanlı dinamik stop-loss hesapla
                             try:
                                 dsl_fiyat = dinamik_stop_loss_hesapla(exchange, secilen_sembol, sinyal, fiyat, tavsiye_kaldirac)
-                            except Exception:
+                            except (ccxt.BaseError, sqlite3.Error, Exception):
                                 dsl_fiyat = likidasyon_hesapla(sinyal, fiyat, tavsiye_kaldirac)
 
                             tid = trade_id_olustur()
@@ -1107,7 +1124,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                             if isinstance(v, (str, int, float, bool, list, dict, type(None))):
                                 temiz[k] = v
                     ps.state_kaydet(temiz)
-                except Exception:
+                except (ccxt.BaseError, sqlite3.Error, Exception):
                     pass
                 son_kayit_zamani = time.time()
                 son_kayit_bakiye = guncel_bakiye
@@ -1147,7 +1164,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                 with lock:
                     state["sonraki_analiz_sn"] -= 1
 
-        except Exception as e:
+        except (ccxt.BaseError, sqlite3.Error, Exception) as e:
             err_str = str(e)
             is_auth = "Authentication" in err_str or "API-key" in err_str or "Invalid credentials" in err_str
 
@@ -1191,7 +1208,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                 if isinstance(v, (str, int, float, bool, list, dict, type(None))):
                     temiz[k] = v
         ps.state_kaydet(temiz)
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         pass
 
 
@@ -1213,10 +1230,19 @@ def korelasyon_rutini(state: dict, lock: threading.Lock, dur_sinyali: threading.
                     state["kesin_kar_parametreleri"] = korelasyonlar
                     log_ekle(f"🧠 Derin Analiz: Geçmiş işlemlere göre Kesin Kâr güncellendi. (A.Vol: %{korelasyonlar.get('ortalama_volatilite', 0):.1f}, Hacim: %{korelasyonlar.get('ortalama_hacim_artis', 0):.0f})", state)
 
-            # --- ML Model Eğitimi (her 24 saat) ---
-            if time.time() - son_egitim_zamani >= retrain_interval:
+            # --- ML Model Eğitimi (her 24 saat VEYA 10 başarılı işlemde bir) ---
+            islem_gecmisi = state.get("islem_gecmisi", [])
+            basarili_sayisi = sum(1 for islem in islem_gecmisi if islem.get("pnl", 0) > 0)
+            son_egitim_sayaci = state.get("son_egitim_islem_sayaci", 0)
+            limit_doldu_mu = (basarili_sayisi - son_egitim_sayaci) >= 10
+
+            if time.time() - son_egitim_zamani >= retrain_interval or limit_doldu_mu:
                 with lock:
-                    log_ekle("🧠 ML RETRAIN: 24 saatlik eğitim döngüsü başlatılıyor...", state)
+                    if limit_doldu_mu:
+                        state["son_egitim_islem_sayaci"] = basarili_sayisi
+                        log_ekle(f"🧠 ML RETRAIN: 10 Başarılı işlem tamamlandı. Eğitim döngüsü başlatılıyor...", state)
+                    else:
+                        log_ekle("🧠 ML RETRAIN: 24 saatlik eğitim döngüsü başlatılıyor...", state)
 
                 try:
                     sonuc = train_model.run_training()
@@ -1236,13 +1262,13 @@ def korelasyon_rutini(state: dict, lock: threading.Lock, dur_sinyali: threading.
                     else:
                         with lock:
                             log_ekle(f"⚠️ ML RETRAIN BAŞARISIZ: {sonuc.get('neden', '?')}", state)
-                except Exception as e:
+                except (ccxt.BaseError, sqlite3.Error, Exception) as e:
                     with lock:
                         log_ekle(f"❌ ML RETRAIN HATA: {str(e)[:80]}", state)
 
                 son_egitim_zamani = time.time()
 
-        except Exception:
+        except (ccxt.BaseError, sqlite3.Error, Exception):
             pass
         
         # 300 saniye (5 dakika) bekle

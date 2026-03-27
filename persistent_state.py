@@ -14,6 +14,8 @@ Güvenlik Katmanları:
 
 import json
 import os
+import sqlite3
+import ccxt
 import sys
 import base64
 import tempfile
@@ -27,7 +29,7 @@ from dotenv import load_dotenv
 # Load environment initially
 try:
     load_dotenv()
-except Exception:
+except (ccxt.BaseError, sqlite3.Error, Exception):
     pass
 
 # ──────────────────────────────────────────────
@@ -50,7 +52,7 @@ def get_memory():
     if st is not None:
         try:
             return _get_cloud_memory()
-        except Exception:
+        except (ccxt.BaseError, sqlite3.Error, Exception):
             pass
     return _local_memory
 
@@ -85,7 +87,7 @@ def get_master_key() -> str:
         try:
             with open(env_path, "a", encoding="utf-8") as f:
                 f.write(f"\nMASTER_KEY={key}\n")
-        except Exception as e:
+        except (ccxt.BaseError, sqlite3.Error, Exception) as e:
             print(f"⚠️ Could not write MASTER_KEY to .env: {e}")
         os.environ["MASTER_KEY"] = key
     return key
@@ -96,9 +98,9 @@ def get_fernet():
     if _fernet is None:
         try:
             _fernet = Fernet(get_master_key().encode('utf-8'))
-        except Exception as e:
-            print(f"⚠️ Fernet initialization error: {e}. Keys will not be encrypted properly.")
-            _fernet = Fernet(Fernet.generate_key())
+        except (ccxt.BaseError, sqlite3.Error, Exception) as e:
+            print(f"🚨 [GÜVENLİK] Fernet başlatılamadı ({e}). Veri koruması için sistem durduruluyor!")
+            sys.exit(1)
     return _fernet
 
 def encode_key(key: str) -> str:
@@ -106,7 +108,7 @@ def encode_key(key: str) -> str:
         return ""
     try:
         return get_fernet().encrypt(key.encode('utf-8')).decode('utf-8')
-    except Exception as e:
+    except (ccxt.BaseError, sqlite3.Error, Exception) as e:
         print(f"⚠️ Encryption error: {e}")
         return base64.b64encode(key.encode('utf-8')).decode('utf-8')
 
@@ -117,15 +119,13 @@ def decode_key(encoded_key: str) -> str:
     try:
         return get_fernet().decrypt(encoded_key.encode('utf-8')).decode('utf-8')
     except InvalidToken:
-        try:
-            return base64.b64decode(encoded_key.encode('utf-8')).decode('utf-8')
-        except Exception:
-            return ""
-    except Exception as e:
+        print("🚨 [GÜVENLİK İHLALİ] Geçersiz Şifreleme Anahtarı (InvalidToken). Veri güvenliğini korumak için bot durduruluyor!")
+        sys.exit(1)
+    except (ccxt.BaseError, sqlite3.Error, Exception) as e:
         print(f"⚠️ Decryption error: {e}")
         try:
             return base64.b64decode(encoded_key.encode('utf-8')).decode('utf-8')
-        except Exception:
+        except (ccxt.BaseError, sqlite3.Error, Exception):
             return ""
 
 
@@ -228,7 +228,7 @@ def _safe_read_json(dosya: str) -> dict | None:
     except (PermissionError, IOError, OSError) as e:
         print(f"⚠️ State dosyası okunamadı (izin hatası): {e}")
         return None
-    except Exception as e:
+    except (ccxt.BaseError, sqlite3.Error, Exception) as e:
         print(f"⚠️ State dosyası okunamadı (bilinmeyen): {e}")
         return None
 
@@ -251,7 +251,7 @@ def _safe_write_json(data: dict, dosya: str) -> bool:
                 json.dump(data, tmp_f, indent=2, ensure_ascii=False)
             shutil.move(tmp_path, dosya)
             return True
-        except Exception:
+        except (ccxt.BaseError, sqlite3.Error, Exception):
             # Geçici dosya temizliği
             try:
                 os.remove(tmp_path)
@@ -264,7 +264,7 @@ def _safe_write_json(data: dict, dosya: str) -> bool:
     except (TypeError, ValueError) as e:
         print(f"❌ State JSON serialization hatası: {e}")
         return False
-    except Exception as e:
+    except (ccxt.BaseError, sqlite3.Error, Exception) as e:
         print(f"❌ State kaydetme hatası: {e}")
         return False
 
@@ -401,14 +401,14 @@ def state_kaydet(state: dict, dosya: str = None):
         if not success:
             print("⚠️ Diske yazılamadı ama Bulut Hafızasına yedeklendi.")
 
-    except Exception as e:
+    except (ccxt.BaseError, sqlite3.Error, Exception) as e:
         # Son savunma hattı
         print(f"❌ state_kaydet kritik hata: {e}")
         try:
             memory = get_memory()
             memory["last_state"] = state
             print("💾 Kritik hata sonrası Bulut Hafızasına yedeklendi.")
-        except Exception:
+        except (ccxt.BaseError, sqlite3.Error, Exception):
             pass
 
 

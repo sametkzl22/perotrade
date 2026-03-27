@@ -8,3 +8,7 @@ dist/
 build/
 *.spec
 persistent_state.json
+
+*.db
+*.pkl
+data/

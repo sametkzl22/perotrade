@@ -8,6 +8,7 @@ Dashboard geçmişe dönük analiz için kullanır.
 
 import sqlite3
 import os
+import ccxt
 import sys
 from datetime import datetime, timezone
 
@@ -44,7 +45,7 @@ def _get_conn():
         _migrate_db(db_path)
         _initialized_dbs.add(db_path)
         
-    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=5)
+    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=5, isolation_level='EXCLUSIVE')
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
@@ -92,7 +93,7 @@ def _init_db(db_path: str):
             CREATE INDEX IF NOT EXISTS idx_islem_etiket ON islem_log(etiket);
         """)
         conn.close()
-    except Exception as e:
+    except (ccxt.BaseError, sqlite3.Error, Exception) as e:
         print(f"⚠️ data_logger init hatası: {e}")
 
 
@@ -112,10 +113,10 @@ def _migrate_db(db_path: str):
             try:
                 conn.execute(sql)
                 conn.commit()
-            except Exception:
+            except (ccxt.BaseError, sqlite3.Error, Exception):
                 pass  # Zaten var
         conn.close()
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         pass
 
 
@@ -146,7 +147,7 @@ def _db_writer_worker():
                     )
                     conn.commit()
                     conn.close()
-                except Exception as e:
+                except (ccxt.BaseError, sqlite3.Error, Exception) as e:
                     print(f"⚠️ DB Queue Tarama Insert Error: {e}")
             
             elif task_type == "islem":
@@ -165,11 +166,11 @@ def _db_writer_worker():
                     conn.commit()
                     conn.close()
                     print(f"✅ Trade logged to DB via Queue: {data['sembol']} {data['tip']} [tid:{data['trade_id']}] (PNL: ${data['pnl']:.2f})")
-                except Exception as e:
+                except (ccxt.BaseError, sqlite3.Error, Exception) as e:
                     print(f"⚠️ DB Queue Islem Insert Error: {e}")
             
             _write_queue.task_done()
-        except Exception as e:
+        except (ccxt.BaseError, sqlite3.Error, Exception) as e:
             print(f"⚠️ DB Worker Exception: {e}")
 
 # Start the background writer thread
@@ -230,7 +231,7 @@ def basari_orani_getir(son_n: int = 100) -> dict:
             "zarari": zarari,
             "oran": round((karli / len(rows)) * 100, 1) if rows else 0.0
         }
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         return {"toplam": 0, "karli": 0, "zarari": 0, "oran": 0.0}
 
 
@@ -250,7 +251,7 @@ def son_islemler_getir(limit: int = 50) -> list:
              "pnl_pct": r[6], "kaldirac": r[7], "margin": r[8], "neden": r[9]}
             for r in rows
         ]
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         return []
 
 
@@ -264,7 +265,7 @@ def skor_gecmisi_getir(sembol: str, limit: int = 50) -> list:
         ).fetchall()
         conn.close()
         return [{"zaman": r[0], "skor": r[1], "fiyat": r[2], "karar": r[3]} for r in rows]
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         return []
 
 
@@ -306,7 +307,7 @@ def en_iyi_korelasyonlari_getir(limit: int = 50) -> dict:
             "ortalama_hacim_artis": round(hacim_total / sayac, 2),
             "orneklem_sayisi": sayac
         }
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         return {}
 
 
@@ -323,7 +324,7 @@ def gercek_pnl_getir(baslangic_zamani_timestamp: float) -> float:
         if row and row[0] is not None:
             return float(row[0])
         return 0.0
-    except Exception as e:
+    except (ccxt.BaseError, sqlite3.Error, Exception) as e:
         print(f"⚠️ PNL Doğrulama Hatası: {e}")
         return 0.0
 
@@ -342,7 +343,7 @@ def challenge_pnl_getir(baslangic_zamani_timestamp: float) -> float:
         if row and row[0] is not None:
             return float(row[0])
         return 0.0
-    except Exception as e:
+    except (ccxt.BaseError, sqlite3.Error, Exception) as e:
         print(f"⚠️ Challenge PNL Doğrulama Hatası: {e}")
         return 0.0
 
@@ -368,5 +369,5 @@ def evo_islemler_getir(limit: int = 200) -> list:
              "bollinger_alt": r[12], "hacim_oran": r[13]}
             for r in rows
         ]
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         return []

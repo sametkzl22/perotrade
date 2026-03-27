@@ -34,7 +34,10 @@ PROFIT_LOCK_RATIO = 0.8    # Kazanılan %10 hedefin %80'i kilitlenir
 DAILY_LOSS_STOP = -7.5     # %7.5 kayıpta -> Recovery Mode (Kurtarma Modu)
 RECOVERY_CONFIDENCE_THRESHOLD = 90
 MAX_CONCURRENT_TRADES = 99 # Aynı anda açılabilecek maksimum işlem sayısı
-MAX_RISK_PER_TRADE = 1.0   # Normal modda Max %100 bakiye kullanımı
+
+# V19 Gelişmiş Risk Yönetimi Mimarisi
+MAX_WALLET_RISK_PCT = 100.0
+TRADE_RISK_PCT = 10.0
 
 # ───── Haber & Makro Filtre ─────
 ENABLE_NEWS_VETO = True    # False = haberleri yoksay, sadece teknik skor ile işlem yap

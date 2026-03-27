@@ -243,9 +243,9 @@ def run_training(min_samples: int = None) -> dict:
     if min_samples is None:
         try:
             import config as cfg
-            min_samples = getattr(cfg, "ML_MIN_TRAINING_SAMPLES", 30)
+            min_samples = getattr(cfg, "ML_MIN_TRAINING_SAMPLES", 10)
         except ImportError:
-            min_samples = 30
+            min_samples = 10
 
     result = {"basarili": False, "neden": "", "detay": {}}
 

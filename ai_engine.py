@@ -10,6 +10,8 @@ ve SQLite Loglama. v11: Binance Futures Perpetual desteği.
 
 import math
 import os
+import sqlite3
+import ccxt
 import random
 import threading
 import feedparser
@@ -63,7 +65,7 @@ def evo_reward_update(pnl: float, sembol: str):
 
             with open(_EVO_MODEL_PATH, "wb") as f:
                 _pickle.dump(model_data, f)
-    except Exception as e:
+    except (ccxt.BaseError, sqlite3.Error, Exception) as e:
         print(f"⚠️ EVO Reward Update hatası: {e}")
 
 # ─────────────────────────────────────────────
@@ -83,7 +85,7 @@ def mum_verisi_cek(exchange, symbol, timeframe="1h", limit=55):
         # NaN/None temizliği
         df = df.dropna(subset=["close", "volume"])
         return df
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         return pd.DataFrame()
 
 def _to_np(data) -> np.ndarray:
@@ -125,7 +127,7 @@ def sinyal_uret(df: pd.DataFrame, sma_kisa: int, sma_uzun: int) -> str:
         if sma_k[-2] >= sma_u[-2] and sma_k[-1] < sma_u[-1]:
             return "SAT"
         return "BEKLE"
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         return "BEKLE"
 
 
@@ -159,7 +161,7 @@ def rsi_hesapla(df_or_arr, period: int = 14) -> float:
             return 100.0
         rs = avg_gain / avg_loss
         return float(100.0 - (100.0 / (1.0 + rs)))
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         return 50.0
 
 
@@ -183,7 +185,7 @@ def volatilite_hesapla(df_or_arr) -> float:
             return 0.0
         vol = float(np.std(returns) * 100)
         return vol if not np.isnan(vol) else 0.0
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         return 0.0
 
 
@@ -206,7 +208,7 @@ def atr_hesapla(df: pd.DataFrame, period: int = 14) -> float:
         tr = np.maximum(high - low, np.maximum(np.abs(high - prev_close), np.abs(low - prev_close)))
         atr_val = float(np.mean(tr[-period:]))
         return atr_val if not np.isnan(atr_val) else 0.0
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         return 0.0
 
 
@@ -229,7 +231,7 @@ def bollinger_hesapla(df: pd.DataFrame, period: int = 20, std_dev: float = 2.0) 
         upper = sma + std_dev * std
         lower = sma - std_dev * std
         return {"ust": round(upper, 6), "alt": round(lower, 6), "orta": round(sma, 6), "genislik": round(upper - lower, 6)}
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         return bos
 
 
@@ -255,7 +257,7 @@ def volatilite_spike_kontrol(df: pd.DataFrame, period: int = 14) -> dict:
             "atr": round(atr_son, 6),
             "atr_ort": round(atr_ort, 6)
         }
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         return sonuc
 
 
@@ -284,7 +286,7 @@ def likidite_kontrol(exchange, sembol: str, min_hacim_usdt: float = 500_000) -> 
                 return sonuc
         sonuc["gecti"] = True
         return sonuc
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         sonuc["neden"] = "Likidite kontrolü başarısız"
         return sonuc
 
@@ -319,7 +321,7 @@ def btc_trendi_analiz_et(exchange) -> str:
         if sma_k > sma_u and rsi > 55: return "YUKARI"
         elif sma_k < sma_u and rsi < 45: return "AŞAĞI"
         else: return "YATAY"
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         return "BİLİNMİYOR"
 
 def fonlama_orani_getir(exchange, symbol: str) -> dict:
@@ -334,7 +336,7 @@ def fonlama_orani_getir(exchange, symbol: str) -> dict:
                     if oran > 0.05: risk = "Uzun(Long) Riskli"
                     elif oran < -0.05: risk = "Kısa(Short) Riskli"
                     return {"oran": oran, "risk": risk}
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         pass
         
     s_oran = random.uniform(-0.06, 0.08)
@@ -365,7 +367,7 @@ def usdt_dominance_getir() -> dict:
                         return {"deger": round(usdt_pct, 2), "trend": "ASAGI", "etki": "LONG_ARTIR"}
                     else:
                         return {"deger": round(usdt_pct, 2), "trend": "YATAY", "etki": "NÖTR"}
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         pass
     # Fallback: Simülasyon
     sim_val = random.uniform(3.5, 7.0)
@@ -385,7 +387,7 @@ def trend_analizi_yap() -> list:
     try:
         feed = feedparser.parse(url)
         haberler = [entry.title for entry in feed.entries[:8]]
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         pass
         
     mock_trends = [
@@ -550,7 +552,7 @@ def top_coinleri_tara(exchange, limit=100) -> list:
         if not sirali:
             return standart_liste
         return [k for k, v in sirali[:limit]]
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         return standart_liste
 
 def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
@@ -653,10 +655,10 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
                     atr=atr_spike.get("atr", 0), volatilite=round(pazar.get("volatilite", 0), 2),
                     hacim_artis=round(hacim_artis_pct, 0), breakout=is_breakout
                 )
-            except Exception:
+            except (ccxt.BaseError, sqlite3.Error, Exception):
                 pass
                 
-        except Exception:
+        except (ccxt.BaseError, sqlite3.Error, Exception):
             continue
 
     # Mutlak güce göre yüksekten düşüğe sırala
@@ -704,7 +706,7 @@ def pazar_durumu_cikar(df: pd.DataFrame, sembol: str, pre_fetched_news=None, twi
             "fg_index": fear_and_greed_simulasyonu(),
             "makro": makro
         }
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         return None
 
 def kompozit_skor_hesapla(pazar: dict, sma_sinyal: str) -> float:
@@ -944,7 +946,7 @@ def llm_karar(sembol: str, pazar: dict, sma_sinyal: str, api_key: str, acik_pozi
             "tavsiye_oran": llm_oran,
             "ozet": f"LLM | BTC: {btc_trendi} | Fonlama: {fonlama['risk']}"
         }
-    except Exception as e:
+    except (ccxt.BaseError, sqlite3.Error, Exception) as e:
         print(f"LLM hatası: {e}. Mock AI'ye dönülüyor.")
         return mock_ai_karar(sembol, pazar, komp_skor, acik_pozisyon, btc_trendi, fonlama)
 
@@ -984,7 +986,7 @@ def grid_destek_direnc(df: pd.DataFrame) -> dict:
             "grid_seviyeleri": grid_seviyeleri,
             "grid_uygun": yatay_mi and aralik > 0
         }
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         return bos_grid
 
 
@@ -1007,7 +1009,7 @@ def _makro_trend_belirle(df: pd.DataFrame) -> str:
         elif sma_k[-1] < sma_u[-1] and rsi < 50:
             return "ASAGI"
         return "YATAY"
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         return "YATAY"
 
 
@@ -1027,7 +1029,7 @@ def multi_timeframe_analiz(exchange, sembol: str) -> dict:
             vol = volatilite_hesapla(df)
             sinyal = sinyal_uret(df, 7, 14)
             sonuclar[label] = {"rsi": round(rsi, 1), "volatilite": round(vol, 2), "sinyal": sinyal}
-        except Exception:
+        except (ccxt.BaseError, sqlite3.Error, Exception):
             sonuclar[label] = varsayilan.copy()
 
     # Makro zaman dilimleri (filtre + risk çarpanı)
@@ -1049,7 +1051,7 @@ def multi_timeframe_analiz(exchange, sembol: str) -> dict:
                     makro_trend_aylik = trend
             else:
                 sonuclar[label] = varsayilan.copy()
-        except Exception:
+        except (ccxt.BaseError, sqlite3.Error, Exception):
             sonuclar[label] = varsayilan.copy()
 
     # Konsensüs — yalnızca kısa-orta vade (5dk, 15dk, 1s)
@@ -1207,7 +1209,7 @@ def _load_ml_model():
             _ml_model = joblib.load(model_path)
             _ml_model_mtime = mtime
             return _ml_model
-    except Exception as e:
+    except (ccxt.BaseError, sqlite3.Error, Exception) as e:
         print(f"⚠️ ML model yüklenemedi: {e}")
         return None
 
@@ -1227,7 +1229,7 @@ def _reload_ml_model():
                 _ml_model_mtime = mtime
             return True
         return False
-    except Exception:
+    except (ccxt.BaseError, sqlite3.Error, Exception):
         return False
 
 
@@ -1279,7 +1281,10 @@ def local_ml_karar(sembol: str, pazar: dict, sma_sinyal: str, acik_pozisyon: str
     model = _load_ml_model()
     if model is None:
         # Model yok → mock fallback
-        return mock_ai_karar(sembol, pazar, komp_skor, acik_pozisyon, btc_trendi, fonlama, zaman_baski_carpani, mod=mod)
+        mock_result = mock_ai_karar(sembol, pazar, komp_skor, acik_pozisyon, btc_trendi, fonlama, zaman_baski_carpani, mod=mod)
+        mock_result["is_mock"] = True
+        mock_result["dusunce"] = "⚠️ [MOCK AI] ML Modeli Eksik: " + mock_result.get("dusunce", "")
+        return mock_result
 
     try:
         features = _build_feature_vector(pazar, sma_sinyal, btc_trendi, fonlama, mtf_guc)
@@ -1323,6 +1328,9 @@ def local_ml_karar(sembol: str, pazar: dict, sma_sinyal: str, acik_pozisyon: str
             "tavsiye_oran": oran,
             "ozet": f"ML | BTC: {btc_trendi} | Fonlama: {fonlama.get('risk', 'Yok')} | Güven: {ml_guven:.0f}%"
         }
-    except Exception as e:
+    except (ccxt.BaseError, sqlite3.Error, Exception) as e:
         print(f"⚠️ ML inference hatası: {e}. Mock AI'ye dönülüyor.")
-        return mock_ai_karar(sembol, pazar, komp_skor, acik_pozisyon, btc_trendi, fonlama, zaman_baski_carpani, mod=mod)
+        mock_result = mock_ai_karar(sembol, pazar, komp_skor, acik_pozisyon, btc_trendi, fonlama, zaman_baski_carpani, mod=mod)
+        mock_result["is_mock"] = True
+        mock_result["dusunce"] = "⚠️ [MOCK AI Fallback] " + mock_result.get("dusunce", "")
+        return mock_result

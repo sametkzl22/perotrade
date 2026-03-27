@@ -102,25 +102,31 @@ class DataProvider:
         
         async def dinle():
             exchange = None
-            reconnect_count = 0
-            max_reconnects = 50
+            consecutive_failures = 0
+            max_failures = 3
 
-            while not self.dur_sinyali.is_set() and reconnect_count < max_reconnects:
+            while not self.dur_sinyali.is_set():
                 try:
                     if exchange is not None:
                         try:
                             await exchange.close()
-                        except Exception:
+                        except (ccxt.BaseError, sqlite3.Error, Exception):
                             pass
                     exchange = self._exchange_olustur(pro=True)
-                    if reconnect_count > 0:
-                        self._log_ekle(f"🔄 WebSocket yeniden bağlandı (deneme #{reconnect_count})")
-                except Exception as e:
-                    reconnect_count += 1
-                    self._log_ekle(f"❌ WebSocket bağlantı hatası (#{reconnect_count}): {str(e)[:80]}")
-                    await asyncio.sleep(5)
+                    if consecutive_failures > 0:
+                        self._log_ekle(f"🔄 WebSocket yeniden bağlandı (deneme #{consecutive_failures})")
+                except (ccxt.BaseError, sqlite3.Error, Exception) as e:
+                    consecutive_failures += 1
+                    self._log_ekle(f"❌ WebSocket bağlantı hatası (#{consecutive_failures}): {str(e)[:80]}")
+                    if consecutive_failures >= max_failures:
+                        self._log_ekle("🛑 3 başarısız deneme. 5 dk Circuit Breaker devrede (300sn)...")
+                        await asyncio.sleep(300)
+                        consecutive_failures = 0
+                    else:
+                        await asyncio.sleep(5)
                     continue
 
+                inner_failed = False
                 while not self.dur_sinyali.is_set():
                     try:
                         sembol = self.bot_state.get("aktif_sembol")
@@ -281,12 +287,25 @@ class DataProvider:
                                 pass
                         else:
                             await asyncio.sleep(0.5)
+                        
+                        consecutive_failures = 0  # Başarılı veri alındıysa hataları sıfırla
                     except Exception as loop_e:
-                        await asyncio.sleep(1)
+                        self._log_ekle(f"⚠️ WebSocket akış koptu: {str(loop_e)[:80]}")
+                        inner_failed = True
+                        break
+
+                if inner_failed:
+                    consecutive_failures += 1
+                    if consecutive_failures >= max_failures:
+                        self._log_ekle("🛑 3 kez akış koptu. 5 dk Circuit Breaker (300sn)...")
+                        await asyncio.sleep(300)
+                        consecutive_failures = 0
+                    else:
+                        await asyncio.sleep(2)
 
                 try:
                     await exchange.close()
-                except Exception:
+                except (ccxt.BaseError, sqlite3.Error, Exception):
                     pass
 
         loop = asyncio.new_event_loop()
@@ -302,7 +321,7 @@ class DataProvider:
                 if exchange is None:
                     try:
                         exchange = self._exchange_olustur(pro=False)
-                    except Exception:
+                    except (ccxt.BaseError, sqlite3.Error, Exception):
                         time.sleep(5)
                         continue
                 try:
@@ -323,6 +342,6 @@ class DataProvider:
                         self._log_ekle("🚨 [KRİTİK HATA] Binance API Kimlik Doğrulama Başarısız. Profil>API yönetimi kısmından 'Enable Futures' iznini kontrol edin.")
                     self.dur_sinyali.set()
                     break
-                except Exception:
+                except (ccxt.BaseError, sqlite3.Error, Exception):
                     pass
             time.sleep(10)

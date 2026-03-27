@@ -336,6 +336,16 @@ with st.sidebar:
     if mart_aktif != S.get("martingale_aktif", False):
         worker.state.set("martingale_aktif", mart_aktif)
         worker.state.save_to_persistent()
+        
+    # V19: Gelişmiş Risk Yönetimi Slider'ları
+    st.sidebar.markdown("### 🛡️ Risk Yönetimi (V19)")
+    max_wallet_risk_pct = st.sidebar.slider("Max Cüzdan Riski (%)", min_value=1.0, max_value=100.0, value=float(S.get("max_wallet_risk_pct", getattr(cfg, "MAX_WALLET_RISK_PCT", 100.0))), help="Toplam varlığın en fazla yüzde kaçı margin olarak risk edilebilir?")
+    trade_risk_pct = st.sidebar.slider("İşlem Başına Risk (%)", min_value=1.0, max_value=50.0, value=float(S.get("trade_risk_pct", getattr(cfg, "TRADE_RISK_PCT", 10.0))), help="Her işleme toplam cüzdanın en fazla yüzde kaçı margin olarak ayrılabilir?")
+    
+    if max_wallet_risk_pct != S.get("max_wallet_risk_pct") or trade_risk_pct != S.get("trade_risk_pct"):
+        worker.state.set("max_wallet_risk_pct", max_wallet_risk_pct)
+        worker.state.set("trade_risk_pct", trade_risk_pct)
+        worker.state.save_to_persistent()
 
     # Bot durumu gösterge
     if worker.is_running:
@@ -739,7 +749,19 @@ with tab_dash:
     # Finansal Metrikler
     k1, k2, k3, k4 = st.columns(4)
     with k1:
-        st.metric("Anlık Fiyat", f"${S.get('fiyat', 0):,.4f}" if S.get("fiyat") else "Veri Bekleniyor...", f"%{S.get('degisim_24s', 0):+.2f}" if S.get("fiyat") else None)
+        fiyat_placeholder = st.empty()
+        anlik_s = S.get('fiyat', 0)
+        
+        # Sadece fiyat değiştiğinde st.empty() güncellenecek (V19 Optimizasyonu)
+        if "last_fiyat_val" not in st.session_state:
+            st.session_state.last_fiyat_val = -1
+            
+        if anlik_s != st.session_state.last_fiyat_val:
+            fiyat_placeholder.metric("Anlık Fiyat", f"${anlik_s:,.4f}" if anlik_s else "Veri Bekleniyor...", f"%{S.get('degisim_24s', 0):+.2f}" if anlik_s else None)
+            st.session_state.last_fiyat_val = anlik_s
+        else:
+            fiyat_placeholder.metric("Anlık Fiyat", f"${anlik_s:,.4f}" if anlik_s else "Veri Bekleniyor...", f"%{S.get('degisim_24s', 0):+.2f}" if anlik_s else None)
+            
     with k2:
         hacim = S.get("hacim_24s", 0)
         hacim_str = f"${hacim/1e6:,.1f}M" if hacim > 1e6 else f"${hacim:,.0f}" if hacim else "—"
