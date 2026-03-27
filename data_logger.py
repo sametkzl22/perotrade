@@ -15,10 +15,13 @@ from datetime import datetime, timezone
 import sqlite3
 import os
 import sys
+import threading
+import queue
 from datetime import datetime, timezone
 import settings_manager
 
 _initialized_dbs = set()
+_write_queue = queue.Queue()
 
 def _get_db_path() -> str:
     if getattr(sys, 'frozen', False):
@@ -41,7 +44,7 @@ def _get_conn():
         _migrate_db(db_path)
         _initialized_dbs.add(db_path)
         
-    conn = sqlite3.connect(db_path, timeout=5)
+    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=5)
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
@@ -117,26 +120,76 @@ def _migrate_db(db_path: str):
 
 
 # ─────────────────────────────────────────────
+# Queue Worker Thread
+# ─────────────────────────────────────────────
+def _db_writer_worker():
+    """Background thread that handles all writes to SQLite sequentially"""
+    while True:
+        try:
+            task = _write_queue.get()
+            if task is None:
+                break
+            
+            task_type = task.get("type")
+            data = task.get("data")
+            
+            if task_type == "tarama":
+                try:
+                    conn = _get_conn()
+                    conn.execute(
+                        """INSERT INTO tarama_log
+                           (zaman, sembol, fiyat, skor, atr, volatilite, hacim_artis, breakout, mtf_konsensus, karar)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (data["zaman"], data["sembol"], data["fiyat"], data["skor"],
+                         data["atr"], data["volatilite"], data["hacim_artis"], data["breakout"],
+                         data["mtf_konsensus"], data["karar"])
+                    )
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    print(f"⚠️ DB Queue Tarama Insert Error: {e}")
+            
+            elif task_type == "islem":
+                try:
+                    conn = _get_conn()
+                    conn.execute(
+                        """INSERT INTO islem_log
+                           (zaman, sembol, tip, giris_fiyati, cikis_fiyati, pnl, pnl_pct,
+                            kaldirac, margin, neden, etiket, trade_id, rsi, bollinger_ust, bollinger_alt, hacim_oran)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (data["zaman"], data["sembol"], data["tip"],
+                         data["giris_fiyati"], data["cikis_fiyati"], data["pnl"], data["pnl_pct"],
+                         data["kaldirac"], data["margin"], data["neden"], data["etiket"], data["trade_id"],
+                         data["rsi"], data["bollinger_ust"], data["bollinger_alt"], data["hacim_oran"])
+                    )
+                    conn.commit()
+                    conn.close()
+                    print(f"✅ Trade logged to DB via Queue: {data['sembol']} {data['tip']} [tid:{data['trade_id']}] (PNL: ${data['pnl']:.2f})")
+                except Exception as e:
+                    print(f"⚠️ DB Queue Islem Insert Error: {e}")
+            
+            _write_queue.task_done()
+        except Exception as e:
+            print(f"⚠️ DB Worker Exception: {e}")
+
+# Start the background writer thread
+_writer_thread = threading.Thread(target=_db_writer_worker, daemon=True)
+_writer_thread.start()
+
+# ─────────────────────────────────────────────
 # Yazma Fonksiyonları
 # ─────────────────────────────────────────────
 def tarama_kaydet(sembol: str, fiyat: float, skor: float, atr: float = 0,
                   volatilite: float = 0, hacim_artis: float = 0,
                   breakout: bool = False, mtf_konsensus: str = "",
                   karar: str = "BEKLE"):
-    try:
-        conn = _get_conn()
-        conn.execute(
-            """INSERT INTO tarama_log
-               (zaman, sembol, fiyat, skor, atr, volatilite, hacim_artis, breakout, mtf_konsensus, karar)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (datetime.now(timezone.utc).isoformat(), sembol, fiyat, skor,
-             atr, volatilite, hacim_artis, 1 if breakout else 0,
-             mtf_konsensus, karar)
-        )
-        conn.commit()
-        conn.close()
-    except Exception:
-        pass
+    data = {
+        "zaman": datetime.now(timezone.utc).isoformat(),
+        "sembol": sembol, "fiyat": fiyat, "skor": skor, 
+        "atr": atr, "volatilite": volatilite, "hacim_artis": hacim_artis, 
+        "breakout": 1 if breakout else 0, "mtf_konsensus": mtf_konsensus, "karar": karar
+    }
+    _write_queue.put({"type": "tarama", "data": data})
 
 
 def islem_kaydet(sembol: str, tip: str, giris_fiyati: float,
@@ -145,22 +198,15 @@ def islem_kaydet(sembol: str, tip: str, giris_fiyati: float,
                  etiket: str = "", trade_id: str = "",
                  rsi: float = None, bollinger_ust: float = None,
                  bollinger_alt: float = None, hacim_oran: float = None):
-    try:
-        conn = _get_conn()
-        conn.execute(
-            """INSERT INTO islem_log
-               (zaman, sembol, tip, giris_fiyati, cikis_fiyati, pnl, pnl_pct,
-                kaldirac, margin, neden, etiket, trade_id, rsi, bollinger_ust, bollinger_alt, hacim_oran)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (datetime.now(timezone.utc).isoformat(), sembol, tip,
-             giris_fiyati, cikis_fiyati, pnl, pnl_pct, kaldirac, margin, neden, etiket, trade_id,
-             rsi, bollinger_ust, bollinger_alt, hacim_oran)
-        )
-        conn.commit()
-        conn.close()
-        print(f"✅ Trade logged to DB: {sembol} {tip} [tid:{trade_id}] (PNL: ${pnl:.2f})")
-    except Exception as e:
-        print(f"⚠️ data_logger islem_kaydet hatasi: {e}")
+    data = {
+        "zaman": datetime.now(timezone.utc).isoformat(),
+        "sembol": sembol, "tip": tip, "giris_fiyati": giris_fiyati,
+        "cikis_fiyati": cikis_fiyati, "pnl": pnl, "pnl_pct": pnl_pct,
+        "kaldirac": kaldirac, "margin": margin, "neden": neden,
+        "etiket": etiket, "trade_id": trade_id, "rsi": rsi,
+        "bollinger_ust": bollinger_ust, "bollinger_alt": bollinger_alt, "hacim_oran": hacim_oran
+    }
+    _write_queue.put({"type": "islem", "data": data})
 
 
 # ─────────────────────────────────────────────

@@ -21,6 +21,14 @@ import shutil
 import time
 from datetime import datetime, timezone
 import settings_manager
+from cryptography.fernet import Fernet, InvalidToken
+from dotenv import load_dotenv
+
+# Load environment initially
+try:
+    load_dotenv()
+except Exception:
+    pass
 
 # ──────────────────────────────────────────────
 # STREAMLIT CLOUD IN-MEMORY YEDEK
@@ -68,19 +76,57 @@ def get_state_file() -> str:
     os.makedirs(folder_path, exist_ok=True)
     return os.path.join(folder_path, file_name)
 
+def get_master_key() -> str:
+    env_path = os.path.join(get_app_path(), '.env')
+    load_dotenv(env_path)
+    key = os.environ.get("MASTER_KEY")
+    if not key:
+        key = Fernet.generate_key().decode('utf-8')
+        try:
+            with open(env_path, "a", encoding="utf-8") as f:
+                f.write(f"\nMASTER_KEY={key}\n")
+        except Exception as e:
+            print(f"⚠️ Could not write MASTER_KEY to .env: {e}")
+        os.environ["MASTER_KEY"] = key
+    return key
+
+_fernet = None
+def get_fernet():
+    global _fernet
+    if _fernet is None:
+        try:
+            _fernet = Fernet(get_master_key().encode('utf-8'))
+        except Exception as e:
+            print(f"⚠️ Fernet initialization error: {e}. Keys will not be encrypted properly.")
+            _fernet = Fernet(Fernet.generate_key())
+    return _fernet
+
 def encode_key(key: str) -> str:
     if not key:
         return ""
-    return base64.b64encode(key.encode('utf-8')).decode('utf-8')
+    try:
+        return get_fernet().encrypt(key.encode('utf-8')).decode('utf-8')
+    except Exception as e:
+        print(f"⚠️ Encryption error: {e}")
+        return base64.b64encode(key.encode('utf-8')).decode('utf-8')
 
 
 def decode_key(encoded_key: str) -> str:
     if not encoded_key:
         return ""
     try:
-        return base64.b64decode(encoded_key.encode('utf-8')).decode('utf-8')
-    except Exception:
-        return ""
+        return get_fernet().decrypt(encoded_key.encode('utf-8')).decode('utf-8')
+    except InvalidToken:
+        try:
+            return base64.b64decode(encoded_key.encode('utf-8')).decode('utf-8')
+        except Exception:
+            return ""
+    except Exception as e:
+        print(f"⚠️ Decryption error: {e}")
+        try:
+            return base64.b64decode(encoded_key.encode('utf-8')).decode('utf-8')
+        except Exception:
+            return ""
 
 
 # ──────────────────────────────────────────────

@@ -860,5 +860,6 @@ with tab_gecmis:
 # Auto-Refresh (Bot çalışırken)
 # ─────────────────────────────────────────────
 if worker.is_running:
-    time.sleep(0.3)
+    # 2 saniyede bir arayüz yenilenir (CPU ve flicker düşürüldü)
+    time.sleep(2.0)
     st.rerun()
