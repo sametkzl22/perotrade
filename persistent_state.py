@@ -318,8 +318,8 @@ def state_yukle(dosya: str = None) -> dict:
     if state is not None:
         state = _ensure_keys(state)
 
-        # Mod bilgisi settings_manager'dan (tek doğru kaynak)
-        is_real = settings_manager.is_real_mode_active()
+        # Mod bilgisi last_mode.json'dan (tek doğru kaynak)
+        is_real = get_last_mode()
         state["use_real_api"] = is_real
 
         if not is_real:
@@ -417,7 +417,7 @@ def state_kaydet(state: dict, dosya: str = None):
                 kayit[k] = v
 
         kayit = _ensure_keys(kayit)
-        kayit["use_real_api"] = settings_manager.is_real_mode_active()
+        kayit["use_real_api"] = get_last_mode()
 
         # Atomic write (güvenli)
         success = _safe_write_json(kayit, dosya)
