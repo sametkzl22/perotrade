@@ -170,7 +170,7 @@ class GlobalBotState:
     def load_from_persistent(self):
         """Persistent state'den yükle."""
         try:
-            loaded = ps.state_yukle(ps.STATE_FILE)
+            loaded = ps.state_yukle()
         except (ccxt.BaseError, sqlite3.Error, Exception) as e:
             print(f"⚠️ state_yukle hata: {e}")
             loaded = ps.DEFAULT_STATE.copy()
@@ -425,6 +425,13 @@ def islem_kapat(state, trade_id, fiyat, neden, is_breakout=False, is_liq=False):
             bollinger_alt=evo_boll_alt, hacim_oran=evo_hacim_oran
         )
     except (ccxt.BaseError, sqlite3.Error, Exception):
+        pass
+
+    # Immediate Save: Kapanma sonrası anında mühürle
+    try:
+        temiz_kapat = {k: v for k, v in state.items() if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
+        ps.state_kaydet(temiz_kapat)
+    except Exception:
         pass
 
 
@@ -896,6 +903,12 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                     state["aktif_pozisyonlar"][dca_tid]["dca_sayisi"] = dca.get("dca_sayisi", 1)
                                     state["bakiye"] -= ekleme
                                     log_ekle(f"✅ DCA UYGULANDI: ${ekleme:.2f} eklendi.", state)
+                                    # Immediate Save: DCA (Bakiye Güncelleme) anında mühürle
+                                    try:
+                                        tem_s = {k: v for k, v in state.items() if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
+                                        ps.state_kaydet(tem_s)
+                                    except Exception:
+                                        pass
                 else:
                     karar_paketi["karar"] = "KAPAT"
 

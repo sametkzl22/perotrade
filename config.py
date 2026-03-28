@@ -48,7 +48,6 @@ LONG_MA = 25
 TIMEFRAME = "1h"
 
 # ───── Persistent State ─────
-STATE_FILE = "persistent_state.json"
 TRADE_LOG_FILE = "trade_history.csv"
 
 # ───── Headless Bot (bot.py) ─────

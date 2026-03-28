@@ -76,9 +76,30 @@ st.markdown("""
 # ─────────────────────────────────────────────
 worker = get_bot_worker()
 
-# Auto-Start Logic
-if worker.state.get("bot_calisiyor", False) and getattr(worker, "_engine_thread", None) is None:
-    worker.start()
+import signal
+import sys
+
+def handle_sigterm(signum, frame):
+    print("🛑 SIGTERM Sinyali Alındı. Graceful Shutdown başlatılıyor...")
+    if worker.state.get("bot_calisiyor", False):
+        worker.stop()
+    sys.exit(0)
+
+try:
+    signal.signal(signal.SIGTERM, handle_sigterm)
+    signal.signal(signal.SIGINT, handle_sigterm)
+except ValueError:
+    pass  # Sadece main thread'de çalışır, Streamlit thread'lerinde atla.
+
+# Graceful Auto-Start Logic
+if worker.state.get("bot_calisiyor", False):
+    engine_th = getattr(worker, "_engine_thread", None)
+    if engine_th is None or not engine_th.is_alive():
+        print("🔄 [Auto-Resume] Otonom mod aktif algılandı. Motor ve WebSocket başlatılıyor...")
+        try:
+            worker.start()
+        except Exception as e:
+            print(f"⚠️ [Auto-Resume] Başlatma Hatası: {e}")
 
 # UI-only session state (görünüm modu gibi)
 if "view_mode" not in st.session_state:
