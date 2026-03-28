@@ -1305,10 +1305,21 @@ class BotWorker:
 
     def __init__(self):
         self.state = GlobalBotState()
-        self.state.load_from_persistent()
         self._ws_thread = None
         self._engine_thread = None
         self._corr_thread = None
+        self.bootstrap()
+
+    def bootstrap(self):
+        """Worker başlarken (UI yüklenmeden) state dosyasını okuyup kaldığı yerden devam ettirir."""
+        last_mode = ps.get_last_mode()
+        self.state.set("use_real_api", last_mode)
+        self.state.load_from_persistent()
+
+        if self.is_running:
+            mod_str = "Real" if last_mode else "Demo"
+            print(f"🔄 [Bootstrap] Auto-resume başlatıldı: {mod_str} modu aktif")
+            self.start()
 
     @property
     def is_running(self) -> bool:
@@ -1378,5 +1389,6 @@ class BotWorker:
     def switch_mode(self, use_real_api: bool):
         """Demo/Real mod değiştir. Bot duruyorsa state'i yeniden yükler."""
         self.state.save_to_persistent()
+        ps.set_last_mode(use_real_api)
         self.state.set("use_real_api", use_real_api)
         self.state.load_from_persistent()

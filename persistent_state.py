@@ -67,10 +67,32 @@ def get_app_path():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def set_last_mode(is_real: bool):
+    """En son aktif olan modu global last_mode.json dosyasına mühürler."""
+    last_mode_file = os.path.join(get_app_path(), "data", "last_mode.json")
+    os.makedirs(os.path.dirname(last_mode_file), exist_ok=True)
+    try:
+        with open(last_mode_file, "w", encoding="utf-8") as f:
+            json.dump({"use_real_api": is_real}, f)
+    except Exception:
+        pass
+
+def get_last_mode() -> bool:
+    """En son aktif olan modu okur. Yoksa settings_manager (eski) değerini döner."""
+    last_mode_file = os.path.join(get_app_path(), "data", "last_mode.json")
+    if not os.path.exists(last_mode_file):
+        return settings_manager.is_real_mode_active()
+    try:
+        with open(last_mode_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data.get("use_real_api", False)
+    except Exception:
+        return False
+
 def get_state_file() -> str:
     """Moda göre izole dosya yolunu döner."""
     base_dir = get_app_path()
-    is_real = settings_manager.is_real_mode_active()
+    is_real = get_last_mode()
     folder_name = "real" if is_real else "demo"
     file_name = "real_state.json" if is_real else "demo_state.json"
     
