@@ -909,11 +909,27 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                 karar_paketi = {"karar": "BEKLE", "dusunce": kapat_sinyali_nedeni, "aralik_sn": 5}
                 mtf_guc = mtf.get("guc", 0) if isinstance(mtf, dict) else 0
                 
-                # V25: ACİL DURDURMA kalıcı koruma — bot bu durumda hiçbir yeni işlem açmaz
-                if state.get("bot_durumu") == "🛡️ ACİL DURDURMA":
+                # V26: MOLA koruma — süre dolana kadar yeni işlem açılmaz, süre dolunca otomatik devam
+                mola_bitis = state.get("mola_bitis_zamani", 0)
+                if mola_bitis > 0 and time.time() < mola_bitis:
+                    kalan_dk = int((mola_bitis - time.time()) / 60)
                     karar_paketi["karar"] = "BEKLE"
-                    karar_paketi["dusunce"] = "🛡️ ACİL DURDURMA aktif. Yeni işlem yasaklı."
-                    pozisyonu_kapat = False  # Zaten hepsi kapatılmış durumda
+                    karar_paketi["dusunce"] = f"🛡️ MOLA aktif. Kalan: {kalan_dk} dakika."
+                    pozisyonu_kapat = False
+                elif mola_bitis > 0 and time.time() >= mola_bitis:
+                    # Mola süresi doldu — otomatik devam
+                    state["mola_bitis_zamani"] = 0
+                    state["bot_durumu"] = "Çalışıyor"
+                    state["gunluk_pik_kar"] = 0.0  # Günlük pik sıfırla
+                    log_ekle("✅ MOLA BİTTİ: Bot otonom taramaya geri döndü. Piyasa tekrar taranıyor.", state, is_breakout=True)
+                    threading.Thread(
+                        target=send_telegram_msg,
+                        args=("✅ Mola bitti! Bot otonom taramaya geri döndü.",),
+                        daemon=True,
+                    ).start()
+                
+                if mola_bitis > 0 and time.time() < mola_bitis:
+                    pass  # BEKLE zaten ayarlandı, elif/else'e düş
                 elif not pozisyonu_kapat:
                     if not isinstance(secilen_pazar, dict) or not secilen_pazar:
                         karar_paketi = {"karar": "BEKLE", "dusunce": "Pazar verisi alınamadı, bekleniyor.", "aralik_sn": 30, "guven_skoru": 0, "expected_growth": 0, "tavsiye_kaldirac": 10, "tavsiye_oran": 0.10, "ozet": "Veri yok"}
@@ -1067,8 +1083,12 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
 
                     loss_stop = getattr(cfg, "DAILY_LOSS_STOP", -15.0)
                     if not is_challenge and gunluk_kar <= loss_stop and getattr(cfg, "EMERGENCY_STOP_ENABLED", True):
-                        # V25: ACİL DURDURMA — tüm pozisyonları kapat, yeni işlem yasak
-                        state["bot_durumu"] = "🛡️ ACİL DURDURMA"
+                        # V26: MOLA SİSTEMİ — tüm pozisyonları kapat, 4 saat bekle, sonra otomatik devam
+                        mola_saat = getattr(cfg, "COOLING_OFF_HOURS", 4)
+                        mola_bitis = time.time() + (mola_saat * 3600)
+                        state["bot_durumu"] = f"🛡️ MOLA VERİLDİ ({mola_saat} Saat)"
+                        state["mola_bitis_zamani"] = mola_bitis
+                        
                         kapanacak_tids = list(state.get("aktif_pozisyonlar", {}).keys())
                         fiyatlar_cache = state.get("guncel_fiyatlar", {})
                         for e_tid in kapanacak_tids:
@@ -1077,14 +1097,22 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 e_sembol = e_poz.get("sembol", e_tid)
                                 e_fiyat = fiyatlar_cache.get(e_sembol, e_poz.get("giris_fiyati", 0))
                                 if e_fiyat > 0:
-                                    islem_kapat(state, e_tid, e_fiyat, f"🛡️ V25 ACİL DURDURMA: Günlük kayıp %{gunluk_kar:.1f} < %{loss_stop}")
+                                    islem_kapat(state, e_tid, e_fiyat, f"🛡️ V26 MOLA: Günlük kayıp %{gunluk_kar:.1f} < %{loss_stop}")
                         karar_paketi["karar"] = "BEKLE"
-                        karar_paketi["dusunce"] = f"🛡️ ACİL DURDURMA: Günlük kayıp %{gunluk_kar:.1f}. Tüm pozisyonlar kapatıldı, yeni işlem yasaklandı."
-                        log_ekle(f"🛡️ ACİL DURDURMA AKTİF! Günlük kayıp: %{gunluk_kar:.1f}. Tüm pozisyonlar kapatıldı ve yeni işlem yasak.", state, is_breakout=True)
-                        # Telegram acil bildirim
+                        karar_paketi["dusunce"] = f"🛡️ MOLA: Günlük kayıp %{gunluk_kar:.1f}. Tüm pozisyonlar kapatıldı, {mola_saat} saat bekleniyor."
+                        log_ekle(f"🛡️ MOLA AKTİF! Günlük kayıp: %{gunluk_kar:.1f}. Tüm pozisyonlar kapatıldı. {mola_saat} saat sonra otomatik devam.", state, is_breakout=True)
+                        
+                        # V26: Telegram detaylı mola raporu
+                        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+                        devam_saati = _dt.fromtimestamp(mola_bitis, tz=_tz(offset=_td(hours=3))).strftime("%H:%M")
+                        tg_mola_msg = (
+                            f"🚨 Piyasada sert dalgalanma! "
+                            f"%{abs(gunluk_kar):.1f} kayıp eşiği nedeniyle {mola_saat} saatlik koruma molası başladı. "
+                            f"Saat {devam_saati}'de otonom tarama devam edecek."
+                        )
                         threading.Thread(
                             target=send_telegram_msg,
-                            args=(f"🚨 ACİL DURDURMA! Günlük kayıp: %{gunluk_kar:.1f}. Tüm pozisyonlar kapatıldı.",),
+                            args=(tg_mola_msg,),
                             daemon=True,
                         ).start()
 
@@ -1258,12 +1286,19 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 margin = min(margin, mevcut_bakiye * 0.5)
                             buyukluk_usdt = margin * tavsiye_kaldirac
                             
-                            # V25: Pozisyon Boyut Sınırı — tek işlem cüzdanın max %10'u (margin*kaldıraç)
-                            max_poz_pct = getattr(cfg, "MAX_POSITION_SIZE_PCT", 10.0) / 100.0
-                            toplam_equity_v25 = state["bakiye"] + aktif_margin_toplami(state.get("aktif_pozisyonlar", {}))
-                            max_buyukluk = toplam_equity_v25 * max_poz_pct
+                            # V26: Dinamik Pozisyon Boyutu — güven skoruna göre limit değişir
+                            _guven = karar_paketi.get("guven_skoru", 0)
+                            if _guven >= 95:
+                                max_poz_pct = 0.30   # %30 — çok emin
+                            elif _guven >= 85:
+                                max_poz_pct = 0.15   # %15 — güçlü sinyal
+                            else:
+                                max_poz_pct = 0.05   # %5 — temkinli
+                            
+                            toplam_equity_v26 = state["bakiye"] + aktif_margin_toplami(state.get("aktif_pozisyonlar", {}))
+                            max_buyukluk = toplam_equity_v26 * max_poz_pct
                             if buyukluk_usdt > max_buyukluk:
-                                log_ekle(f"🛡️ V25 POZ LİMİT: ${buyukluk_usdt:.0f} > Max ${max_buyukluk:.0f} (%{max_poz_pct*100:.0f}). Sınırlandırılıyor.", state)
+                                log_ekle(f"🛡️ V26 DİNAMİK POZ: Güven %{_guven:.0f} → Limit %{max_poz_pct*100:.0f}. ${buyukluk_usdt:.0f} > Max ${max_buyukluk:.0f}. Sınırlandırılıyor.", state)
                                 buyukluk_usdt = max_buyukluk
                                 margin = buyukluk_usdt / tavsiye_kaldirac if tavsiye_kaldirac > 0 else margin
 

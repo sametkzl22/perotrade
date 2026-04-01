@@ -31,8 +31,9 @@ COMPOUNDING = True         # Her günün kârı ertesi günün bakiyesine ekleni
 # ───── Risk Limitleri ─────
 DAILY_PROFIT_LOCK = 500.0  # %500 kâra ulaşınca -> Güvenli Mod (eski)
 PROFIT_LOCK_RATIO = 0.8    # Kazanılan %10 hedefin %80'i kilitlenir
-DAILY_LOSS_STOP = -15.0    # V25: %15 kayıpta ACİL DURDURMA (tüm pozisyonlar kapatılır)
+DAILY_LOSS_STOP = -15.0    # V25: %15 kayıpta MOLA tetiklenir
 EMERGENCY_STOP_ENABLED = True  # V25: Acil durdurma aktif
+COOLING_OFF_HOURS = 4          # V26: Mola süresi (saat) — kayıp eşiği sonrası bekleme
 MAX_CONCURRENT_TRADES = 99 # Aynı anda açılabilecek maksimum işlem sayısı
 
 # V19/V25 Gelişmiş Risk Yönetimi Mimarisi
