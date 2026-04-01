@@ -927,17 +927,51 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                 if not pozisyonu_kapat:
                     if not isinstance(secilen_pazar, dict) or not secilen_pazar:
                         karar_paketi = {"karar": "BEKLE", "dusunce": "Pazar verisi alınamadı, bekleniyor.", "aralik_sn": 30, "guven_skoru": 0, "expected_growth": 0, "tavsiye_kaldirac": 10, "tavsiye_oran": 0.10, "ozet": "Veri yok"}
-                    elif state.get("ai_modu") == "Local ML":
-                        karar_paketi = ai_engine.local_ml_karar(
-                            secilen_sembol, secilen_pazar, secilen_sma, poz_durumu,
-                            btc_trend, fonlama, zaman_baski_carpani,
-                            mod=state.get("mod", ""), mtf_guc=mtf_guc
-                        )
-                    elif state.get("ai_modu") == "OpenAI LLM" and state.get("openai_key"):
-                        karar_paketi = ai_engine.llm_karar(secilen_sembol, secilen_pazar, secilen_sma, state["openai_key"], poz_durumu, btc_trend, fonlama, zaman_baski_carpani)
                     else:
                         skor = ai_engine.kompozit_skor_hesapla(secilen_pazar, secilen_sma)
-                        karar_paketi = ai_engine.mock_ai_karar(secilen_sembol, secilen_pazar, skor, poz_durumu, btc_trend, fonlama, zaman_baski_carpani, mod=state.get("mod", ""))
+                        guven_base, _, _, _ = ai_engine.ai_metrikler(secilen_pazar, skor, zaman_baski_carpani)
+                        
+                        of_data = None
+                        of_min_conf = getattr(cfg, "ORDERFLOW_MIN_CONFIDENCE", 75)
+                        if guven_base >= of_min_conf:
+                            with lock:
+                                log_ekle(f"📊 {secilen_sembol} Güven (%{guven_base:.1f}) > %{of_min_conf}. Emir defteri (Order Book) on-demand analiz ediliyor...", state)
+                            of_data = ai_engine.analiz_emir_akisi(exchange, secilen_sembol)
+                            
+                            # v24: Binance Rate Limit used_weight update (On-Demand monitoring)
+                            try:
+                                headers = exchange.last_response_headers
+                                if headers and hasattr(headers, "get") and headers.get('x-mbx-used-weight-1m'):
+                                    used_w = int(headers.get('x-mbx-used-weight-1m'))
+                                    with lock:
+                                        state["used_weight_1m"] = used_w
+                                        if used_w > 2000:
+                                            state["limit_uyari"] = True
+                                            log_ekle(f"⚠️ API Yük Uyarısı (used_weight): {used_w}/6000. Soğuma (Cooling) süresi dinamik olarak artırılacak.", state)
+                                        else:
+                                            state["limit_uyari"] = False
+                            except Exception:
+                                pass
+                                
+                            if of_data and of_data.get("is_valid"):
+                                with lock:
+                                    t_coinler = state.get("taranan_coinler", [])
+                                    for idx_c, c in enumerate(t_coinler):
+                                        if isinstance(c, dict) and (c.get("Sembol") == secilen_sembol or c.get("sembol", "") == secilen_sembol):
+                                            of_str = f"{of_data.get('durum', '')} (x{of_data.get('oran',1.0):.1f})"
+                                            t_coinler[idx_c]["order_flow"] = of_str
+                                    state["taranan_coinler"] = t_coinler
+                        
+                        if state.get("ai_modu") == "Local ML":
+                            karar_paketi = ai_engine.local_ml_karar(
+                                secilen_sembol, secilen_pazar, secilen_sma, poz_durumu,
+                                btc_trend, fonlama, zaman_baski_carpani,
+                                mod=state.get("mod", ""), mtf_guc=mtf_guc, order_flow=of_data
+                            )
+                        elif state.get("ai_modu") == "OpenAI LLM" and state.get("openai_key"):
+                            karar_paketi = ai_engine.llm_karar(secilen_sembol, secilen_pazar, secilen_sma, state["openai_key"], poz_durumu, btc_trend, fonlama, zaman_baski_carpani)
+                        else:
+                            karar_paketi = ai_engine.mock_ai_karar(secilen_sembol, secilen_pazar, skor, poz_durumu, btc_trend, fonlama, zaman_baski_carpani, mod=state.get("mod", ""), order_flow=of_data)
 
                     # v8: Kesin Kar (Sure Profit) Korelasyon Mantığı
                     kesin_kar = state.get("kesin_kar_parametreleri", {})
@@ -1342,6 +1376,12 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
             # --- v11: ZORUNLU COOLING + GC ---
             _dongü_sayaci += 1
             cooling_sn = getattr(cfg, "COOLING_SLEEP_SECONDS", 10)
+            
+            # v24: Dinamik Soğuma (Order Flow limit uyarısı)
+            if state.get("limit_uyari"):
+                cooling_sn = max(cooling_sn * 2, 20)  # Rate limit tehlikeliyse 2x veya en az 20sn bekle
+                with lock:
+                    state["limit_uyari"] = False  # Sonraki tur için sıfırla
             gc_interval = getattr(cfg, "GC_COLLECT_INTERVAL", 100)
 
             # Bellek temizliği: Her N döngüde gc.collect()

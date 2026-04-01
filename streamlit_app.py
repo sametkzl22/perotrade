@@ -527,6 +527,8 @@ with st.sidebar:
         f_skor = firsat.get("guven_skoru", firsat.get("skor", firsat.get("score", 0)))
         f_yon = firsat.get("sinyal", firsat.get("yon", firsat.get("signal", "—")))
         f_kaldirac = firsat.get("kaldirac", firsat.get("leverage", "—"))
+        f_of = firsat.get("order_flow", "")
+        
         if f_yon in ["LONG", "AL", "GÜÇLÜ AL", "ZAYIF AL"]:
             yon_renk = "#00ff88"
             yon_ikon = "🟢"
@@ -539,6 +541,9 @@ with st.sidebar:
             yon_renk = yon_renk_default or "#888"
             yon_ikon = "⚪"
             yon_text = str(f_yon)
+            
+        of_html = f"<div style='margin-top:6px; font-size: 11px; color:#c5c6c7; border-top: 1px dashed rgba(255,255,255,0.1); padding-top:4px;'>📊 Emir Akışı: {f_of}</div>" if f_of else ""
+        
         st.sidebar.markdown(f"""
         <div style='background: rgba(31,40,51,0.7); border-radius: 8px; padding: 10px; margin-bottom: 6px; border-left: 3px solid {yon_renk};'>
             <div style='display: flex; justify-content: space-between; align-items: center;'>
@@ -549,6 +554,7 @@ with st.sidebar:
                 <span>Güven: <b style='color: #ffd200;'>%{f_skor}</b></span>
                 <span>Kaldıraç: <b>{f_kaldirac}x</b></span>
             </div>
+            {of_html}
         </div>
         """, unsafe_allow_html=True)
 

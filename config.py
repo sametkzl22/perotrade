@@ -39,6 +39,14 @@ MAX_CONCURRENT_TRADES = 99 # Aynı anda açılabilecek maksimum işlem sayısı
 MAX_WALLET_RISK_PCT = 100.0
 TRADE_RISK_PCT = 10.0
 
+# ───── Order Flow (V24) ─────
+ORDERBOOK_DEPTH = 100            # Emir defteri taranacak kademe sayısı
+ORDERFLOW_RANGE_PCT = 3.0        # +- %3 fiyat mesafesi
+ORDERFLOW_IMBALANCE_RATIO = 1.5  # Satıcı / Alıcı (veya tam tersi) baskınlık eşiği
+ORDERFLOW_CONFLICT_PENALTY = 0.40 # Çelişki durumunda güven %40 düşer
+ORDERFLOW_CONFIRM_BONUS = 20     # Doğrulama (Onay) durumunda güvene +20 puan eklenir
+ORDERFLOW_MIN_CONFIDENCE = 75    # Sadece AI güven skoru > %75 olan coinlerde order book API'si çeker
+
 # ───── Haber & Makro Filtre ─────
 ENABLE_NEWS_VETO = True    # False = haberleri yoksay, sadece teknik skor ile işlem yap
 

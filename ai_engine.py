@@ -291,6 +291,62 @@ def likidite_kontrol(exchange, sembol: str, min_hacim_usdt: float = 500_000) -> 
         return sonuc
 
 
+def analiz_emir_akisi(exchange, sembol: str, derinlik: int = None, mesafe_pct: float = None) -> dict:
+    """V24: Emir defteri (Order Book) derinlik analizi. Alıcı/Satıcı dengesizliğini ölçer."""
+    if derinlik is None: derinlik = getattr(cfg, "ORDERBOOK_DEPTH", 100)
+    if mesafe_pct is None: mesafe_pct = getattr(cfg, "ORDERFLOW_RANGE_PCT", 3.0)
+    ratio = getattr(cfg, "ORDERFLOW_IMBALANCE_RATIO", 1.5)
+    
+    sonuc = {"durum": "DENGELİ", "alici_hacim": 0.0, "satici_hacim": 0.0, "oran": 1.0, "is_valid": False}
+    try:
+        if exchange is None or not (hasattr(exchange, 'has') and exchange.has.get('fetchOrderBook')):
+            return sonuc
+            
+        ob = exchange.fetch_order_book(sembol, limit=derinlik)
+        bids = ob.get('bids', [])
+        asks = ob.get('asks', [])
+        
+        if not bids or not asks:
+            return sonuc
+            
+        best_bid = bids[0][0]
+        best_ask = asks[0][0]
+        center_price = (best_bid + best_ask) / 2.0
+        
+        lower_bound = center_price * (1 - (mesafe_pct / 100.0))
+        upper_bound = center_price * (1 + (mesafe_pct / 100.0))
+        
+        bid_vol = sum(amount for price, amount in bids if price >= lower_bound)
+        ask_vol = sum(amount for price, amount in asks if price <= upper_bound)
+        
+        sonuc["alici_hacim"] = round(bid_vol, 2)
+        sonuc["satici_hacim"] = round(ask_vol, 2)
+        
+        if bid_vol == 0 and ask_vol > 0:
+            sonuc["oran"] = 999.0
+            sonuc["durum"] = "SATICI_BASKIN"
+        elif ask_vol == 0 and bid_vol > 0:
+            sonuc["oran"] = 999.0
+            sonuc["durum"] = "ALICI_BASKIN"
+        elif bid_vol > 0 and ask_vol > 0:
+            alici_orani = bid_vol / ask_vol
+            satici_orani = ask_vol / bid_vol
+            
+            if alici_orani > ratio:
+                sonuc["durum"] = "ALICI_BASKIN"
+                sonuc["oran"] = round(alici_orani, 2)
+            elif satici_orani > ratio:
+                sonuc["durum"] = "SATICI_BASKIN"
+                sonuc["oran"] = round(satici_orani, 2)
+            else:
+                sonuc["oran"] = round(max(alici_orani, satici_orani), 2)
+                
+        sonuc["is_valid"] = True
+        return sonuc
+    except Exception:
+        return sonuc
+
+
 def dinamik_analiz_araligi(volatilite: float, is_breakout: bool = False) -> int:
     """ Berserker Mode: Ultra hızlı 1 saniyelik sabit döngü. """
     return 1
@@ -772,7 +828,7 @@ def ai_metrikler(pazar: dict, kompozit_skor: float, zaman_baski_carpani: float =
     
     return guven, beklenen, tavsiye_kaldirac, tavsiye_oran
 
-def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon: str, btc_trendi: str, fonlama: dict, zaman_baski_carpani: float = 1.0, mod: str = "") -> dict:
+def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon: str, btc_trendi: str, fonlama: dict, zaman_baski_carpani: float = 1.0, mod: str = "", order_flow: dict = None) -> dict:
     if not isinstance(pazar, dict):
         return {"sembol": sembol, "karar": "BEKLE", "skor": 0, "dusunce": "Pazar verisi yok", "aralik_sn": 30, "guven_skoru": 0, "expected_growth": 0, "tavsiye_kaldirac": 10, "tavsiye_oran": 0.10, "ozet": "Veri yok"}
     if not isinstance(fonlama, dict):
@@ -853,6 +909,29 @@ def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon:
                 karar = "SHORT"
                 neden = f"Güçlü DÜŞÜŞ Beklentisi! {sembol} zayıflık gösteriyor (Skor: {kompozit_skor:.1f}).{twitter_msg}"
                 if pazar.get("is_breakout"): neden = "📉 ACİL SHORT (CRASH)! Aşağı yönlü hacim patlaması tespit edildi. " + neden
+
+    # V24 Order Flow Entegrasyonu
+    if order_flow and order_flow.get("is_valid") and karar in ["LONG", "SHORT"]:
+        of_durum = order_flow.get("durum")
+        of_oran = order_flow.get("oran", 1.0)
+        of_penalty = getattr(cfg, "ORDERFLOW_CONFLICT_PENALTY", 0.40)
+        of_bonus = getattr(cfg, "ORDERFLOW_CONFIRM_BONUS", 20)
+        oran_str = f"Oran: {of_oran:.1f}x"
+        
+        if karar == "LONG" and of_durum == "SATICI_BASKIN":
+            guven = max(0, guven * (1 - of_penalty))
+            karar = "BEKLE"
+            neden = f"❌ [OrderFlow Reddi] LONG sinyali var ama emir defterinde SATICI_BASKIN ({oran_str}). Geri çekiliniyor."
+        elif karar == "SHORT" and of_durum == "ALICI_BASKIN":
+            guven = max(0, guven * (1 - of_penalty))
+            karar = "BEKLE"
+            neden = f"❌ [OrderFlow Reddi] SHORT sinyali var ama emir defterinde ALICI_BASKIN ({oran_str}). Geri çekiliniyor."
+        elif karar == "LONG" and of_durum == "ALICI_BASKIN":
+            guven = min(100.0, guven + of_bonus)
+            neden = f"✅ [OrderFlow Onayı] ALICI_BASKIN ({oran_str}). " + neden
+        elif karar == "SHORT" and of_durum == "SATICI_BASKIN":
+            guven = min(100.0, guven + of_bonus)
+            neden = f"✅ [OrderFlow Onayı] SATICI_BASKIN ({oran_str}). " + neden
 
     vol = pazar.get("volatilite", 0) or 0
     sonraki_sn = dinamik_analiz_araligi(vol, pazar.get("is_breakout", False))
@@ -1261,7 +1340,7 @@ def _build_feature_vector(pazar: dict, sma_sinyal: str, btc_trendi: str, fonlama
 
 def local_ml_karar(sembol: str, pazar: dict, sma_sinyal: str, acik_pozisyon: str,
                    btc_trendi: str, fonlama: dict, zaman_baski_carpani: float = 1.0,
-                   mod: str = "", mtf_guc: int = 0) -> dict:
+                   mod: str = "", mtf_guc: int = 0, order_flow: dict = None) -> dict:
     """
     Yerel ML model (XGBoost) ile anında karar verir.
     Model yoksa mock_ai_karar'a fallback yapar.
@@ -1315,6 +1394,29 @@ def local_ml_karar(sembol: str, pazar: dict, sma_sinyal: str, acik_pozisyon: str
             neden = "🚀 ML BREAKOUT LONG! " + neden
         elif karar == "SHORT" and pazar.get("is_breakout"):
             neden = "📉 ML BREAKOUT SHORT! " + neden
+
+        # V24 Order Flow Entegrasyonu
+        if order_flow and order_flow.get("is_valid") and karar in ["LONG", "SHORT"]:
+            of_durum = order_flow.get("durum")
+            of_oran = order_flow.get("oran", 1.0)
+            of_penalty = getattr(cfg, "ORDERFLOW_CONFLICT_PENALTY", 0.40)
+            of_bonus = getattr(cfg, "ORDERFLOW_CONFIRM_BONUS", 20)
+            oran_str = f"Oran: {of_oran:.1f}x"
+            
+            if karar == "LONG" and of_durum == "SATICI_BASKIN":
+                ml_guven = max(0, ml_guven * (1 - of_penalty))
+                karar = "BEKLE"
+                neden = f"❌ [ML OrderFlow Reddi] Emir defteri SATICI_BASKIN ({oran_str}). ML sinyali BEKLE'ye çekildi."
+            elif karar == "SHORT" and of_durum == "ALICI_BASKIN":
+                ml_guven = max(0, ml_guven * (1 - of_penalty))
+                karar = "BEKLE"
+                neden = f"❌ [ML OrderFlow Reddi] Emir defteri ALICI_BASKIN ({oran_str}). ML sinyali BEKLE'ye çekildi."
+            elif karar == "LONG" and of_durum == "ALICI_BASKIN":
+                ml_guven = min(100.0, ml_guven + of_bonus)
+                neden = f"✅ [ML OrderFlow Onayı] ALICI_BASKIN ({oran_str}). " + neden
+            elif karar == "SHORT" and of_durum == "SATICI_BASKIN":
+                ml_guven = min(100.0, ml_guven + of_bonus)
+                neden = f"✅ [ML OrderFlow Onayı] SATICI_BASKIN ({oran_str}). " + neden
 
         return {
             "sembol": sembol,
