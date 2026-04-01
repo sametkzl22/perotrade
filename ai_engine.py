@@ -586,12 +586,16 @@ def top_coinleri_tara(exchange, limit=100) -> list:
             return standart_liste
             
         usdt_tickers = {}
+        min_vol = getattr(cfg, "MIN_24H_VOLUME_USDT", 50_000_000)
         for k, v in tickers.items():
             if v is None or not isinstance(v, dict):
                 continue
             vol = v.get('quoteVolume', 0)
             if vol is None:
                 vol = 0
+            # V25: 24s hacmi minimum eşiğin altındaki coinleri asla listeleme
+            if vol < min_vol:
+                continue
             # v11: Futures modda ':USDT' suffix'li sembolleri ara
             if is_futures:
                 if ':USDT' in k and vol > 0:
@@ -1186,7 +1190,7 @@ def multi_timeframe_analiz(exchange, sembol: str) -> dict:
 # 9) Dinamik DCA (Dollar Cost Averaging)
 # ─────────────────────────────────────────────
 def dca_hesapla(pozisyon: dict, guncel_fiyat: float, bakiye: float) -> dict:
-    """Martingale DCA: Pozisyon terse düştüğünde kademeli artan miktarlarla ekleme."""
+    """V25: DCA (Dollar Cost Averaging) — Martingale kaldırıldı, sabit ekleme."""
     if not isinstance(pozisyon, dict) or not guncel_fiyat or guncel_fiyat <= 0:
         return {"uygun": False, "ekleme_margin": 0, "yeni_ortalama": 0, "neden": "Geçersiz pozisyon verisi", "dca_sayisi": 0}
     giris = pozisyon.get("giris_fiyati", 0)
@@ -1209,10 +1213,9 @@ def dca_hesapla(pozisyon: dict, guncel_fiyat: float, bakiye: float) -> dict:
     dca_onerisi = {"uygun": False, "ekleme_margin": 0, "yeni_ortalama": giris, "neden": "", "dca_sayisi": dca_sayisi}
     
     if -20 < pnl_pct < -3 and liq_uzaklik > 5.0 and dca_sayisi < 3:
-        martingale_carpan = 2 ** dca_sayisi
+        # V25: Martingale kaldırıldı — sabit 1x çarpan
         temel_ekleme = min(bakiye * 0.08, margin * 0.3)
-        ekleme = temel_ekleme * martingale_carpan
-        ekleme = min(ekleme, bakiye * 0.30)
+        ekleme = min(temel_ekleme, bakiye * 0.30)
         
         if ekleme > 0.3:
             yeni_toplam_margin = margin + ekleme
@@ -1223,7 +1226,7 @@ def dca_hesapla(pozisyon: dict, guncel_fiyat: float, bakiye: float) -> dict:
                 "ekleme_margin": round(ekleme, 2),
                 "yeni_ortalama": round(yeni_ortalama, 4),
                 "dca_sayisi": dca_sayisi + 1,
-                "neden": f"DCA Yapıldı: Fiyat düşüşü %{abs(pnl_pct):.1f}, Giriş Fiyatı Revize: ${yeni_ortalama:.4f}, Hedef Kâr: ${hedef_kar_fiyat:.4f} (Martingale {martingale_carpan}x, DCA #{dca_sayisi+1})"
+                "neden": f"DCA Yapıldı: Fiyat düşüşü %{abs(pnl_pct):.1f}, Giriş Fiyatı Revize: ${yeni_ortalama:.4f}, Hedef Kâr: ${hedef_kar_fiyat:.4f} (Sabit 1x, DCA #{dca_sayisi+1})"
             }
     elif pnl_pct <= -20:
         dca_onerisi["neden"] = f"Zarar çok derin (%{pnl_pct:.1f}). DCA riskli, pozisyon kapatılmalı."

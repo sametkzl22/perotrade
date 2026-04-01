@@ -518,25 +518,9 @@ def islem_kapat(state, trade_id, fiyat, neden, is_breakout=False, is_liq=False):
         daemon=True,
     ).start()
 
-    # v7.1: Opsiyonel Martingale Takibi
-    if state.get("martingale_aktif", False):
-        if aktif_pnl < 0:
-            state["martingale_ardisik_kayip"] = state.get("martingale_ardisik_kayip", 0) + 1
-            kayip_n = state["martingale_ardisik_kayip"]
-            if kayip_n >= 3:
-                state["martingale_carpan"] = 1.0  # 3+ kayıp: geri çekil
-                log_ekle(f"⚠️ MARTINGALE DURDURULDU: {kayip_n} ardışık kayıp. Çarpan 1.0x'e düştü.", state)
-            else:
-                state["martingale_carpan"] = min(2 ** kayip_n, 4.0)
-                log_ekle(f"🎲 MARTINGALE: {kayip_n}. kayıp. Sonraki margin çarpanı: {state['martingale_carpan']:.0f}x", state)
-        else:
-            if state.get("martingale_ardisik_kayip", 0) > 0:
-                log_ekle(f"✅ MARTINGALE RESET: Kârlı işlem. Çarpan 1.0x'e döndü.", state)
-            state["martingale_ardisik_kayip"] = 0
-            state["martingale_carpan"] = 1.0
-    else:
-        state["martingale_ardisik_kayip"] = 0
-        state["martingale_carpan"] = 1.0
+    # V25: Martingale kaldırıldı — artık risk hiçbir zaman katlanmıyor
+    state["martingale_ardisik_kayip"] = 0
+    state["martingale_carpan"] = 1.0
 
     # v7: SQLite'a işlem kapanışı kaydet
     # 🚀 Evolutionary Trainer: Genişletilmiş teknik indikatör verileri + ödül/ceza
@@ -924,7 +908,13 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
 
                 karar_paketi = {"karar": "BEKLE", "dusunce": kapat_sinyali_nedeni, "aralik_sn": 5}
                 mtf_guc = mtf.get("guc", 0) if isinstance(mtf, dict) else 0
-                if not pozisyonu_kapat:
+                
+                # V25: ACİL DURDURMA kalıcı koruma — bot bu durumda hiçbir yeni işlem açmaz
+                if state.get("bot_durumu") == "🛡️ ACİL DURDURMA":
+                    karar_paketi["karar"] = "BEKLE"
+                    karar_paketi["dusunce"] = "🛡️ ACİL DURDURMA aktif. Yeni işlem yasaklı."
+                    pozisyonu_kapat = False  # Zaten hepsi kapatılmış durumda
+                elif not pozisyonu_kapat:
                     if not isinstance(secilen_pazar, dict) or not secilen_pazar:
                         karar_paketi = {"karar": "BEKLE", "dusunce": "Pazar verisi alınamadı, bekleniyor.", "aralik_sn": 30, "guven_skoru": 0, "expected_growth": 0, "tavsiye_kaldirac": 10, "tavsiye_oran": 0.10, "ozet": "Veri yok"}
                     else:
@@ -1075,13 +1065,28 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                             # HFT devam! Durdurmak yok.
                             pass
 
-                    loss_stop = getattr(cfg, "DAILY_LOSS_STOP", -7.5)
-                    if not is_challenge and gunluk_kar <= loss_stop:
-                        state["bot_durumu"] = "🩺 Kurtarma Modu"
-                        # Sadece çok güvenli sinyalleri kabul et
-                        if karar_paketi["karar"] in ["LONG", "SHORT"] and karar_paketi.get("guven_skoru", 0) < getattr(cfg, "RECOVERY_CONFIDENCE_THRESHOLD", 90):
-                            karar_paketi["karar"] = "BEKLE"
-                            karar_paketi["dusunce"] = f"🩺 KURTARMA MODU: SKOR {karar_paketi.get('guven_skoru',0):.1f} YETERSİZ (>90 Gerek). İptal."
+                    loss_stop = getattr(cfg, "DAILY_LOSS_STOP", -15.0)
+                    if not is_challenge and gunluk_kar <= loss_stop and getattr(cfg, "EMERGENCY_STOP_ENABLED", True):
+                        # V25: ACİL DURDURMA — tüm pozisyonları kapat, yeni işlem yasak
+                        state["bot_durumu"] = "🛡️ ACİL DURDURMA"
+                        kapanacak_tids = list(state.get("aktif_pozisyonlar", {}).keys())
+                        fiyatlar_cache = state.get("guncel_fiyatlar", {})
+                        for e_tid in kapanacak_tids:
+                            e_poz = state["aktif_pozisyonlar"].get(e_tid)
+                            if e_poz:
+                                e_sembol = e_poz.get("sembol", e_tid)
+                                e_fiyat = fiyatlar_cache.get(e_sembol, e_poz.get("giris_fiyati", 0))
+                                if e_fiyat > 0:
+                                    islem_kapat(state, e_tid, e_fiyat, f"🛡️ V25 ACİL DURDURMA: Günlük kayıp %{gunluk_kar:.1f} < %{loss_stop}")
+                        karar_paketi["karar"] = "BEKLE"
+                        karar_paketi["dusunce"] = f"🛡️ ACİL DURDURMA: Günlük kayıp %{gunluk_kar:.1f}. Tüm pozisyonlar kapatıldı, yeni işlem yasaklandı."
+                        log_ekle(f"🛡️ ACİL DURDURMA AKTİF! Günlük kayıp: %{gunluk_kar:.1f}. Tüm pozisyonlar kapatıldı ve yeni işlem yasak.", state, is_breakout=True)
+                        # Telegram acil bildirim
+                        threading.Thread(
+                            target=send_telegram_msg,
+                            args=(f"🚨 ACİL DURDURMA! Günlük kayıp: %{gunluk_kar:.1f}. Tüm pozisyonlar kapatıldı.",),
+                            daemon=True,
+                        ).start()
 
                     # DCA
                     dca_tid = sembol_icin_trade_id_bul(state.get("aktif_pozisyonlar", {}), secilen_sembol)
@@ -1164,6 +1169,25 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         else:
                             log_ekle(f"✅ MTF GATE ONAYLADI: {secilen_sembol} {sinyal} → MTF: {mtf_k}", state)
 
+                    # V25: OrderFlow Likidite Vetosu — emir defteri derinliği işlem büyüklüğünün 5 katından azsa işleme girme
+                    if sinyal in ["LONG", "SHORT"] and not sembol_acik_mi(state.get("aktif_pozisyonlar", {}), secilen_sembol):
+                        try:
+                            of_veto_mult = getattr(cfg, "ORDERFLOW_LIQUIDITY_VETO_MULT", 5)
+                            # Tahmini büyüklük: equity * trade_risk * kaldıraç
+                            _eq = state.get("bakiye", 0) + aktif_margin_toplami(state.get("aktif_pozisyonlar", {}))
+                            _tr = float(state.get("trade_risk_pct", getattr(cfg, "TRADE_RISK_PCT", 10.0))) / 100.0
+                            _tahmini_buyukluk = _eq * _tr * karar_paketi.get("tavsiye_kaldirac", 10)
+                            
+                            # of_data V24'te tanımlı — on-demand çekilmişse kontrol et
+                            if of_data and of_data.get("is_valid"):
+                                ob_toplam = of_data.get("alici_hacim", 0) + of_data.get("satici_hacim", 0)
+                                gerekli_derinlik = _tahmini_buyukluk * of_veto_mult
+                                if ob_toplam > 0 and ob_toplam < gerekli_derinlik:
+                                    log_ekle(f"🛡️ V25 LİKİDİTE VETO: {secilen_sembol} emir defteri derinliği (${ob_toplam:,.0f}) < gereken (${gerekli_derinlik:,.0f} = işlem x{of_veto_mult}). İŞLEM ENGELLENDİ.", state)
+                                    sinyal = "BEKLE"
+                        except Exception:
+                            pass
+
                     if sinyal in ["LONG", "SHORT"] and not sembol_acik_mi(state.get("aktif_pozisyonlar", {}), secilen_sembol):
                         # v9: Challenge mod kaldıraç/risk override
                         if state.get("mod") == "🚀 94-Day Challenge":
@@ -1200,11 +1224,8 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                             tavsiye_kaldirac = max(1, int(tavsiye_kaldirac * 0.7))
                             log_ekle(f"📊 USDT.D BASKILAMA: LONG oran/kaldıraç %30 azaltıldı. Oran: {tavsiye_oran:.2f}, Kaldıraç: {tavsiye_kaldirac}x", state)
 
-                        # v8: Recovery Mode & Martingale çarpanı uygula
-                        mart_carpan = state.get("martingale_carpan", 1.0)
-                        if state.get("bot_durumu", "") == "🩺 Kurtarma Modu":
-                            # Kurtarma modunda %90+ güvenliyiz, batan kasayı toparlamak için riski 2'ye katla
-                            mart_carpan = max(2.0, mart_carpan)
+                        # V25: Martingale kaldırıldı — sabit 1x çarpan
+                        mart_carpan = 1.0
 
                         risk_limit = 0.40 if zaman_baski_carpani >= 4.0 else 0.30 if zaman_baski_carpani >= 3.0 else 0.20
                         kullanilabilir_max = min(tavsiye_oran, risk_limit - (risk_pct / 100.0))
@@ -1216,7 +1237,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 margin = ch_bakiye_ac * kullanilabilir_max * mart_carpan
                                 margin = min(margin, ch_bakiye_ac * 0.5)
                             else:
-                                # V19 Gelişmiş Risk Yönetimi
+                                # V19/V25 Gelişmiş Risk Yönetimi
                                 c_max_wallet_risk = float(state.get("max_wallet_risk_pct", getattr(cfg, "MAX_WALLET_RISK_PCT", 100.0))) / 100.0
                                 c_trade_risk = float(state.get("trade_risk_pct", getattr(cfg, "TRADE_RISK_PCT", 10.0))) / 100.0
                                 
@@ -1233,9 +1254,18 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 margin = min(margin_hedef, kalan_risk_limiti)
                                 margin = min(margin, mevcut_bakiye)  # Fiziksel Bakiye kontrolü
                                 
-                                # v7 Fallback: Martingale güvenlik limiti
+                                # V25: Cüzdan güvenlik limiti (%50 hard cap)
                                 margin = min(margin, mevcut_bakiye * 0.5)
                             buyukluk_usdt = margin * tavsiye_kaldirac
+                            
+                            # V25: Pozisyon Boyut Sınırı — tek işlem cüzdanın max %10'u (margin*kaldıraç)
+                            max_poz_pct = getattr(cfg, "MAX_POSITION_SIZE_PCT", 10.0) / 100.0
+                            toplam_equity_v25 = state["bakiye"] + aktif_margin_toplami(state.get("aktif_pozisyonlar", {}))
+                            max_buyukluk = toplam_equity_v25 * max_poz_pct
+                            if buyukluk_usdt > max_buyukluk:
+                                log_ekle(f"🛡️ V25 POZ LİMİT: ${buyukluk_usdt:.0f} > Max ${max_buyukluk:.0f} (%{max_poz_pct*100:.0f}). Sınırlandırılıyor.", state)
+                                buyukluk_usdt = max_buyukluk
+                                margin = buyukluk_usdt / tavsiye_kaldirac if tavsiye_kaldirac > 0 else margin
 
                             # v10: Challenge açılış komisyonu
                             if is_challenge:
