@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────
-# PeroTrade Pro — Konfigürasyon v11
+# PeroTrade Pro — Konfigürasyon v23
 # 7/24 Bileşik Faiz Sistemi + Binance Futures
 # ─────────────────────────────────────────────
 
@@ -21,8 +21,8 @@ COOLING_SLEEP_SECONDS = 10             # Her analiz döngüsü sonunda zorunlu d
 GC_COLLECT_INTERVAL = 100              # Her N döngüde gc.collect() çağır
 
 # ───── Paper-Trade Bakiye ─────
-INITIAL_BALANCE = 10.0
-TARGET_BALANCE = 100.0
+INITIAL_BALANCE = 100000.0
+TARGET_BALANCE = 1000000.0
 
 # ───── Bileşik Faiz Hedefi ─────
 DAILY_TARGET_PCT = 10.0   # Günlük %10 kâr hedefi
@@ -77,3 +77,12 @@ EVO_PENALTY_POINTS = -15        # Zararlı işlem cezası
 EVO_WAIT_MULTIPLIER = 0.30      # Bekleme süresi çarpanı (%70 azalma)
 EVO_LOSS_STOP_OVERRIDE = -50.0  # Gevşetilmiş zarar durdurma (sadece EVO mod)
 EVO_MIN_SCORE_THRESHOLD = 10    # Sinyal eşiği (düşük = daha fazla işlem)
+
+# ───── Telegram Entegrasyonu (V23) — .env'den okunur ─────
+import os as _os
+from dotenv import load_dotenv as _load_dotenv
+
+_load_dotenv(dotenv_path=_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), ".env"))
+
+TELEGRAM_TOKEN = _os.getenv("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = _os.getenv("TELEGRAM_CHAT_ID", "")

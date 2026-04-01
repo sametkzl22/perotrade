@@ -17,7 +17,7 @@ import streamlit.components.v1 as components
 
 import config as cfg
 import persistent_state as ps
-from bot_worker import BotWorker, GlobalBotState, aktif_margin_toplami, pnl_hesapla, pnl_hesapla_coklu
+from bot_worker import BotWorker, GlobalBotState, aktif_margin_toplami, pnl_hesapla, pnl_hesapla_coklu, islem_kapat_with_retry
 import data_logger
 
 
@@ -504,6 +504,67 @@ with st.sidebar:
             time.sleep(1)
             st.rerun()
 
+    # ====== V23: 🔥 Potansiyel Fırsatlar Paneli ======
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🔥 Potansiyel Fırsatlar")
+    taranan_firsatlar = S.get("taranan_coinler", [])
+    guclü_firsatlar = []   # 80+
+    orta_firsatlar = []    # 60-79
+    for coin_data in taranan_firsatlar:
+        if isinstance(coin_data, dict):
+            skor = coin_data.get("guven_skoru", coin_data.get("skor", coin_data.get("score", 0)))
+            try:
+                skor_val = float(skor)
+            except (ValueError, TypeError):
+                skor_val = 0
+            if skor_val >= 80:
+                guclü_firsatlar.append(coin_data)
+            elif skor_val >= 60:
+                orta_firsatlar.append(coin_data)
+
+    def _firsat_karti(firsat, yon_renk_default=None):
+        f_sembol = firsat.get("sembol", firsat.get("symbol", "?"))
+        f_skor = firsat.get("guven_skoru", firsat.get("skor", firsat.get("score", 0)))
+        f_yon = firsat.get("sinyal", firsat.get("yon", firsat.get("signal", "—")))
+        f_kaldirac = firsat.get("kaldirac", firsat.get("leverage", "—"))
+        if f_yon in ["LONG", "AL", "GÜÇLÜ AL", "ZAYIF AL"]:
+            yon_renk = "#00ff88"
+            yon_ikon = "🟢"
+            yon_text = "LONG"
+        elif f_yon in ["SHORT", "SAT", "GÜÇLÜ SAT", "ZAYIF SAT"]:
+            yon_renk = "#ff4444"
+            yon_ikon = "🔴"
+            yon_text = "SHORT"
+        else:
+            yon_renk = yon_renk_default or "#888"
+            yon_ikon = "⚪"
+            yon_text = str(f_yon)
+        st.sidebar.markdown(f"""
+        <div style='background: rgba(31,40,51,0.7); border-radius: 8px; padding: 10px; margin-bottom: 6px; border-left: 3px solid {yon_renk};'>
+            <div style='display: flex; justify-content: space-between; align-items: center;'>
+                <span style='color: #66fcf1; font-weight: 700; font-size: 14px;'>{f_sembol}</span>
+                <span style='color: {yon_renk}; font-weight: 800; font-size: 13px;'>{yon_ikon} {yon_text}</span>
+            </div>
+            <div style='display: flex; justify-content: space-between; margin-top: 4px; font-size: 12px; color: #a4a5a6;'>
+                <span>Güven: <b style='color: #ffd200;'>%{f_skor}</b></span>
+                <span>Kaldıraç: <b>{f_kaldirac}x</b></span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    if guclü_firsatlar:
+        st.sidebar.markdown("<div style='font-size:12px; color:#ffd200; font-weight:700; margin-bottom:4px;'>🔥 Yüksek Güven (%80+)</div>", unsafe_allow_html=True)
+        for firsat in guclü_firsatlar[:5]:
+            _firsat_karti(firsat)
+
+    if orta_firsatlar:
+        st.sidebar.markdown("<div style='font-size:12px; color:#66fcf1; font-weight:700; margin-bottom:4px; margin-top:8px;'>⚡ Orta Güven (%60–79)</div>", unsafe_allow_html=True)
+        for firsat in orta_firsatlar[:5]:
+            _firsat_karti(firsat)
+
+    if not guclü_firsatlar and not orta_firsatlar:
+        st.sidebar.info("Henüz %60+ güvenli fırsat bulunamadı.")
+
     # Esnek Demo Test Süresi
     if not S.get("use_real_api", False):
         st.sidebar.markdown("---")
@@ -533,7 +594,7 @@ with st.sidebar:
             st.sidebar.success(f"🎉 **{int(hedef_saat)} Saatlik Demo Tamamlandı!**\n\n"
                                f"📊 **Toplam İşlem:** {len(kapanan_islemler)}\n"
                                f"🎯 **Başarı Oranı:** %{basari_orani:.1f}\n"
-                               f"💰 **Toplam Kâr:** ${state_bakiye - 100.0:.2f}")
+                               f"💰 **Toplam Kâr:** ${state_bakiye - cfg.INITIAL_BALANCE:.2f}")
 
 # ─────────────────────────────────────────────
 # GLOBAL HEADER / METRICS (Ortak)
@@ -753,6 +814,19 @@ with tab_dash:
                 </div>
             </div>
             """, unsafe_allow_html=True)
+
+            # V23: Manuel Kapatma Butonu
+            if st.button(f"❌ İşlemi Kapat", key=f"close_{tid}", use_container_width=False):
+                fiyat_haritasi_close = S.get("guncel_fiyatlar", {})
+                close_fiyat = fiyat_haritasi_close.get(s, guncel_fiyat)
+                if close_fiyat > 0:
+                    raw = worker.state.raw()
+                    with worker.state.lock:
+                        islem_kapat_with_retry(raw, tid, close_fiyat, "👤 Manuel Kapatma (UI)")
+                    worker.state.save_to_persistent()
+                    st.rerun()
+                else:
+                    st.warning(f"⚠️ {s} için güncel fiyat alınamadı. Lütfen tekrar deneyin.")
 
             poz_liste.append({
                 "Trade ID": tid,

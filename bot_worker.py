@@ -29,6 +29,159 @@ from data_provider import DataProvider
 
 
 # ─────────────────────────────────────────────
+# V23: Telegram Notification Engine (requests)
+# ─────────────────────────────────────────────
+import requests as _requests
+
+_TG_LAST_UPDATE_ID = 0  # Global polling offset
+
+
+def send_telegram_msg(text: str) -> bool:
+    """requests tabanlı Telegram mesaj gönderici. Hata botun çalışmasını etkilemez."""
+    token = getattr(cfg, "TELEGRAM_TOKEN", "")
+    chat_id = getattr(cfg, "TELEGRAM_CHAT_ID", "")
+    if not token or not chat_id:
+        return False
+    try:
+        resp = _requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+            timeout=6,
+        )
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+# Geriye uyumluluk: eski isim de çalışsın
+telegram_bildirim_gonder = send_telegram_msg
+
+
+def _tg_trade_acilis_mesaji(sembol: str, yon: str, kaldirac: int, giris: float,
+                             margin: float, trade_id: str) -> str:
+    """Pozisyon açılışı için detaylı Telegram mesajı oluşturur."""
+    pozisyon_usdt = margin * kaldirac
+    return (
+        f"<b>🟢 POZİSYON AÇILDI</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 <b>Coin:</b> {sembol}\n"
+        f"🎯 <b>Yön:</b> {yon}\n"
+        f"⚡ <b>Kaldıraç:</b> {kaldirac}x\n"
+        f"💰 <b>Giriş Fiyatı:</b> ${giris:.4f}\n"
+        f"🛡️ <b>Margin:</b> ${margin:.2f}\n"
+        f"📊 <b>Pozisyon:</b> ${pozisyon_usdt:.2f}\n"
+        f"🔑 <b>Trade ID:</b> #{trade_id}"
+    )
+
+
+def _tg_trade_kapanis_mesaji(sembol: str, yon: str, giris: float, cikis: float,
+                              pnl: float, margin: float, neden: str, trade_id: str) -> str:
+    """Pozisyon kapanışı için detaylı Telegram mesajı oluşturur."""
+    roe_pct = (pnl / margin * 100) if margin > 0 else 0
+    emoji = "✅" if pnl >= 0 else "❌"
+    return (
+        f"<b>{emoji} POZİSYON KAPATILDI</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 <b>Coin:</b> {sembol}\n"
+        f"🎯 <b>Yön:</b> {yon}\n"
+        f"💰 <b>Giriş:</b> ${giris:.4f} → <b>Çıkış:</b> ${cikis:.4f}\n"
+        f"{'📈' if pnl >= 0 else '📉'} <b>PNL:</b> {pnl:+.2f} USDT\n"
+        f"⚡ <b>ROE:</b> {roe_pct:+.1f}%\n"
+        f"📝 <b>Neden:</b> {neden[:80]}\n"
+        f"🔑 <b>Trade ID:</b> #{trade_id}"
+    )
+
+
+def _tg_firsat_mesaji(firsatlar: list) -> str:
+    """Yüksek güvenli fırsat listesi için Telegram mesajı oluşturur."""
+    satirlar = ["<b>🔥 YÜKSEK GÜVEN FIRSATLARI (%85+)</b>", "━━━━━━━━━━━━━━━━━━━━"]
+    for f in firsatlar[:8]:  # Max 8 fırsat
+        sembol = f.get("sembol", "?")
+        skor = f.get("guven_skoru", f.get("skor", 0))
+        sinyal = f.get("sinyal", f.get("yon", "?"))
+        kaldirac = f.get("kaldirac", "-")
+        yon_emoji = "🟢" if sinyal in ["LONG", "AL", "GÜÇLÜ AL"] else "🔴" if sinyal in ["SHORT", "SAT", "GÜÇLÜ SAT"] else "⚪"
+        satirlar.append(f"{yon_emoji} <b>{sembol}</b> | {sinyal} | %{skor:.0f} | {kaldirac}x")
+    return "\n".join(satirlar)
+
+
+# ─────────────────────────────────────────────
+# V23: Telegram Command Listener Thread
+# ─────────────────────────────────────────────
+def telegram_komut_dinleyici(state_ref, lock, dur_sinyali: threading.Event):
+    """Arka planda Telegram getUpdates endpoint'ini polling yapar.
+    /status komutu gelince güncel özet gönderir."""
+    global _TG_LAST_UPDATE_ID
+
+    def _get_updates():
+        token = getattr(cfg, "TELEGRAM_TOKEN", "")
+        if not token:
+            return []
+        try:
+            resp = _requests.get(
+                f"https://api.telegram.org/bot{token}/getUpdates",
+                params={"offset": _TG_LAST_UPDATE_ID + 1, "timeout": 10},
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                return resp.json().get("result", [])
+        except Exception:
+            pass
+        return []
+
+    def _status_ozeti() -> str:
+        with lock:
+            bakiye = state_ref.get("bakiye", 0)
+            aktif = state_ref.get("aktif_pozisyonlar", {})
+            durum = state_ref.get("bot_durumu", "?")
+            mod = state_ref.get("mod", "?")
+            guncel_fiyatlar = state_ref.get("guncel_fiyatlar", {})
+
+        satirlar = [
+            "<b>📊 PeroTrade — Durum Özeti</b>",
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"🤖 <b>Durum:</b> {durum}",
+            f"🎯 <b>Mod:</b> {mod}",
+            f"💵 <b>Boşta Bakiye:</b> ${bakiye:,.2f}",
+            f"📂 <b>Aktif Pozisyon:</b> {len(aktif)}",
+        ]
+        for tid, poz in list(aktif.items())[:5]:
+            s = poz.get("sembol", tid)
+            yon = poz.get("pozisyon", "?")
+            giris = poz.get("giris_fiyati", 0)
+            anlik = guncel_fiyatlar.get(s, giris)
+            margin = poz.get("islem_margin", 0)
+            kaldirac = poz.get("islem_kaldirac", 1)
+            pnl = pnl_hesapla(yon, giris, anlik, margin * kaldirac, kaldirac)
+            roe = (pnl / margin * 100) if margin > 0 else 0
+            satirlar.append(f"  └ {s} {yon} | GF: ${giris:.4f} | PNL: {pnl:+.2f}$ ({roe:+.1f}%)")
+        return "\n".join(satirlar)
+
+    while not dur_sinyali.is_set():
+        token = getattr(cfg, "TELEGRAM_TOKEN", "")
+        chat_id = getattr(cfg, "TELEGRAM_CHAT_ID", "")
+        if not token or not chat_id:
+            dur_sinyali.wait(30)  # Credentials yoksa 30s bekle
+            continue
+
+        updates = _get_updates()
+        for upd in updates:
+            _TG_LAST_UPDATE_ID = max(_TG_LAST_UPDATE_ID, upd.get("update_id", 0))
+            msg = upd.get("message", {})
+            text = msg.get("text", "").strip().lower()
+            from_chat = msg.get("chat", {}).get("id")
+
+            if text == "/status" and str(from_chat) == str(chat_id):
+                threading.Thread(
+                    target=send_telegram_msg,
+                    args=(_status_ozeti(),),
+                    daemon=True,
+                ).start()
+
+        dur_sinyali.wait(5)  # 5 saniyede bir polling
+
+
+# ─────────────────────────────────────────────
 # v11: Futures Sembol Dönüştürücü
 # ─────────────────────────────────────────────
 def futures_sembol_donustur(sembol: str) -> str:
@@ -356,6 +509,14 @@ def islem_kapat(state, trade_id, fiyat, neden, is_breakout=False, is_liq=False):
         "bakiye_usdt": round(state["bakiye"], 2), "kar_zarar": kz_str, "ai_notu": neden
     })
     log_ekle(f"{icon} POZİSYON KAPATILDI: {sembol} {eski_poz}. PNL: {kz_str}", state, is_breakout, is_liq)
+    # V23: Detaylı Telegram kapatış bildirimi
+    threading.Thread(
+        target=send_telegram_msg,
+        args=(_tg_trade_kapanis_mesaji(
+            sembol, eski_poz, poz_giris, fiyat, aktif_pnl, margin, neden, trade_id
+        ),),
+        daemon=True,
+    ).start()
 
     # v7.1: Opsiyonel Martingale Takibi
     if state.get("martingale_aktif", False):
@@ -1096,6 +1257,14 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 "bakiye_usdt": round(state["bakiye"] + margin, 2), "kar_zarar": "—", "ai_notu": karar_paketi.get("dusunce", "")
                             })
                             log_ekle(f"💰 {tavsiye_kaldirac}x {sinyal} POZİSYON AÇILDI: {secilen_sembol}. Giriş: {fiyat:.4f} | Dinamik SL: ${dsl_fiyat:.4f} (%{sl_mesafe_pct:.1f})", state, is_breakout)
+                            # V23: Detaylı Telegram açılış bildirimi
+                            threading.Thread(
+                                target=send_telegram_msg,
+                                args=(_tg_trade_acilis_mesaji(
+                                    secilen_sembol, sinyal, tavsiye_kaldirac, fiyat, margin, tid
+                                ),),
+                                daemon=True,
+                            ).start()
                         else:
                             log_ekle(f"🛡️ {secilen_sembol} Fırsatı Boş Geçildi: Global Risk Limiti Dolu.", state)
 
@@ -1104,36 +1273,54 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         if kapat_tid:
                             islem_kapat_with_retry(state, kapat_tid, fiyat, karar_paketi.get("dusunce", ""), exchange)
 
-                    if state.get("pik_bakiye", 0) >= state.get("hedef_bakiye", 100):
-                        # v10: Challenge modunda bu hedef kontrolünü TAMAMEN ATLA
-                        # Challenge kendi izole bakiyesiyle çalışır, demo/real bakiye ile karıştırılmamalı
-                        if state.get("mod") == "🚀 94-Day Challenge":
-                            pass  # Challenge modunda hedefe ulaşma kontrolü kendi TS mekanizmasında
-                        elif state.get("mod", "") == "💎 Ultra-Scalper":
-                            if not state.get("scalper_hedef_loglandi", False):
-                                log_ekle("💎 Günlük Hedef Aşıldı - İşlemlere Devam Ediliyor (Ultra-Scalper)", state)
-                                state["scalper_hedef_loglandi"] = True
-                        else:
-                            import data_logger
-                            baslangic_zaman_ts = state.get("baslangic_zamani", 0)
-                            if baslangic_zaman_ts > 0:
-                                gercek_pnl = data_logger.gercek_pnl_getir(baslangic_zaman_ts)
-                                hedef_farki = state.get("hedef_bakiye", 100) - state.get("gun_baslangic_bakiye", 0)
-                                if (hedef_farki > 0 and gercek_pnl >= hedef_farki * 0.95) or (gercek_pnl >= hedef_farki and hedef_farki > 0):
-                                    state["bot_durumu"] = "🎯 Hedefi Ulaştı!"
-                                    state["bot_calisiyor"] = False
-                                    log_ekle(f"🏆 HEDEF ULAŞILDI! (Gerçek PNL: ${gercek_pnl:.2f}) Bot durduruluyor.", state)
-                                    islem_gecmisi_kaydet(state.get("islem_gecmisi", []))
-                                    dur_sinyali.set()
-                                else:
-                                    state["pik_bakiye"] = max(state.get("bakiye", 0), state.get("hedef_bakiye", 100) - 2.0)
-                            else:
+            # V23: Yüksek güvenli fırsat bildirimi (her tarama döngüsü sonunda)
+            try:
+                with lock:
+                    taranan = state.get("taranan_coinler", [])
+                yuksek_guven = [
+                    c for c in taranan
+                    if isinstance(c, dict)
+                    and float(c.get("guven_skoru", c.get("skor", 0)) or 0) >= 85
+                ]
+                if yuksek_guven:
+                    threading.Thread(
+                        target=send_telegram_msg,
+                        args=(_tg_firsat_mesaji(yuksek_guven),),
+                        daemon=True,
+                    ).start()
+            except Exception:
+                pass
+
+            # Hedef bakiye kontrolü (for döngüsü bitti, while döngüsü içinde)
+            with lock:
+                if state.get("pik_bakiye", 0) >= state.get("hedef_bakiye", 100):
+                    if state.get("mod") == "🚀 94-Day Challenge":
+                        pass
+                    elif state.get("mod", "") == "💎 Ultra-Scalper":
+                        if not state.get("scalper_hedef_loglandi", False):
+                            log_ekle("💎 Günlük Hedef Aşıldı - İşlemlere Devam Ediliyor (Ultra-Scalper)", state)
+                            state["scalper_hedef_loglandi"] = True
+                    else:
+                        import data_logger
+                        baslangic_zaman_ts = state.get("baslangic_zamani", 0)
+                        if baslangic_zaman_ts > 0:
+                            gercek_pnl = data_logger.gercek_pnl_getir(baslangic_zaman_ts)
+                            hedef_farki = state.get("hedef_bakiye", 100) - state.get("gun_baslangic_bakiye", 0)
+                            if (hedef_farki > 0 and gercek_pnl >= hedef_farki * 0.95) or (gercek_pnl >= hedef_farki and hedef_farki > 0):
                                 state["bot_durumu"] = "🎯 Hedefi Ulaştı!"
                                 state["bot_calisiyor"] = False
-                                log_ekle("🏆 HEDEF ULAŞILDI! Bot durduruluyor.", state)
+                                log_ekle(f"🏆 HEDEF ULAŞILDI! (Gerçek PNL: ${gercek_pnl:.2f}) Bot durduruluyor.", state)
                                 islem_gecmisi_kaydet(state.get("islem_gecmisi", []))
                                 dur_sinyali.set()
-                    break
+                            else:
+                                state["pik_bakiye"] = max(state.get("bakiye", 0), state.get("hedef_bakiye", 100) - 2.0)
+                        else:
+                            state["bot_durumu"] = "🎯 Hedefi Ulaştı!"
+                            state["bot_calisiyor"] = False
+                            log_ekle("🏆 HEDEF ULAŞILDI! Bot durduruluyor.", state)
+                            islem_gecmisi_kaydet(state.get("islem_gecmisi", []))
+                            dur_sinyali.set()
+
 
             # Persistent State: Her 60 saniyede bir veya bakiye değiştiğinde (Atomic Save) kaydet
             guncel_bakiye = state.get("bakiye", 0.0)
@@ -1354,9 +1541,17 @@ class BotWorker:
 
         self._engine_thread = threading.Thread(target=bot_engine, args=(raw, lock, dur), daemon=True)
         self._engine_thread.start()
-        
+
         self._corr_thread = threading.Thread(target=korelasyon_rutini, args=(raw, lock, dur), daemon=True)
         self._corr_thread.start()
+
+        # V23: Telegram Command Listener
+        self._tg_listener_thread = threading.Thread(
+            target=telegram_komut_dinleyici,
+            args=(raw, lock, dur),
+            daemon=True,
+        )
+        self._tg_listener_thread.start()
 
     def stop(self):
         raw = self.state.raw()
