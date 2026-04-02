@@ -88,9 +88,9 @@ CHALLENGE_COMMISSION_RATE = 0.001         # %0.1 Binance standart komisyon (giri
 # ───── Evolutionary Trainer ─────
 EVO_REWARD_POINTS = 10          # Kârlı işlem ödülü
 EVO_PENALTY_POINTS = -15        # Zararlı işlem cezası
-EVO_WAIT_MULTIPLIER = 0.30      # Bekleme süresi çarpanı (%70 azalma)
+EVO_WAIT_MULTIPLIER = 0.60      # V28: Bekleme süresi çarpanı (Önceki agresifliği azaltmak için 0.60 yapıldı)
 EVO_LOSS_STOP_OVERRIDE = -50.0  # Gevşetilmiş zarar durdurma (sadece EVO mod)
-EVO_MIN_SCORE_THRESHOLD = 10    # Sinyal eşiği (düşük = daha fazla işlem)
+EVO_MIN_SCORE_THRESHOLD = 25    # V28: Sinyal eşiği (10'dan 25'e çıkarıldı, daha sakin)
 
 # ───── Telegram Entegrasyonu (V23) — .env'den okunur ─────
 import os as _os

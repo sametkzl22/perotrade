@@ -291,18 +291,22 @@ def likidite_kontrol(exchange, sembol: str, min_hacim_usdt: float = 500_000) -> 
         return sonuc
 
 
-def analiz_emir_akisi(exchange, sembol: str, derinlik: int = None, mesafe_pct: float = None) -> dict:
-    """V24: Emir defteri (Order Book) derinlik analizi. Alıcı/Satıcı dengesizliğini ölçer."""
+def analiz_emir_akisi(exchange, sembol: str, derinlik: int = None, mesafe_pct: float = None, pre_fetched_ob: dict = None) -> dict:
+    """V24: Emir defteri (Order Book) derinlik analizi. Alıcı/Satıcı dengesizliğini ölçer.
+       V28: pre_fetched_ob ile Hybrid WebSocket desteği eklendi."""
     if derinlik is None: derinlik = getattr(cfg, "ORDERBOOK_DEPTH", 100)
     if mesafe_pct is None: mesafe_pct = getattr(cfg, "ORDERFLOW_RANGE_PCT", 3.0)
     ratio = getattr(cfg, "ORDERFLOW_IMBALANCE_RATIO", 1.5)
     
     sonuc = {"durum": "DENGELİ", "alici_hacim": 0.0, "satici_hacim": 0.0, "oran": 1.0, "is_valid": False}
     try:
-        if exchange is None or not (hasattr(exchange, 'has') and exchange.has.get('fetchOrderBook')):
-            return sonuc
+        if pre_fetched_ob:
+            ob = pre_fetched_ob
+        else:
+            if exchange is None or not (hasattr(exchange, 'has') and exchange.has.get('fetchOrderBook')):
+                return sonuc
+            ob = exchange.fetch_order_book(sembol, limit=derinlik)
             
-        ob = exchange.fetch_order_book(sembol, limit=derinlik)
         bids = ob.get('bids', [])
         asks = ob.get('asks', [])
         
@@ -587,13 +591,15 @@ def top_coinleri_tara(exchange, limit=100) -> list:
             
         usdt_tickers = {}
         min_vol = getattr(cfg, "MIN_24H_VOLUME_USDT", 50_000_000)
+        # V27: Hacim filtresi ASLA esnetilmez — Trainer dahil tüm modlarda 50M$ minimum
+        min_vol = max(min_vol, 50_000_000)
         for k, v in tickers.items():
             if v is None or not isinstance(v, dict):
                 continue
             vol = v.get('quoteVolume', 0)
             if vol is None:
                 vol = 0
-            # V25: 24s hacmi minimum eşiğin altındaki coinleri asla listeleme
+            # V25+V27: 24s hacmi minimum eşiğin altındaki coinleri asla listeleme (mod bağımsız)
             if vol < min_vol:
                 continue
             # v11: Futures modda ':USDT' suffix'li sembolleri ara
@@ -818,7 +824,7 @@ def ai_metrikler(pazar: dict, kompozit_skor: float, zaman_baski_carpani: float =
         tavsiye_oran = 0.10
     else:
         tavsiye_kaldirac = random.randint(2, 10)
-        tavsiye_oran = 0.05
+        tavsiye_oran = 0.10  # V27: Minimum margin %10 (eski: %5)
         
     if zaman_baski_carpani > 1.0:
         tavsiye_kaldirac = int(tavsiye_kaldirac * zaman_baski_carpani)

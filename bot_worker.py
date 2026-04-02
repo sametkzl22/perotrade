@@ -942,20 +942,38 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         if guven_base >= of_min_conf:
                             with lock:
                                 log_ekle(f"📊 {secilen_sembol} Güven (%{guven_base:.1f}) > %{of_min_conf}. Emir defteri (Order Book) on-demand analiz ediliyor...", state)
-                            of_data = ai_engine.analiz_emir_akisi(exchange, secilen_sembol)
                             
-                            # v24: Binance Rate Limit used_weight update (On-Demand monitoring)
+                            # V28 HYBRID: WebSocket Orderbook stream for high confidence > 80%
+                            if guven_base > 80:
+                                state["ws_ob_sembol"] = secilen_sembol
+                                pre_ob = state.get("guncel_orderbooks", {}).get(secilen_sembol)
+                                if pre_ob:
+                                    of_data = ai_engine.analiz_emir_akisi(exchange, secilen_sembol, pre_fetched_ob=pre_ob)
+                                else:
+                                    of_data = ai_engine.analiz_emir_akisi(exchange, secilen_sembol)
+                            else:
+                                if state.get("ws_ob_sembol") == secilen_sembol:
+                                    state["ws_ob_sembol"] = None
+                                of_data = ai_engine.analiz_emir_akisi(exchange, secilen_sembol)
+                            
+                            # v24/V28: Binance Rate Limit used_weight update (Weight-Aware Throttling)
                             try:
                                 headers = exchange.last_response_headers
                                 if headers and hasattr(headers, "get") and headers.get('x-mbx-used-weight-1m'):
                                     used_w = int(headers.get('x-mbx-used-weight-1m'))
                                     with lock:
                                         state["used_weight_1m"] = used_w
-                                        if used_w > 2000:
+                                        if used_w > 4500:
+                                            state["limit_uyari_kritik"] = True
+                                            log_ekle(f"⚠️ API Yükü Kritik (used_weight): {used_w}/6000. Sistem soğumaya alınıyor.", state)
+                                            threading.Thread(target=send_telegram_msg, args=("⚠️ API Yükü Kritik: Sistem soğumaya alınıyor.",), daemon=True).start()
+                                        elif used_w > 2000:
                                             state["limit_uyari"] = True
+                                            state["limit_uyari_kritik"] = False
                                             log_ekle(f"⚠️ API Yük Uyarısı (used_weight): {used_w}/6000. Soğuma (Cooling) süresi dinamik olarak artırılacak.", state)
                                         else:
                                             state["limit_uyari"] = False
+                                            state["limit_uyari_kritik"] = False
                             except Exception:
                                 pass
                                 
@@ -1286,14 +1304,14 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 margin = min(margin, mevcut_bakiye * 0.5)
                             buyukluk_usdt = margin * tavsiye_kaldirac
                             
-                            # V26: Dinamik Pozisyon Boyutu — güven skoruna göre limit değişir
+                            # V26/V28: Dinamik Pozisyon Boyutu — güven skoruna göre limit değişir
                             _guven = karar_paketi.get("guven_skoru", 0)
                             if _guven >= 95:
                                 max_poz_pct = 0.30   # %30 — çok emin
                             elif _guven >= 85:
-                                max_poz_pct = 0.15   # %15 — güçlü sinyal
+                                max_poz_pct = 0.20   # V28: %20 — güçlü sinyal (eski: 15)
                             else:
-                                max_poz_pct = 0.05   # %5 — temkinli
+                                max_poz_pct = 0.15   # V28: %15 — minimum margin sınırı (eski: %10)
                             
                             toplam_equity_v26 = state["bakiye"] + aktif_margin_toplami(state.get("aktif_pozisyonlar", {}))
                             max_buyukluk = toplam_equity_v26 * max_poz_pct
@@ -1442,9 +1460,14 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
             _dongü_sayaci += 1
             cooling_sn = getattr(cfg, "COOLING_SLEEP_SECONDS", 10)
             
-            # v24: Dinamik Soğuma (Order Flow limit uyarısı)
-            if state.get("limit_uyari"):
-                cooling_sn = max(cooling_sn * 2, 20)  # Rate limit tehlikeliyse 2x veya en az 20sn bekle
+            # v24/V28: Dinamik Soğuma (Order Flow limit uyarısı / Weight-Aware Throttling)
+            if state.get("limit_uyari_kritik"):
+                cooling_sn = max(cooling_sn * 2, 30)  # V28: Kritik sınırda süreyi 2 katına çıkar (min 30s)
+                with lock:
+                    state["limit_uyari_kritik"] = False
+                    state["limit_uyari"] = False
+            elif state.get("limit_uyari"):
+                cooling_sn = max(cooling_sn * 1.5, 15)  # Normal uyarıda 1.5x
                 with lock:
                     state["limit_uyari"] = False  # Sonraki tur için sıfırla
             gc_interval = getattr(cfg, "GC_COLLECT_INTERVAL", 100)

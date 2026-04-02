@@ -56,6 +56,10 @@ class DataProvider:
                 self.bal_thread = threading.Thread(target=self._bal_runner, daemon=True)
                 self.bal_thread.start()
 
+            if getattr(self, "ob_thread", None) is None or not self.ob_thread.is_alive():
+                self.ob_thread = threading.Thread(target=self._ob_runner, daemon=True)
+                self.ob_thread.start()
+
     def get_latest_prices(self) -> dict:
         """UI can fetch current prices directly."""
         with self.state_lock:
@@ -312,6 +316,69 @@ class DataProvider:
         asyncio.set_event_loop(loop)
         loop.run_until_complete(dinle())
 
+    def _ob_runner(self):
+        """V28: Background Async loop to stream OrderBook via ccxt.pro WebSocket."""
+        async def dinle_ob():
+            exchange = None
+            consecutive_failures = 0
+            while not self.dur_sinyali.is_set():
+                try:
+                    if exchange is None:
+                        exchange = self._exchange_olustur(pro=True)
+                except Exception:
+                    await asyncio.sleep(5)
+                    continue
+
+                inner_failed = False
+                while not self.dur_sinyali.is_set():
+                    try:
+                        tracked_sym = None
+                        with self.bot_lock:
+                            if self.bot_state:
+                                tracked_sym = self.bot_state.get("ws_ob_sembol")
+                        
+                        if not tracked_sym:
+                            await asyncio.sleep(1.0)
+                            continue
+
+                        # Watch the stream
+                        ob = await asyncio.wait_for(exchange.watch_order_book(tracked_sym, limit=100), timeout=5.0)
+                        
+                        with self.bot_lock:
+                            if self.bot_state:
+                                g_ob = self.bot_state.get("guncel_orderbooks", {})
+                                g_ob[tracked_sym] = ob
+                                self.bot_state["guncel_orderbooks"] = g_ob
+                        
+                        consecutive_failures = 0
+                    except asyncio.TimeoutError:
+                        pass
+                    except Exception as e:
+                        inner_failed = True
+                        break
+
+                if inner_failed:
+                    consecutive_failures += 1
+                    try:
+                        await exchange.close()
+                    except:
+                        pass
+                    exchange = None
+                    if consecutive_failures >= 3:
+                        await asyncio.sleep(60)
+                        consecutive_failures = 0
+                    else:
+                        await asyncio.sleep(2)
+
+            if exchange is not None:
+                try:
+                    await exchange.close()
+                except:
+                    pass
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(dinle_ob())
 
     def _bal_runner(self):
         """Thread that updates REST API balances occasionally."""
