@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────
-# PeroTrade Pro — Konfigürasyon v25
+# PeroTrade Pro — Konfigürasyon v29
 # 7/24 Bileşik Faiz Sistemi + Binance Futures
 # ─────────────────────────────────────────────
 
@@ -49,6 +49,14 @@ ORDERFLOW_CONFLICT_PENALTY = 0.40 # Çelişki durumunda güven %40 düşer
 ORDERFLOW_CONFIRM_BONUS = 20     # Doğrulama (Onay) durumunda güvene +20 puan eklenir
 ORDERFLOW_MIN_CONFIDENCE = 75    # Sadece AI güven skoru > %75 olan coinlerde order book API'si çeker
 ORDERFLOW_LIQUIDITY_VETO_MULT = 5  # V25: İşlem büyüklüğünün 5 katından az emir defteri derinliğinde işleme girme
+
+# ───── V29: Market Impact Simulator (Slippage Guard) ─────
+SLIPPAGE_GUARD_ENABLED = True
+SLIPPAGE_MAX_IMPACT_PCT = 10.0     # İlk 5 kademe likiditesini max %10 kaydırma toleransı
+SLIPPAGE_OB_DEPTH = 5              # Kontrol edilecek kademe sayısı
+
+# ───── V29: Confidence-Based Sizing (Free Will) ─────
+CONFIDENCE_BASED_SIZING = True     # True = güvene dayalı dinamik margin, False = eski TRADE_RISK_PCT
 
 # ───── Likidite Filtresi (V25) ─────
 MIN_24H_VOLUME_USDT = 50_000_000  # 24s hacim < 50M USDT olan coinler asla taranmaz

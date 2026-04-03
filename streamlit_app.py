@@ -363,9 +363,16 @@ with st.sidebar:
         worker.state.save_to_persistent()
         
     # V19: Gelişmiş Risk Yönetimi Slider'ları
-    st.sidebar.markdown("### 🛡️ Risk Yönetimi (V19)")
+    st.sidebar.markdown("### 🛡️ Risk Yönetimi (V29)")
     max_wallet_risk_pct = st.sidebar.slider("Max Cüzdan Riski (%)", min_value=1.0, max_value=100.0, value=float(S.get("max_wallet_risk_pct", getattr(cfg, "MAX_WALLET_RISK_PCT", 100.0))), help="Toplam varlığın en fazla yüzde kaçı margin olarak risk edilebilir?")
-    trade_risk_pct = st.sidebar.slider("İşlem Başına Risk (%)", min_value=1.0, max_value=50.0, value=float(S.get("trade_risk_pct", getattr(cfg, "TRADE_RISK_PCT", 10.0))), help="Her işleme toplam cüzdanın en fazla yüzde kaçı margin olarak ayrılabilir?")
+    
+    # V29: Free Will aktifken slider disabled gösterilir
+    if getattr(cfg, "CONFIDENCE_BASED_SIZING", False):
+        st.sidebar.slider("İşlem Başına Risk (%)", min_value=1.0, max_value=50.0, value=float(S.get("trade_risk_pct", getattr(cfg, "TRADE_RISK_PCT", 10.0))), disabled=True, help="⚠️ V29 Özgür İrade Aktif: Bot güvene göre otomatik ayar yapıyor")
+        st.sidebar.info("🧠 V29 Özgür İrade Aktif: Bot, AI güven skoruna göre margin'i otomatik ayarlıyor. (%98+ → %50, %90-97 → %25, <%90 → %15)")
+        trade_risk_pct = S.get("trade_risk_pct", getattr(cfg, "TRADE_RISK_PCT", 10.0))
+    else:
+        trade_risk_pct = st.sidebar.slider("İşlem Başına Risk (%)", min_value=1.0, max_value=50.0, value=float(S.get("trade_risk_pct", getattr(cfg, "TRADE_RISK_PCT", 10.0))), help="Her işleme toplam cüzdanın en fazla yüzde kaçı margin olarak ayrılabilir?")
     
     if max_wallet_risk_pct != S.get("max_wallet_risk_pct") or trade_risk_pct != S.get("trade_risk_pct"):
         worker.state.set("max_wallet_risk_pct", max_wallet_risk_pct)
@@ -737,7 +744,7 @@ if S.get("cuzdan_gecmisi"):
 # ─────────────────────────────────────────────
 # Dashboard Tabs
 # ─────────────────────────────────────────────
-tab_dash, tab_tv, tab_gecmis = st.tabs(["📊 Dashboard", "📈 Grafikler (TradingView)", "📚 Geçmiş Performans"])
+tab_dash, tab_tv, tab_gecmis, tab_canli = st.tabs(["📊 Dashboard", "📈 Grafikler (TradingView)", "📚 Geçmiş Performans", "⚡ Canlı İşlem Akışı"])
 
 with tab_dash:
     st.markdown("### 💼 Cüzdan Özeti")
@@ -990,3 +997,60 @@ if worker.is_running:
     # 2 saniyede bir arayüz yenilenir (CPU ve flicker düşürüldü)
     time.sleep(2.0)
     st.rerun()
+
+# ─────────────────────────────────────────────
+# V29: ⚡ Canlı İşlem Akışı Tab'ı
+# ─────────────────────────────────────────────
+with tab_canli:
+    st.markdown("### ⚡ Canlı İşlem Akışı (Real-Time Trades)")
+    st.markdown("""<div style='background: linear-gradient(135deg, #0b0c10 0%, #1f2833 100%); 
+        border-radius: 12px; padding: 12px; margin-bottom: 16px; border-left: 4px solid #66fcf1;'>
+        <span style='color: #66fcf1; font-size: 14px;'>📡 ccxt.pro WebSocket ile aktif pozisyonlarınızın anlık alım/satım akışını izleyin.</span>
+    </div>""", unsafe_allow_html=True)
+
+    canli_data = S.get("canli_islemler", {})
+    aktif_poz_semboller = list(set(
+        p.get("sembol", tid)
+        for tid, p in S.get("aktif_pozisyonlar", {}).items()
+        if isinstance(p, dict)
+    ))
+
+    if not aktif_poz_semboller:
+        st.info("💤 Aktif pozisyon yok. Pozisyon açıldığında canlı işlem akışı burada görünecek.")
+    else:
+        for sembol_canli in aktif_poz_semboller:
+            st.markdown(f"#### 💹 {sembol_canli}")
+            trades_list = canli_data.get(sembol_canli, [])
+            if trades_list:
+                df_trades = pd.DataFrame(trades_list)
+                # Renk kodlaması için stil
+                def renk_isle(row):
+                    renk = 'color: #00ff88' if 'Buy' in str(row.get('yon', '')) else 'color: #ff4444'
+                    return [renk] * len(row)
+
+                st.dataframe(
+                    df_trades.rename(columns={
+                        "zaman": "Zaman", "fiyat": "Fiyat ($)",
+                        "miktar": "Miktar", "yon": "Yön",
+                        "buyukluk_usdt": "Büyüklük (USDT)"
+                    }),
+                    use_container_width=True, hide_index=True, height=350
+                )
+
+                # Basit istatistik
+                toplam_buy = sum(1 for t in trades_list if 'Buy' in str(t.get('yon', '')))
+                toplam_sell = len(trades_list) - toplam_buy
+                buy_pct = (toplam_buy / len(trades_list) * 100) if trades_list else 0
+                buy_vol = sum(t.get('buyukluk_usdt', 0) for t in trades_list if 'Buy' in str(t.get('yon', '')))
+                sell_vol = sum(t.get('buyukluk_usdt', 0) for t in trades_list if 'Sell' in str(t.get('yon', '')))
+
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Alıcı", f"{toplam_buy} (​%{buy_pct:.0f})")
+                c2.metric("Satıcı", f"{toplam_sell} (%{100-buy_pct:.0f})")
+                c3.metric("Alıcı Hacim", f"${buy_vol:,.0f}")
+                c4.metric("Satıcı Hacim", f"${sell_vol:,.0f}")
+            else:
+                st.warning(f"📡 {sembol_canli} için trade verisi bekleniyor...")
+
+    st.markdown("---")
+    st.caption("🔄 Veriler ccxt.pro WebSocket üzerinden canlı olarak güncellenir. Sadece aktif pozisyonlu semboller izlenir.")

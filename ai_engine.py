@@ -1,11 +1,12 @@
 """
-AI Karar Motoru (AI Decision Engine) v11
+AI Karar Motoru (AI Decision Engine) v29
 ========================================
 Breakout Tarayıcı, Hacim Anormallikleri, Trend/Web Simülasyonu,
 Twitter (X) Duyarlılık Analizi, Güven Skoru & Beklenen Artış,
 Vadeli İşlemler (Long/Short) stratejisi, ATR Volatilite Scanner,
-Likidite Filtresi, USDT Dominance Kontrolü, Local ML Inference
-ve SQLite Loglama. v11: Binance Futures Perpetual desteği.
+Likidite Filtresi, USDT Dominance Kontrolü, Local ML Inference,
+EnsembleKararMotoru (V29) ve SQLite Loglama.
+v29: Ensemble AND Karar Motoru, Confidence-Based Sizing desteği.
 """
 
 import math
@@ -799,6 +800,209 @@ def kompozit_skor_hesapla(pazar: dict, sma_sinyal: str) -> float:
         
     return max(-100.0, min(100.0, skor))
 
+
+# ─────────────────────────────────────────────
+# 5b) V29: Ensemble Karar Motoru (AND Operatörü)
+# ─────────────────────────────────────────────
+class EnsembleKararMotoru:
+    """V29: 3 stratejiyi AND operatörüyle birleştiren ensemble karar motoru.
+    Hem açılış hem kapanış kararlarında kullanılır.
+    
+    Stratejiler:
+    1. Volume-Supported Breakout: Son 14 mumun direncini %2+ hacimle kıran mumlar
+    2. Mean Reversion Filter: RSI >70/<30 + Bollinger dışına taşma → REVERSE
+    3. Trend Confirmation: MA7/MA25 Golden Cross/Death Cross (Veto)
+    """
+
+    def __init__(self, df: pd.DataFrame, sembol: str = ""):
+        self.df = df
+        self.sembol = sembol
+        self._valid = df is not None and not df.empty and len(df) >= 14
+
+    def volume_supported_breakout(self) -> dict:
+        """Son 14 mumun direncini %2+ hacim artışıyla kıran mumları tespit et."""
+        sonuc = {"breakout": False, "direnc": 0.0, "hacim_oran": 0.0, "yon": "BEKLE"}
+        if not self._valid:
+            return sonuc
+        try:
+            son_14 = self.df.iloc[-14:]
+            direnc = float(son_14['high'].max())
+            son_mum = self.df.iloc[-1]
+            son_close = float(son_mum['close'])
+            son_hacim = float(son_mum['volume'])
+            ort_hacim = float(son_14['volume'].iloc[:-1].mean())
+
+            if ort_hacim <= 0:
+                return sonuc
+
+            hacim_oran = son_hacim / ort_hacim
+            sonuc["direnc"] = round(direnc, 6)
+            sonuc["hacim_oran"] = round(hacim_oran, 2)
+
+            # Direnç kırılımı: close > direnc VE hacim artışı >= %2 (yani 1.02x)
+            if son_close > direnc and hacim_oran >= 1.02:
+                sonuc["breakout"] = True
+                sonuc["yon"] = "LONG"
+
+            # Destek kırılımı (aşağı breakout)
+            destek = float(son_14['low'].min())
+            if son_close < destek and hacim_oran >= 1.02:
+                sonuc["breakout"] = True
+                sonuc["yon"] = "SHORT"
+                sonuc["direnc"] = round(destek, 6)  # Kırılan seviye
+
+            return sonuc
+        except Exception:
+            return sonuc
+
+    def mean_reversion_filter(self) -> dict:
+        """RSI >70 veya <30 bölgelerinde Bollinger Bantları dışına taşma → REVERSE sinyali."""
+        sonuc = {"reverse": False, "yon": "BEKLE", "rsi": 50.0, "bollinger_pozisyon": "ICINDE"}
+        if not self._valid:
+            return sonuc
+        try:
+            rsi = rsi_hesapla(self.df)
+            boll = bollinger_hesapla(self.df)
+            son_close = float(self.df['close'].iloc[-1])
+
+            sonuc["rsi"] = round(rsi, 1)
+
+            if boll["ust"] == 0 and boll["alt"] == 0:
+                return sonuc
+
+            # RSI aşırı alım + üst Bollinger band dışı → SHORT sinyali (Mean Reversion)
+            if rsi > 70 and son_close > boll["ust"]:
+                sonuc["reverse"] = True
+                sonuc["yon"] = "SHORT"
+                sonuc["bollinger_pozisyon"] = "UST_DISI"
+
+            # RSI aşırı satım + alt Bollinger band dışı → LONG sinyali (Mean Reversion)
+            elif rsi < 30 and son_close < boll["alt"]:
+                sonuc["reverse"] = True
+                sonuc["yon"] = "LONG"
+                sonuc["bollinger_pozisyon"] = "ALT_DISI"
+
+            return sonuc
+        except Exception:
+            return sonuc
+
+    def trend_confirmation(self) -> dict:
+        """MA7/MA25 Golden Cross kesişimi sinyal doğrulayıcı (Veto).
+        MA7 > MA25 ise uptrend onayı, MA7 < MA25 ise downtrend onayı.
+        Sinyal yönüyle çelişirse VETO eder."""
+        sonuc = {"onay": False, "trend": "YATAY", "veto": False, "ma7": 0.0, "ma25": 0.0}
+        if not self._valid or len(self.df) < 25:
+            return sonuc
+        try:
+            close = _to_np(self.df['close'])
+            ma7 = sma_hesapla(close, 7)
+            ma25 = sma_hesapla(close, 25)
+
+            if np.isnan(ma7[-1]) or np.isnan(ma25[-1]):
+                return sonuc
+
+            sonuc["ma7"] = round(float(ma7[-1]), 6)
+            sonuc["ma25"] = round(float(ma25[-1]), 6)
+
+            if ma7[-1] > ma25[-1]:
+                sonuc["trend"] = "YUKARI"
+                # Golden Cross kontrolü: önceki mumda MA7 <= MA25 idi mi?
+                if len(ma7) >= 2 and len(ma25) >= 2:
+                    if not np.isnan(ma7[-2]) and not np.isnan(ma25[-2]):
+                        if ma7[-2] <= ma25[-2]:
+                            sonuc["onay"] = True  # Fresh Golden Cross!
+                        else:
+                            sonuc["onay"] = True  # Mevcut uptrend devam
+            elif ma7[-1] < ma25[-1]:
+                sonuc["trend"] = "ASAGI"
+                # Death Cross kontrolü
+                if len(ma7) >= 2 and len(ma25) >= 2:
+                    if not np.isnan(ma7[-2]) and not np.isnan(ma25[-2]):
+                        if ma7[-2] >= ma25[-2]:
+                            sonuc["onay"] = True  # Fresh Death Cross!
+                        else:
+                            sonuc["onay"] = True  # Mevcut downtrend devam
+
+            return sonuc
+        except Exception:
+            return sonuc
+
+    def ensemble_karar(self, onerilen_yon: str = "") -> dict:
+        """3 stratejiyi AND ile birleştir.
+        
+        Args:
+            onerilen_yon: AI'nin önerdiği yön ("LONG", "SHORT", "KAPAT", "BEKLE")
+        
+        Returns:
+            dict: {onay: bool, yon: str, guven_carpani: float, rapor: str, detay: dict}
+        """
+        vb = self.volume_supported_breakout()
+        mr = self.mean_reversion_filter()
+        tc = self.trend_confirmation()
+
+        detay = {"volume_breakout": vb, "mean_reversion": mr, "trend_confirmation": tc}
+        rapor_satirlari = []
+        onay_sayisi = 0
+        toplam_strateji = 3
+
+        # ── Strateji 1: Volume-Supported Breakout ──
+        if vb["breakout"]:
+            onay_sayisi += 1
+            rapor_satirlari.append(f"✅ VOL_BREAKOUT: {vb['yon']} (Hacim x{vb['hacim_oran']:.2f})")
+        else:
+            rapor_satirlari.append(f"❌ VOL_BREAKOUT: Kırılım yok (Hacim x{vb['hacim_oran']:.2f})")
+
+        # ── Strateji 2: Mean Reversion Filter ──
+        if mr["reverse"]:
+            onay_sayisi += 1
+            rapor_satirlari.append(f"✅ MEAN_REV: {mr['yon']} (RSI: {mr['rsi']:.1f}, Boll: {mr['bollinger_pozisyon']})")
+        else:
+            rapor_satirlari.append(f"❌ MEAN_REV: Sinyal yok (RSI: {mr['rsi']:.1f})")
+
+        # ── Strateji 3: Trend Confirmation (Veto) ──
+        veto = False
+        if tc["onay"]:
+            # Trend yönüyle sinyal yönü çelişiyor mu?
+            if onerilen_yon == "LONG" and tc["trend"] == "ASAGI":
+                veto = True
+                rapor_satirlari.append(f"🚫 TREND_VETO: LONG önerildi ama MA7/MA25 DÜŞÜŞ trendinde → VETO!")
+            elif onerilen_yon == "SHORT" and tc["trend"] == "YUKARI":
+                veto = True
+                rapor_satirlari.append(f"🚫 TREND_VETO: SHORT önerildi ama MA7/MA25 YÜKSELİŞ trendinde → VETO!")
+            else:
+                onay_sayisi += 1
+                rapor_satirlari.append(f"✅ TREND_ONAY: MA7/MA25 {tc['trend']} → {onerilen_yon} ile uyumlu")
+        else:
+            rapor_satirlari.append(f"⚪ TREND: YATAY (MA7: {tc['ma7']:.4f}, MA25: {tc['ma25']:.4f})")
+
+        # ── AND Birleştirme ──
+        tam_onay = (onay_sayisi == toplam_strateji) and not veto
+        guven_carpani = 1.0
+
+        if tam_onay:
+            guven_carpani = 1.3  # Tam uyum bonusu: %30 güven artışı
+        elif veto:
+            guven_carpani = 0.5  # Veto uygulandı: %50 güven düşüşü
+        elif onay_sayisi >= 2:
+            guven_carpani = 1.0  # 2/3 onay: standart güven
+        elif onay_sayisi == 1:
+            guven_carpani = 0.7  # 1/3 onay: %30 güven düşüşü
+        else:
+            guven_carpani = 0.5  # 0/3 onay: %50 düşüş
+
+        rapor = f"🔬 ENSEMBLE [{onay_sayisi}/{toplam_strateji}]: " + " | ".join(rapor_satirlari)
+
+        return {
+            "onay": tam_onay,
+            "yon": onerilen_yon if not veto else "BEKLE",
+            "guven_carpani": guven_carpani,
+            "rapor": rapor,
+            "veto": veto,
+            "onay_sayisi": onay_sayisi,
+            "detay": detay
+        }
+
+
 def ai_metrikler(pazar: dict, kompozit_skor: float, zaman_baski_carpani: float = 1.0) -> tuple:
     if not isinstance(pazar, dict):
         return 0.0, 0.0, 10, 0.10
@@ -838,7 +1042,7 @@ def ai_metrikler(pazar: dict, kompozit_skor: float, zaman_baski_carpani: float =
     
     return guven, beklenen, tavsiye_kaldirac, tavsiye_oran
 
-def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon: str, btc_trendi: str, fonlama: dict, zaman_baski_carpani: float = 1.0, mod: str = "", order_flow: dict = None) -> dict:
+def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon: str, btc_trendi: str, fonlama: dict, zaman_baski_carpani: float = 1.0, mod: str = "", order_flow: dict = None, ensemble_df: pd.DataFrame = None) -> dict:
     if not isinstance(pazar, dict):
         return {"sembol": sembol, "karar": "BEKLE", "skor": 0, "dusunce": "Pazar verisi yok", "aralik_sn": 30, "guven_skoru": 0, "expected_growth": 0, "tavsiye_kaldirac": 10, "tavsiye_oran": 0.10, "ozet": "Veri yok"}
     if not isinstance(fonlama, dict):
@@ -943,6 +1147,22 @@ def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon:
             guven = min(100.0, guven + of_bonus)
             neden = f"✅ [OrderFlow Onayı] SATICI_BASKIN ({oran_str}). " + neden
 
+    # V29: EnsembleKararMotoru — açılış + kapanış kararlarında AND filtresi
+    ensemble_rapor = ""
+    if ensemble_df is not None and karar in ["LONG", "SHORT", "KAPAT"]:
+        try:
+            ens = EnsembleKararMotoru(ensemble_df, sembol)
+            ens_sonuc = ens.ensemble_karar(karar)
+            guven = min(100.0, guven * ens_sonuc["guven_carpani"])
+            ensemble_rapor = ens_sonuc["rapor"]
+            if ens_sonuc["veto"] and karar in ["LONG", "SHORT"]:
+                karar = "BEKLE"
+                neden = f"{ens_sonuc['rapor']}. " + neden
+            elif ens_sonuc["onay"]:
+                neden = f"🔬 [ENSEMBLE TAM ONAY] " + neden
+        except Exception:
+            pass
+
     vol = pazar.get("volatilite", 0) or 0
     sonraki_sn = dinamik_analiz_araligi(vol, pazar.get("is_breakout", False))
     
@@ -956,7 +1176,8 @@ def mock_ai_karar(sembol: str, pazar: dict, kompozit_skor: float, acik_pozisyon:
         "expected_growth": beklenen_artis,
         "tavsiye_kaldirac": kaldirac,
         "tavsiye_oran": oran,
-        "ozet": f"BTC: {btc_trendi} | Fonlama: {fonlama.get('oran', 0):.3f}% | Time-Pr: {zaman_baski_carpani:.2f}"
+        "ozet": f"BTC: {btc_trendi} | Fonlama: {fonlama.get('oran', 0):.3f}% | Time-Pr: {zaman_baski_carpani:.2f}",
+        "ensemble_rapor": ensemble_rapor
     }
 
 def llm_karar(sembol: str, pazar: dict, sma_sinyal: str, api_key: str, acik_pozisyon: str, btc_trendi: str, fonlama: dict, zaman_baski_carpani: float = 1.0) -> dict:
@@ -1349,7 +1570,8 @@ def _build_feature_vector(pazar: dict, sma_sinyal: str, btc_trendi: str, fonlama
 
 def local_ml_karar(sembol: str, pazar: dict, sma_sinyal: str, acik_pozisyon: str,
                    btc_trendi: str, fonlama: dict, zaman_baski_carpani: float = 1.0,
-                   mod: str = "", mtf_guc: int = 0, order_flow: dict = None) -> dict:
+                   mod: str = "", mtf_guc: int = 0, order_flow: dict = None,
+                   ensemble_df: pd.DataFrame = None) -> dict:
     """
     Yerel ML model (XGBoost) ile anında karar verir.
     Model yoksa mock_ai_karar'a fallback yapar.
@@ -1427,6 +1649,22 @@ def local_ml_karar(sembol: str, pazar: dict, sma_sinyal: str, acik_pozisyon: str
                 ml_guven = min(100.0, ml_guven + of_bonus)
                 neden = f"✅ [ML OrderFlow Onayı] SATICI_BASKIN ({oran_str}). " + neden
 
+        # V29: EnsembleKararMotoru entegrasyonu
+        ensemble_rapor = ""
+        if ensemble_df is not None and karar in ["LONG", "SHORT", "KAPAT"]:
+            try:
+                ens = EnsembleKararMotoru(ensemble_df, sembol)
+                ens_sonuc = ens.ensemble_karar(karar)
+                ml_guven = min(100.0, ml_guven * ens_sonuc["guven_carpani"])
+                ensemble_rapor = ens_sonuc["rapor"]
+                if ens_sonuc["veto"] and karar in ["LONG", "SHORT"]:
+                    karar = "BEKLE"
+                    neden = f"{ens_sonuc['rapor']}. " + neden
+                elif ens_sonuc["onay"]:
+                    neden = f"🔬 [ENSEMBLE TAM ONAY] " + neden
+            except Exception:
+                pass
+
         return {
             "sembol": sembol,
             "karar": karar,
@@ -1437,11 +1675,12 @@ def local_ml_karar(sembol: str, pazar: dict, sma_sinyal: str, acik_pozisyon: str
             "expected_growth": beklenen_artis,
             "tavsiye_kaldirac": kaldirac,
             "tavsiye_oran": oran,
-            "ozet": f"ML | BTC: {btc_trendi} | Fonlama: {fonlama.get('risk', 'Yok')} | Güven: {ml_guven:.0f}%"
+            "ozet": f"ML | BTC: {btc_trendi} | Fonlama: {fonlama.get('risk', 'Yok')} | Güven: {ml_guven:.0f}%",
+            "ensemble_rapor": ensemble_rapor
         }
     except (ccxt.BaseError, sqlite3.Error, Exception) as e:
         print(f"⚠️ ML inference hatası: {e}. Mock AI'ye dönülüyor.")
-        mock_result = mock_ai_karar(sembol, pazar, komp_skor, acik_pozisyon, btc_trendi, fonlama, zaman_baski_carpani, mod=mod)
+        mock_result = mock_ai_karar(sembol, pazar, komp_skor, acik_pozisyon, btc_trendi, fonlama, zaman_baski_carpani, mod=mod, ensemble_df=ensemble_df)
         mock_result["is_mock"] = True
         mock_result["dusunce"] = "⚠️ [MOCK AI Fallback] " + mock_result.get("dusunce", "")
         return mock_result

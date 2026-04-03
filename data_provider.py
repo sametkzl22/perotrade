@@ -1,7 +1,8 @@
 """
-Data Provider — WebSocket and REST API Background Fetcher
-==========================================================
-Isolated background tasks for fetching live prices and balances.
+Data Provider — WebSocket and REST API Background Fetcher v29
+==============================================================
+Isolated background tasks for fetching live prices, balances,
+and live trade streams (V29: watch_trades).
 Uses threading to decouple fetching from Streamlit UI entirely.
 """
 
@@ -59,6 +60,11 @@ class DataProvider:
             if getattr(self, "ob_thread", None) is None or not self.ob_thread.is_alive():
                 self.ob_thread = threading.Thread(target=self._ob_runner, daemon=True)
                 self.ob_thread.start()
+
+            # V29: Live trades stream
+            if getattr(self, "trades_thread", None) is None or not self.trades_thread.is_alive():
+                self.trades_thread = threading.Thread(target=self._trades_runner, daemon=True)
+                self.trades_thread.start()
 
     def get_latest_prices(self) -> dict:
         """UI can fetch current prices directly."""
@@ -412,3 +418,88 @@ class DataProvider:
                 except (ccxt.BaseError, sqlite3.Error, Exception):
                     pass
             time.sleep(10)
+
+    def _trades_runner(self):
+        """V29: ccxtpro watch_trades ile aktif pozisyonlu sembollerin
+        anlık trade verilerini (Fiyat, Miktar, Yön) stream eder.
+        Sadece aktif pozisyon varken çalışır."""
+
+        async def dinle_trades():
+            exchange = None
+            consecutive_failures = 0
+            max_failures = 3
+
+            while not self.dur_sinyali.is_set():
+                try:
+                    # Aktif pozisyonlu sembolleri belirle
+                    with self.bot_lock:
+                        aktif_poz = self.bot_state.get("aktif_pozisyonlar", {})
+                        semboller = list(set(
+                            p.get("sembol", tid)
+                            for tid, p in aktif_poz.items()
+                            if isinstance(p, dict)
+                        ))
+
+                    if not semboller:
+                        # Pozisyon yoksa bekle
+                        await asyncio.sleep(2)
+                        continue
+
+                    if exchange is None:
+                        try:
+                            exchange = self._exchange_olustur(pro=True)
+                            consecutive_failures = 0
+                        except Exception:
+                            consecutive_failures += 1
+                            if consecutive_failures >= max_failures:
+                                await asyncio.sleep(30)
+                                consecutive_failures = 0
+                            else:
+                                await asyncio.sleep(5)
+                            continue
+
+                    for s in semboller:
+                        if self.dur_sinyali.is_set():
+                            break
+                        try:
+                            trades = await exchange.watch_trades(s, limit=20)
+                            if trades:
+                                formatted = []
+                                for t in trades[-20:]:
+                                    formatted.append({
+                                        "zaman": t.get("datetime", "")[-8:] if t.get("datetime") else "",
+                                        "fiyat": float(t.get("price", 0)),
+                                        "miktar": float(t.get("amount", 0)),
+                                        "yon": "🟢 Buy" if t.get("side") == "buy" else "🔴 Sell",
+                                        "buyukluk_usdt": round(float(t.get("price", 0)) * float(t.get("amount", 0)), 2)
+                                    })
+                                with self.bot_lock:
+                                    if "canli_islemler" not in self.bot_state:
+                                        self.bot_state["canli_islemler"] = {}
+                                    # Son 50 trade'i tut
+                                    mevcut = self.bot_state["canli_islemler"].get(s, [])
+                                    mevcut = formatted + mevcut
+                                    self.bot_state["canli_islemler"][s] = mevcut[:50]
+                        except Exception:
+                            pass
+
+                    await asyncio.sleep(0.5)
+
+                except Exception:
+                    exchange = None
+                    await asyncio.sleep(5)
+
+            if exchange:
+                try:
+                    await exchange.close()
+                except Exception:
+                    pass
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(dinle_trades())
+        except Exception:
+            pass
+        finally:
+            loop.close()

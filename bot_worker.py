@@ -567,7 +567,10 @@ def islem_kapat(state, trade_id, fiyat, neden, is_breakout=False, is_liq=False):
             etiket=evo_etiket,
             trade_id=trade_id,
             rsi=evo_rsi, bollinger_ust=evo_boll_ust,
-            bollinger_alt=evo_boll_alt, hacim_oran=evo_hacim_oran
+            bollinger_alt=evo_boll_alt, hacim_oran=evo_hacim_oran,
+            order_purpose=neden[:80] if neden else "",
+            ai_confidence=state.get("ai_guven_skoru"),
+            liquidity_depth_score=state.get("liquidity_depth_score")
         )
     except (ccxt.BaseError, sqlite3.Error, Exception):
         pass
@@ -937,6 +940,13 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         skor = ai_engine.kompozit_skor_hesapla(secilen_pazar, secilen_sma)
                         guven_base, _, _, _ = ai_engine.ai_metrikler(secilen_pazar, skor, zaman_baski_carpani)
                         
+                        # V29: Ensemble için mum verisini çek (bütün AI modlarında kullanılacak)
+                        _ensemble_df = None
+                        try:
+                            _ensemble_df = ai_engine.mum_verisi_cek(exchange, secilen_sembol, "15m", limit=30)
+                        except Exception:
+                            pass
+                        
                         of_data = None
                         of_min_conf = getattr(cfg, "ORDERFLOW_MIN_CONFIDENCE", 75)
                         if guven_base >= of_min_conf:
@@ -990,12 +1000,19 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                             karar_paketi = ai_engine.local_ml_karar(
                                 secilen_sembol, secilen_pazar, secilen_sma, poz_durumu,
                                 btc_trend, fonlama, zaman_baski_carpani,
-                                mod=state.get("mod", ""), mtf_guc=mtf_guc, order_flow=of_data
+                                mod=state.get("mod", ""), mtf_guc=mtf_guc, order_flow=of_data,
+                                ensemble_df=_ensemble_df
                             )
                         elif state.get("ai_modu") == "OpenAI LLM" and state.get("openai_key"):
                             karar_paketi = ai_engine.llm_karar(secilen_sembol, secilen_pazar, secilen_sma, state["openai_key"], poz_durumu, btc_trend, fonlama, zaman_baski_carpani)
                         else:
-                            karar_paketi = ai_engine.mock_ai_karar(secilen_sembol, secilen_pazar, skor, poz_durumu, btc_trend, fonlama, zaman_baski_carpani, mod=state.get("mod", ""), order_flow=of_data)
+                            karar_paketi = ai_engine.mock_ai_karar(secilen_sembol, secilen_pazar, skor, poz_durumu, btc_trend, fonlama, zaman_baski_carpani, mod=state.get("mod", ""), order_flow=of_data, ensemble_df=_ensemble_df)
+                        
+                        # V29: Ensemble raporu loglama
+                        ens_rapor = karar_paketi.get("ensemble_rapor", "")
+                        if ens_rapor:
+                            with lock:
+                                log_ekle(ens_rapor, state)
 
                     # v8: Kesin Kar (Sure Profit) Korelasyon Mantığı
                     kesin_kar = state.get("kesin_kar_parametreleri", {})
@@ -1283,42 +1300,88 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 margin = ch_bakiye_ac * kullanilabilir_max * mart_carpan
                                 margin = min(margin, ch_bakiye_ac * 0.5)
                             else:
-                                # V19/V25 Gelişmiş Risk Yönetimi
-                                c_max_wallet_risk = float(state.get("max_wallet_risk_pct", getattr(cfg, "MAX_WALLET_RISK_PCT", 100.0))) / 100.0
-                                c_trade_risk = float(state.get("trade_risk_pct", getattr(cfg, "TRADE_RISK_PCT", 10.0))) / 100.0
-                                
-                                aktif_kullanilan_margin = sum(p.get("islem_margin", 0) for p in state.get("aktif_pozisyonlar", {}).values())
-                                mevcut_bakiye = state["bakiye"]
-                                toplam_equity = mevcut_bakiye + aktif_kullanilan_margin
-                                kullanilabilir_hedef_kasa = toplam_equity * c_max_wallet_risk
-                                
-                                # İşlem başına risk, toplam equity üzerinden
-                                margin_hedef = toplam_equity * c_trade_risk * mart_carpan
-                                
-                                # Eğer mevcut açık margin + yeni margin cüzdan maksimum riskini aşıyorsa limitlenir
-                                kalan_risk_limiti = max(0.0, kullanilabilir_hedef_kasa - aktif_kullanilan_margin)
-                                margin = min(margin_hedef, kalan_risk_limiti)
-                                margin = min(margin, mevcut_bakiye)  # Fiziksel Bakiye kontrolü
-                                
-                                # V25: Cüzdan güvenlik limiti (%50 hard cap)
-                                margin = min(margin, mevcut_bakiye * 0.5)
+                                # V29: Confidence-Based Sizing (Free Will)
+                                if getattr(cfg, "CONFIDENCE_BASED_SIZING", False):
+                                    _guven_fw = karar_paketi.get("guven_skoru", 0)
+                                    aktif_kullanilan_margin = sum(p.get("islem_margin", 0) for p in state.get("aktif_pozisyonlar", {}).values())
+                                    mevcut_bakiye = state["bakiye"]
+                                    toplam_equity = mevcut_bakiye + aktif_kullanilan_margin
+                                    
+                                    if _guven_fw >= 98:
+                                        fw_oran = 0.50   # %50 Wallet — çok yüksek güven
+                                    elif _guven_fw >= 90:
+                                        fw_oran = 0.25   # %25 Wallet
+                                    else:
+                                        fw_oran = 0.15   # %15 Wallet (minimum)
+                                    
+                                    margin = toplam_equity * fw_oran * mart_carpan
+                                    
+                                    # Cüzdan güvenlik limitleri
+                                    c_max_wallet_risk = float(state.get("max_wallet_risk_pct", getattr(cfg, "MAX_WALLET_RISK_PCT", 100.0))) / 100.0
+                                    kullanilabilir_hedef_kasa = toplam_equity * c_max_wallet_risk
+                                    kalan_risk_limiti = max(0.0, kullanilabilir_hedef_kasa - aktif_kullanilan_margin)
+                                    margin = min(margin, kalan_risk_limiti)
+                                    margin = min(margin, mevcut_bakiye)
+                                    margin = min(margin, mevcut_bakiye * 0.5)  # Hard cap
+                                    
+                                    log_ekle(f"💡 FREE WILL: Güven %{_guven_fw:.0f} → Wallet %{fw_oran*100:.0f}. Margin: ${margin:.2f}", state)
+                                else:
+                                    # Eski V19/V25 Gelişmiş Risk Yönetimi (fallback)
+                                    c_max_wallet_risk = float(state.get("max_wallet_risk_pct", getattr(cfg, "MAX_WALLET_RISK_PCT", 100.0))) / 100.0
+                                    c_trade_risk = float(state.get("trade_risk_pct", getattr(cfg, "TRADE_RISK_PCT", 10.0))) / 100.0
+                                    
+                                    aktif_kullanilan_margin = sum(p.get("islem_margin", 0) for p in state.get("aktif_pozisyonlar", {}).values())
+                                    mevcut_bakiye = state["bakiye"]
+                                    toplam_equity = mevcut_bakiye + aktif_kullanilan_margin
+                                    kullanilabilir_hedef_kasa = toplam_equity * c_max_wallet_risk
+                                    
+                                    margin_hedef = toplam_equity * c_trade_risk * mart_carpan
+                                    kalan_risk_limiti = max(0.0, kullanilabilir_hedef_kasa - aktif_kullanilan_margin)
+                                    margin = min(margin_hedef, kalan_risk_limiti)
+                                    margin = min(margin, mevcut_bakiye)
+                                    margin = min(margin, mevcut_bakiye * 0.5)
+                                    
                             buyukluk_usdt = margin * tavsiye_kaldirac
                             
-                            # V26/V28: Dinamik Pozisyon Boyutu — güven skoruna göre limit değişir
-                            _guven = karar_paketi.get("guven_skoru", 0)
-                            if _guven >= 95:
-                                max_poz_pct = 0.30   # %30 — çok emin
-                            elif _guven >= 85:
-                                max_poz_pct = 0.20   # V28: %20 — güçlü sinyal (eski: 15)
-                            else:
-                                max_poz_pct = 0.15   # V28: %15 — minimum margin sınırı (eski: %10)
+                            # V29: Slippage Guard (Market Impact Simulator)
+                            if getattr(cfg, "SLIPPAGE_GUARD_ENABLED", False) and sinyal in ["LONG", "SHORT"]:
+                                try:
+                                    ob_depth = getattr(cfg, "SLIPPAGE_OB_DEPTH", 5)
+                                    max_impact = getattr(cfg, "SLIPPAGE_MAX_IMPACT_PCT", 10.0)
+                                    ob = exchange.fetch_order_book(secilen_sembol, limit=ob_depth)
+                                    if ob:
+                                        if sinyal == "LONG":
+                                            kademe_toplam = sum(float(ask[1]) * float(ask[0]) for ask in ob.get("asks", [])[:ob_depth])
+                                        else:
+                                            kademe_toplam = sum(float(bid[1]) * float(bid[0]) for bid in ob.get("bids", [])[:ob_depth])
+                                        
+                                        if kademe_toplam > 0:
+                                            etki_pct = (buyukluk_usdt / kademe_toplam) * 100
+                                            if etki_pct > max_impact:
+                                                log_ekle(f"🛡️ SLIPPAGE GUARD: {secilen_sembol} işlem (${buyukluk_usdt:,.0f}) ilk {ob_depth} kademe likiditesinin (${kademe_toplam:,.0f}) %{etki_pct:.1f}'ini kaydırır. Max: %{max_impact}. İŞLEM ENGELLENDİ.", state)
+                                                sinyal = "BEKLE"
+                                            else:
+                                                log_ekle(f"✅ SLIPPAGE OK: Etki %{etki_pct:.1f} < Max %{max_impact} (Derinlik: ${kademe_toplam:,.0f})", state)
+                                except Exception:
+                                    pass  # Slippage guard hatası işlemi engellemez
                             
-                            toplam_equity_v26 = state["bakiye"] + aktif_margin_toplami(state.get("aktif_pozisyonlar", {}))
-                            max_buyukluk = toplam_equity_v26 * max_poz_pct
-                            if buyukluk_usdt > max_buyukluk:
-                                log_ekle(f"🛡️ V26 DİNAMİK POZ: Güven %{_guven:.0f} → Limit %{max_poz_pct*100:.0f}. ${buyukluk_usdt:.0f} > Max ${max_buyukluk:.0f}. Sınırlandırılıyor.", state)
-                                buyukluk_usdt = max_buyukluk
-                                margin = buyukluk_usdt / tavsiye_kaldirac if tavsiye_kaldirac > 0 else margin
+                            # V26/V28 (Eski): Dinamik Pozisyon Boyutu — güven skoruna göre limit değişir
+                            # V29: Confidence-Based Sizing aktifse bu blok çalışmaz (margin zaten hesaplandı)
+                            if not getattr(cfg, "CONFIDENCE_BASED_SIZING", False):
+                                _guven = karar_paketi.get("guven_skoru", 0)
+                                if _guven >= 95:
+                                    max_poz_pct = 0.30
+                                elif _guven >= 85:
+                                    max_poz_pct = 0.20
+                                else:
+                                    max_poz_pct = 0.15
+                                
+                                toplam_equity_v26 = state["bakiye"] + aktif_margin_toplami(state.get("aktif_pozisyonlar", {}))
+                                max_buyukluk = toplam_equity_v26 * max_poz_pct
+                                if buyukluk_usdt > max_buyukluk:
+                                    log_ekle(f"🛡️ V26 DİNAMİK POZ: Güven %{_guven:.0f} → Limit %{max_poz_pct*100:.0f}. ${buyukluk_usdt:.0f} > Max ${max_buyukluk:.0f}. Sınırlandırılıyor.", state)
+                                    buyukluk_usdt = max_buyukluk
+                                    margin = buyukluk_usdt / tavsiye_kaldirac if tavsiye_kaldirac > 0 else margin
 
                             # v10: Challenge açılış komisyonu
                             if is_challenge:

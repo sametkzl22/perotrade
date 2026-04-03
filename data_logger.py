@@ -1,9 +1,10 @@
 """
-Data Logger — SQLite Trade & Scan Logging v7
+Data Logger — SQLite Trade & Scan Logging v29
 =============================================
 Tüm tarama sonuçlarını ve işlem kapanışlarını
 trade_logs.db SQLite veritabanında depolar.
 Dashboard geçmişe dönük analiz için kullanır.
+v29: order_purpose, ai_confidence, liquidity_depth_score kolonları.
 """
 
 import sqlite3
@@ -84,7 +85,10 @@ def _init_db(db_path: str):
                 rsi REAL,
                 bollinger_ust REAL,
                 bollinger_alt REAL,
-                hacim_oran REAL
+                hacim_oran REAL,
+                order_purpose TEXT DEFAULT '',
+                ai_confidence REAL,
+                liquidity_depth_score REAL
             );
             CREATE INDEX IF NOT EXISTS idx_tarama_sembol ON tarama_log(sembol);
             CREATE INDEX IF NOT EXISTS idx_tarama_zaman ON tarama_log(zaman);
@@ -108,6 +112,10 @@ def _migrate_db(db_path: str):
             "ALTER TABLE islem_log ADD COLUMN bollinger_alt REAL",
             "ALTER TABLE islem_log ADD COLUMN hacim_oran REAL",
             "ALTER TABLE islem_log ADD COLUMN trade_id TEXT DEFAULT ''",
+            # V29 migrations
+            "ALTER TABLE islem_log ADD COLUMN order_purpose TEXT DEFAULT ''",
+            "ALTER TABLE islem_log ADD COLUMN ai_confidence REAL",
+            "ALTER TABLE islem_log ADD COLUMN liquidity_depth_score REAL",
         ]
         for sql in migrations:
             try:
@@ -156,12 +164,14 @@ def _db_writer_worker():
                     conn.execute(
                         """INSERT INTO islem_log
                            (zaman, sembol, tip, giris_fiyati, cikis_fiyati, pnl, pnl_pct,
-                            kaldirac, margin, neden, etiket, trade_id, rsi, bollinger_ust, bollinger_alt, hacim_oran)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            kaldirac, margin, neden, etiket, trade_id, rsi, bollinger_ust, bollinger_alt, hacim_oran,
+                            order_purpose, ai_confidence, liquidity_depth_score)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (data["zaman"], data["sembol"], data["tip"],
                          data["giris_fiyati"], data["cikis_fiyati"], data["pnl"], data["pnl_pct"],
                          data["kaldirac"], data["margin"], data["neden"], data["etiket"], data["trade_id"],
-                         data["rsi"], data["bollinger_ust"], data["bollinger_alt"], data["hacim_oran"])
+                         data["rsi"], data["bollinger_ust"], data["bollinger_alt"], data["hacim_oran"],
+                         data["order_purpose"], data["ai_confidence"], data["liquidity_depth_score"])
                     )
                     conn.commit()
                     conn.close()
@@ -198,14 +208,18 @@ def islem_kaydet(sembol: str, tip: str, giris_fiyati: float,
                  kaldirac: int = 1, margin: float = 0, neden: str = "",
                  etiket: str = "", trade_id: str = "",
                  rsi: float = None, bollinger_ust: float = None,
-                 bollinger_alt: float = None, hacim_oran: float = None):
+                 bollinger_alt: float = None, hacim_oran: float = None,
+                 order_purpose: str = "", ai_confidence: float = None,
+                 liquidity_depth_score: float = None):
     data = {
         "zaman": datetime.now(timezone.utc).isoformat(),
         "sembol": sembol, "tip": tip, "giris_fiyati": giris_fiyati,
         "cikis_fiyati": cikis_fiyati, "pnl": pnl, "pnl_pct": pnl_pct,
         "kaldirac": kaldirac, "margin": margin, "neden": neden,
         "etiket": etiket, "trade_id": trade_id, "rsi": rsi,
-        "bollinger_ust": bollinger_ust, "bollinger_alt": bollinger_alt, "hacim_oran": hacim_oran
+        "bollinger_ust": bollinger_ust, "bollinger_alt": bollinger_alt, "hacim_oran": hacim_oran,
+        "order_purpose": order_purpose, "ai_confidence": ai_confidence,
+        "liquidity_depth_score": liquidity_depth_score
     }
     _write_queue.put({"type": "islem", "data": data})
 
@@ -241,14 +255,16 @@ def son_islemler_getir(limit: int = 50) -> list:
         conn = _get_conn()
         rows = conn.execute(
             """SELECT zaman, sembol, tip, giris_fiyati, cikis_fiyati,
-                      pnl, pnl_pct, kaldirac, margin, neden
+                      pnl, pnl_pct, kaldirac, margin, neden,
+                      order_purpose, ai_confidence, liquidity_depth_score
                FROM islem_log ORDER BY id DESC LIMIT ?""", (limit,)
         ).fetchall()
         conn.close()
         return [
             {"zaman": r[0], "sembol": r[1], "tip": r[2],
              "giris": r[3], "cikis": r[4], "pnl": r[5],
-             "pnl_pct": r[6], "kaldirac": r[7], "margin": r[8], "neden": r[9]}
+             "pnl_pct": r[6], "kaldirac": r[7], "margin": r[8], "neden": r[9],
+             "order_purpose": r[10], "ai_confidence": r[11], "liquidity_depth_score": r[12]}
             for r in rows
         ]
     except (ccxt.BaseError, sqlite3.Error, Exception):
@@ -355,7 +371,8 @@ def evo_islemler_getir(limit: int = 200) -> list:
         rows = conn.execute(
             """SELECT zaman, sembol, tip, giris_fiyati, cikis_fiyati,
                       pnl, pnl_pct, kaldirac, margin, neden,
-                      rsi, bollinger_ust, bollinger_alt, hacim_oran
+                      rsi, bollinger_ust, bollinger_alt, hacim_oran,
+                      order_purpose, ai_confidence, liquidity_depth_score
                FROM islem_log
                WHERE etiket = 'EVO_TRAINER'
                ORDER BY id DESC LIMIT ?""", (limit,)
@@ -366,7 +383,8 @@ def evo_islemler_getir(limit: int = 200) -> list:
              "giris": r[3], "cikis": r[4], "pnl": r[5],
              "pnl_pct": r[6], "kaldirac": r[7], "margin": r[8],
              "neden": r[9], "rsi": r[10], "bollinger_ust": r[11],
-             "bollinger_alt": r[12], "hacim_oran": r[13]}
+             "bollinger_alt": r[12], "hacim_oran": r[13],
+             "order_purpose": r[14], "ai_confidence": r[15], "liquidity_depth_score": r[16]}
             for r in rows
         ]
     except (ccxt.BaseError, sqlite3.Error, Exception):
