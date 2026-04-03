@@ -991,14 +991,6 @@ with tab_gecmis:
 
 
 # ─────────────────────────────────────────────
-# Auto-Refresh (Bot çalışırken)
-# ─────────────────────────────────────────────
-if worker.is_running:
-    # 2 saniyede bir arayüz yenilenir (CPU ve flicker düşürüldü)
-    time.sleep(2.0)
-    st.rerun()
-
-# ─────────────────────────────────────────────
 # V29: ⚡ Canlı İşlem Akışı Tab'ı
 # ─────────────────────────────────────────────
 with tab_canli:
@@ -1054,3 +1046,12 @@ with tab_canli:
 
     st.markdown("---")
     st.caption("🔄 Veriler ccxt.pro WebSocket üzerinden canlı olarak güncellenir. Sadece aktif pozisyonlu semboller izlenir.")
+
+# ─────────────────────────────────────────────
+# Auto-Refresh (Bot çalışırken)
+# ─────────────────────────────────────────────
+if worker.is_running:
+    # 2 saniyede bir arayüz yenilenir (CPU ve flicker düşürüldü)
+    time.sleep(2.0)
+    st.rerun()
+
