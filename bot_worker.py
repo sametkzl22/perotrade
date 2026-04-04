@@ -851,34 +851,10 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                     except (ccxt.BaseError, sqlite3.Error, Exception):
                         pass
 
-                    # v8: 24 Saatlik Akıllı Döngü Reset Kontrolü
-                    baslangic_z = state.get("baslangic_zamani", 0)
-                    if baslangic_z > 0 and (time.time() - baslangic_z) >= 86400:  # 24 saat
-                        # Tüm pozisyonları kapat
-                        kapanacak_24 = list(state.get("aktif_pozisyonlar", {}).keys())
-                        fiyatlar_24 = state.get("guncel_fiyatlar", {})
-                        for tid24 in kapanacak_24:
-                            p24 = state["aktif_pozisyonlar"].get(tid24)
-                            if p24:
-                                s24 = p24.get("sembol", tid24)
-                                f24 = fiyatlar_24.get(s24, p24.get("giris_fiyati", 0))
-                                if f24 > 0:
-                                    islem_kapat(state, tid24, f24, "🔄 24S DÖNGÜ: Otomatik kapama")
-                        # Botu Berserker'dan çıkar, tamamen yenile
-                        state["gun_baslangic_bakiye"] = state["bakiye"]
-                        state["baslangic_bakiye"] = state["bakiye"]
-                        state["pik_bakiye"] = state["bakiye"]
-                        state["gunluk_pik_kar"] = 0.0
-                        state["baslangic_zamani"] = time.time()
-                        state["is_breakout"] = False
-                        state["martingale_ardisik_kayip"] = 0
-                        state["martingale_carpan"] = 1.0
-                        state["toplam_islem_sayisi"] = 0
-                        state["ai_dusunce_gunlugu"] = []
-                        if "islem_gecmisi" in state:
-                            state["islem_gecmisi"].clear()
-                        state["bot_durumu"] = "Çalışıyor"
-                        log_ekle(f"🔄 24S DÖNGÜ TAMAMLANDI: Yeni anapara ${state['bakiye']:.2f}. Tüm istatistikler sıfırlandı, yeni gün başlıyor!", state, is_breakout=True)
+                    # V31: Dahili zamanlanmış resetler kaldırıldı — otonom stabilite modu
+                    if not state.get("_v31_stabilite_loglandi"):
+                        log_ekle("🛡️ V31: Dahili zamanlanmış resetler kaldırıldı, otonom stabilite moduna geçildi.", state)
+                        state["_v31_stabilite_loglandi"] = True
 
                 if dur_sinyali.is_set():
                     break
