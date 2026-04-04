@@ -5120,3 +5120,11 @@ For `use_container_width=True`, use `width='stretch'`. For `use_container_width=
 `use_container_width` will be removed after 2025-12-31.
 
 For `use_container_width=True`, use `width='stretch'`. For `use_container_width=False`, use `width='content'`.
+🎮 DEMO Modu Yüklendi! (Sanal Bakiye: $70.03)
+✅ Trade logged to DB via Queue: STO/USDT:USDT SHORT [tid:30faec0b] (PNL: $0.13)
+✅ Trade logged to DB via Queue: BTC/USDT:USDT SHORT [tid:48e4f5f4] (PNL: $0.01)
+✅ Trade logged to DB via Queue: SIREN/USDT:USDT LONG [tid:52eabdb0] (PNL: $-0.25)
+✅ Trade logged to DB via Queue: STO/USDT:USDT SHORT [tid:55d55aa4] (PNL: $6.59)
+✅ Trade logged to DB via Queue: SIREN/USDT:USDT LONG [tid:cf1c3b17] (PNL: $3.22)
+✅ Trade logged to DB via Queue: ZEC/USDT:USDT LONG [tid:eedd4eee] (PNL: $-0.09)
+  Stopping...

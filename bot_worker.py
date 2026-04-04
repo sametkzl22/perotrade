@@ -1014,6 +1014,56 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                             with lock:
                                 log_ekle(ens_rapor, state)
 
+                        # V30: LRC Raporlama + Extreme Overextension Cezası
+                        try:
+                            _lrc_df = _ensemble_df if _ensemble_df is not None else ai_engine.mum_verisi_cek(exchange, secilen_sembol, "15m", limit=100)
+                            if _lrc_df is not None and not _lrc_df.empty:
+                                _lrc = ai_engine.lrc_analizi_yap(_lrc_df, period=100)
+                                if _lrc.get("gecerli") and fiyat > 0:
+                                    _lrc_orta = _lrc["lrc_orta"]
+                                    _lrc_ust = _lrc["lrc_ust"]
+                                    _lrc_alt = _lrc["lrc_alt"]
+                                    _lrc_slope = _lrc["lrc_slope"]
+                                    _slope_icon = "↗" if _lrc_slope > 0 else "↘" if _lrc_slope < 0 else "→"
+
+                                    with lock:
+                                        # Kanal pozisyon raporu
+                                        if fiyat < _lrc_alt:
+                                            log_ekle(f"📉 [LRC] Fiyat kanal ALTINDA: ${fiyat:.4f} < Alt ${_lrc_alt:.4f} (Eğim: {_slope_icon}{_lrc_slope:.6f}). Geri dönüş bekleniyor.", state)
+                                        elif fiyat > _lrc_ust:
+                                            log_ekle(f"📈 [LRC] Fiyat kanal ÜSTüNDE: ${fiyat:.4f} > Üst ${_lrc_ust:.4f} (Eğim: {_slope_icon}{_lrc_slope:.6f}). Geri dönüş bekleniyor.", state)
+                                        else:
+                                            log_ekle(f"📊 [LRC] Fiyat kanal İÇİNDE: Alt ${_lrc_alt:.4f} < ${fiyat:.4f} < Üst ${_lrc_ust:.4f} (Orta: ${_lrc_orta:.4f}, Eğim: {_slope_icon})", state)
+
+                                    # Extreme Overextension: Fiyat kanalın %10'undan fazla dışına taşmışsa
+                                    _kanal_genislik = _lrc_ust - _lrc_alt
+                                    if _kanal_genislik > 0:
+                                        if fiyat < _lrc_alt:
+                                            _tasma_pct = ((_lrc_alt - fiyat) / _kanal_genislik) * 100
+                                        elif fiyat > _lrc_ust:
+                                            _tasma_pct = ((fiyat - _lrc_ust) / _kanal_genislik) * 100
+                                        else:
+                                            _tasma_pct = 0.0
+
+                                        if _tasma_pct > 10.0:
+                                            # FOMO Cezası: Güven skorunu %20 düşür
+                                            _mevcut_guven = karar_paketi.get("guven_skoru", 0)
+                                            _cezali_guven = _mevcut_guven * 0.80
+                                            karar_paketi["guven_skoru"] = _cezali_guven
+                                            with lock:
+                                                log_ekle(
+                                                    f"🚨 [LRC] EXTREME OVEREXTENSION! Fiyat kanalın %{_tasma_pct:.1f} dışında. "
+                                                    f"FOMO cezası: Güven %{_mevcut_guven:.0f} → %{_cezali_guven:.0f} (-%20). "
+                                                    f"Geri dönüş bekleniyor, agresif giriş engellendi.",
+                                                    state
+                                                )
+                                            # Aşırı taşma durumunda açılış kararlarını engelle
+                                            if karar_paketi.get("karar") in ["LONG", "SHORT"] and _tasma_pct > 20.0:
+                                                karar_paketi["karar"] = "BEKLE"
+                                                karar_paketi["dusunce"] = f"🚨 [LRC FOMO GUARD] Fiyat kanalın %{_tasma_pct:.1f} dışında. Geri dönüş beklenene kadar işlem engellendi. " + karar_paketi.get("dusunce", "")
+                        except Exception:
+                            pass
+
                     # v8: Kesin Kar (Sure Profit) Korelasyon Mantığı
                     kesin_kar = state.get("kesin_kar_parametreleri", {})
                     if kesin_kar and isinstance(secilen_pazar, dict):

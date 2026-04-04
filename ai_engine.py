@@ -1,12 +1,13 @@
 """
-AI Karar Motoru (AI Decision Engine) v29
+AI Karar Motoru (AI Decision Engine) v30
 ========================================
 Breakout Tarayıcı, Hacim Anormallikleri, Trend/Web Simülasyonu,
 Twitter (X) Duyarlılık Analizi, Güven Skoru & Beklenen Artış,
 Vadeli İşlemler (Long/Short) stratejisi, ATR Volatilite Scanner,
 Likidite Filtresi, USDT Dominance Kontrolü, Local ML Inference,
-EnsembleKararMotoru (V29) ve SQLite Loglama.
+EnsembleKararMotoru (V30) ve SQLite Loglama.
 v29: Ensemble AND Karar Motoru, Confidence-Based Sizing desteği.
+v30: Linear Regression Channel (LRC) analizi + Ensemble AI v2.0 (4-strateji AND).
 """
 
 import math
@@ -232,6 +233,55 @@ def bollinger_hesapla(df: pd.DataFrame, period: int = 20, std_dev: float = 2.0) 
         upper = sma + std_dev * std
         lower = sma - std_dev * std
         return {"ust": round(upper, 6), "alt": round(lower, 6), "orta": round(sma, 6), "genislik": round(upper - lower, 6)}
+    except (ccxt.BaseError, sqlite3.Error, Exception):
+        return bos
+
+
+def lrc_analizi_yap(df: pd.DataFrame, period: int = 100) -> dict:
+    """V30: Linear Regression Channel (LRC) — Least Squares regresyon + 2σ kanal.
+    
+    numpy.polyfit ile close fiyatları üzerinden 1. dereceden lineer regresyon hesaplar.
+    Regresyon doğrusunun (Median Line) alt ve üstüne 2 standart sapma kanalı oluşturur.
+    
+    Returns:
+        dict: lrc_orta, lrc_ust, lrc_alt, lrc_slope, gecerli
+    """
+    bos = {"lrc_orta": 0.0, "lrc_ust": 0.0, "lrc_alt": 0.0, "lrc_slope": 0.0, "gecerli": False}
+    if df is None or df.empty:
+        return bos
+    try:
+        close = _to_np(df['close'])
+        n = min(period, len(close))
+        if n < 10:
+            return bos
+        close_window = close[-n:]
+        x = np.arange(n, dtype=np.float64)
+
+        # 1. derece lineer regresyon (Least Squares)
+        coeffs = np.polyfit(x, close_window, 1)
+        slope = float(coeffs[0])       # Eğim (slope)
+        intercept = float(coeffs[1])   # Y-kesişim
+
+        # Regresyon doğrusu değerleri
+        reg_line = slope * x + intercept
+
+        # Sapma: fiyatların regresyon doğrusundan farkı
+        residuals = close_window - reg_line
+        std_dev = float(np.std(residuals))
+
+        # Son noktadaki (anlık) regresyon değeri = Median Line
+        lrc_orta = float(reg_line[-1])
+        lrc_ust = lrc_orta + 2.0 * std_dev
+        lrc_alt = lrc_orta - 2.0 * std_dev
+
+        return {
+            "lrc_orta": round(lrc_orta, 6),
+            "lrc_ust": round(lrc_ust, 6),
+            "lrc_alt": round(lrc_alt, 6),
+            "lrc_slope": round(slope, 8),
+            "std_dev": round(std_dev, 6),
+            "gecerli": True
+        }
     except (ccxt.BaseError, sqlite3.Error, Exception):
         return bos
 
@@ -805,13 +855,14 @@ def kompozit_skor_hesapla(pazar: dict, sma_sinyal: str) -> float:
 # 5b) V29: Ensemble Karar Motoru (AND Operatörü)
 # ─────────────────────────────────────────────
 class EnsembleKararMotoru:
-    """V29: 3 stratejiyi AND operatörüyle birleştiren ensemble karar motoru.
+    """V30: 4 stratejiyi AND operatörüyle birleştiren ensemble karar motoru.
     Hem açılış hem kapanış kararlarında kullanılır.
     
     Stratejiler:
     1. Volume-Supported Breakout: Son 14 mumun direncini %2+ hacimle kıran mumlar
     2. Mean Reversion Filter: RSI >70/<30 + Bollinger dışına taşma → REVERSE
     3. Trend Confirmation: MA7/MA25 Golden Cross/Death Cross (Veto)
+    4. Linear Regression Channel (LRC): Kanal dışı fiyat + eğim yönü filtresi (V30)
     """
 
     def __init__(self, df: pd.DataFrame, sembol: str = ""):
@@ -927,8 +978,60 @@ class EnsembleKararMotoru:
         except Exception:
             return sonuc
 
+    def linear_regression_channel_strategy(self) -> dict:
+        """V30: Linear Regression Channel filtresi.
+        
+        - Fiyat < lrc_alt VE slope > 0 (yükselen trend) → LONG onayı
+        - Fiyat > lrc_ust VE slope < 0 (düşen trend) → SHORT onayı
+        - Fiyat kanal dışındayken eğim ters yöndeyse → VETO
+        """
+        sonuc = {
+            "sinyal": "BEKLE", "lrc_orta": 0.0, "lrc_ust": 0.0,
+            "lrc_alt": 0.0, "lrc_slope": 0.0, "veto": False,
+            "veto_neden": "", "gecerli": False
+        }
+        if not self._valid:
+            return sonuc
+        try:
+            lrc = lrc_analizi_yap(self.df, period=100)
+            if not lrc.get("gecerli"):
+                return sonuc
+
+            son_close = float(self.df['close'].iloc[-1])
+            slope = lrc["lrc_slope"]
+            lrc_ust = lrc["lrc_ust"]
+            lrc_alt = lrc["lrc_alt"]
+            lrc_orta = lrc["lrc_orta"]
+
+            sonuc["lrc_orta"] = lrc_orta
+            sonuc["lrc_ust"] = lrc_ust
+            sonuc["lrc_alt"] = lrc_alt
+            sonuc["lrc_slope"] = slope
+            sonuc["gecerli"] = True
+
+            if son_close < lrc_alt:
+                if slope > 0:
+                    # Fiyat alt kanalın altında + yükselen eğim → LONG fırsatı
+                    sonuc["sinyal"] = "LONG"
+                else:
+                    # Fiyat alt kanalda ama eğim de düşüyor → ters yön VETO
+                    sonuc["veto"] = True
+                    sonuc["veto_neden"] = f"Fiyat LRC alt kanalında (${son_close:.4f} < ${lrc_alt:.4f}) ama eğim düşüş yönünde ({slope:.6f}). FOMO riski."
+            elif son_close > lrc_ust:
+                if slope < 0:
+                    # Fiyat üst kanalın üzerinde + düşen eğim → SHORT fırsatı
+                    sonuc["sinyal"] = "SHORT"
+                else:
+                    # Fiyat üst kanalda ama eğim yükseliyor → ters yön VETO
+                    sonuc["veto"] = True
+                    sonuc["veto_neden"] = f"Fiyat LRC üst kanalında (${son_close:.4f} > ${lrc_ust:.4f}) ama eğim yükseliş yönünde ({slope:.6f}). FOMO riski."
+
+            return sonuc
+        except Exception:
+            return sonuc
+
     def ensemble_karar(self, onerilen_yon: str = "") -> dict:
-        """3 stratejiyi AND ile birleştir.
+        """V30: 4 stratejiyi AND ile birleştir.
         
         Args:
             onerilen_yon: AI'nin önerdiği yön ("LONG", "SHORT", "KAPAT", "BEKLE")
@@ -939,11 +1042,12 @@ class EnsembleKararMotoru:
         vb = self.volume_supported_breakout()
         mr = self.mean_reversion_filter()
         tc = self.trend_confirmation()
+        lrc = self.linear_regression_channel_strategy()
 
-        detay = {"volume_breakout": vb, "mean_reversion": mr, "trend_confirmation": tc}
+        detay = {"volume_breakout": vb, "mean_reversion": mr, "trend_confirmation": tc, "lrc": lrc}
         rapor_satirlari = []
         onay_sayisi = 0
-        toplam_strateji = 3
+        toplam_strateji = 4
 
         # ── Strateji 1: Volume-Supported Breakout ──
         if vb["breakout"]:
@@ -962,7 +1066,6 @@ class EnsembleKararMotoru:
         # ── Strateji 3: Trend Confirmation (Veto) ──
         veto = False
         if tc["onay"]:
-            # Trend yönüyle sinyal yönü çelişiyor mu?
             if onerilen_yon == "LONG" and tc["trend"] == "ASAGI":
                 veto = True
                 rapor_satirlari.append(f"🚫 TREND_VETO: LONG önerildi ama MA7/MA25 DÜŞÜŞ trendinde → VETO!")
@@ -975,29 +1078,55 @@ class EnsembleKararMotoru:
         else:
             rapor_satirlari.append(f"⚪ TREND: YATAY (MA7: {tc['ma7']:.4f}, MA25: {tc['ma25']:.4f})")
 
-        # ── AND Birleştirme ──
-        tam_onay = (onay_sayisi == toplam_strateji) and not veto
+        # ── Strateji 4: Linear Regression Channel (V30) ──
+        lrc_veto = False
+        if lrc.get("gecerli"):
+            lrc_sinyal = lrc.get("sinyal", "BEKLE")
+            lrc_slope = lrc.get("lrc_slope", 0)
+            slope_str = "↗" if lrc_slope > 0 else "↘" if lrc_slope < 0 else "→"
+
+            if lrc.get("veto"):
+                lrc_veto = True
+                rapor_satirlari.append(f"🚫 LRC_VETO: {lrc['veto_neden']}")
+            elif lrc_sinyal == onerilen_yon:
+                # LRC sinyali önerilen yönle uyumlu → onay
+                onay_sayisi += 1
+                rapor_satirlari.append(f"✅ LRC_ONAY: {lrc_sinyal} (Eğim: {slope_str}{lrc_slope:.6f}, Orta: ${lrc['lrc_orta']:.4f})")
+            elif lrc_sinyal == "BEKLE":
+                # Fiyat kanal içinde → nötr (onay vermez ama veto da etmez)
+                rapor_satirlari.append(f"⚪ LRC: Kanal içinde (Eğim: {slope_str}{lrc_slope:.6f}, Orta: ${lrc['lrc_orta']:.4f})")
+            else:
+                # LRC farklı sinyal veriyor → hafif ters sinyal, ama hard veto değil
+                rapor_satirlari.append(f"⚠️ LRC: {lrc_sinyal} sinyali var ama {onerilen_yon} önerildi (Eğim: {slope_str}{lrc_slope:.6f})")
+        else:
+            rapor_satirlari.append(f"⚪ LRC: Yetersiz veri (min 10 mum gerekiyor)")
+
+        # ── AND Birleştirme (V30: 4 strateji) ──
+        tam_veto = veto or lrc_veto
+        tam_onay = (onay_sayisi == toplam_strateji) and not tam_veto
         guven_carpani = 1.0
 
         if tam_onay:
-            guven_carpani = 1.3  # Tam uyum bonusu: %30 güven artışı
-        elif veto:
-            guven_carpani = 0.5  # Veto uygulandı: %50 güven düşüşü
+            guven_carpani = 1.4  # V30: Tam uyum bonusu: %40 güven artışı (4 strateji)
+        elif tam_veto:
+            guven_carpani = 0.4  # Veto uygulandı: %60 güven düşüşü
+        elif onay_sayisi >= 3:
+            guven_carpani = 1.2  # 3/4 onay: %20 güven artışı
         elif onay_sayisi >= 2:
-            guven_carpani = 1.0  # 2/3 onay: standart güven
+            guven_carpani = 1.0  # 2/4 onay: standart güven
         elif onay_sayisi == 1:
-            guven_carpani = 0.7  # 1/3 onay: %30 güven düşüşü
+            guven_carpani = 0.7  # 1/4 onay: %30 güven düşüşü
         else:
-            guven_carpani = 0.5  # 0/3 onay: %50 düşüş
+            guven_carpani = 0.5  # 0/4 onay: %50 düşüş
 
-        rapor = f"🔬 ENSEMBLE [{onay_sayisi}/{toplam_strateji}]: " + " | ".join(rapor_satirlari)
+        rapor = f"🔬 ENSEMBLE v2.0 [{onay_sayisi}/{toplam_strateji}]: " + " | ".join(rapor_satirlari)
 
         return {
             "onay": tam_onay,
-            "yon": onerilen_yon if not veto else "BEKLE",
+            "yon": onerilen_yon if not tam_veto else "BEKLE",
             "guven_carpani": guven_carpani,
             "rapor": rapor,
-            "veto": veto,
+            "veto": tam_veto,
             "onay_sayisi": onay_sayisi,
             "detay": detay
         }
