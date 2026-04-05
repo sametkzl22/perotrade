@@ -917,34 +917,38 @@ with tab_tv:
     st.markdown("### 📈 TradingView Gözlem Ekranı")
     aktif_s = S.get("aktif_sembol", "")
     if aktif_s and aktif_s != "Bekleniyor...":
-        tv_symbol = "BINANCE:" + aktif_s.replace('/', '')
+        # V31 FIX: Binance Futures Perpetual formatı — .P suffix ile sürekli vadeli kontrat
+        tv_base = aktif_s.replace('/', '')
+        tv_symbol = f"BINANCE:{tv_base}.P"
         tv_html = f"""
         <!-- TradingView Widget BEGIN -->
-        <div class="tradingview-widget-container">
-          <div class="tradingview-widget-container__widget"></div>
+        <div class="tradingview-widget-container" style="height:600px;width:100%">
+          <div class="tradingview-widget-container__widget" style="height:calc(100% - 32px);width:100%"></div>
           <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
           {{
-          "width": "100%",
-          "height": 600,
+          "autosize": true,
           "symbol": "{tv_symbol}",
           "interval": "15",
           "timezone": "Etc/UTC",
           "theme": "dark",
           "style": "1",
           "locale": "tr",
+          "allow_symbol_change": true,
+          "support_host": "https://www.tradingview.com",
           "enable_publishing": false,
           "backgroundColor": "rgba(11, 12, 16, 1)",
           "gridColor": "rgba(42, 46, 57, 0.06)",
           "hide_top_toolbar": false,
           "hide_legend": false,
           "save_image": false,
-          "container_id": "tradingview_cf1ea"
+          "studies": ["RSI@tv-basicstudies", "BB@tv-basicstudies", "Volume@tv-basicstudies"],
+          "container_id": "tradingview_futures"
         }}
           </script>
         </div>
         <!-- TradingView Widget END -->
         """
-        components.html(tv_html, height=600)
+        components.html(tv_html, height=620)
     else:
         st.info("Kripto para bekleniyor...")
 

@@ -900,7 +900,10 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                     state["mola_bitis_zamani"] = 0
                     state["bot_durumu"] = "Çalışıyor"
                     state["gunluk_pik_kar"] = 0.0  # Günlük pik sıfırla
-                    log_ekle("✅ MOLA BİTTİ: Bot otonom taramaya geri döndü. Piyasa tekrar taranıyor.", state, is_breakout=True)
+                    # V31 FIX: Mola sonrası bakiyeyi yeni sıfır noktası olarak kabul et
+                    # Eski zararın tekrar mola tetiklemesini engeller
+                    state['gun_baslangic_bakiye'] = state['bakiye'] + aktif_margin_toplami(state.get('aktif_pozisyonlar', {}))
+                    log_ekle(f"✅ MOLA BİTTİ: Bot otonom taramaya geri döndü. Yeni gün başlangıç bakiyesi: ${state['gun_baslangic_bakiye']:.2f}", state, is_breakout=True)
                     threading.Thread(
                         target=send_telegram_msg,
                         args=("✅ Mola bitti! Bot otonom taramaya geri döndü.",),
@@ -1391,6 +1394,12 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 except Exception:
                                     pass  # Slippage guard hatası işlemi engellemez
                             
+                            # V31 FIX: Slippage Guard veya diğer veto'lar sinyal='BEKLE' yaptıysa
+                            # hayalet pozisyon açılmasını engelle — bu iterasyonu atla
+                            if sinyal == "BEKLE":
+                                log_ekle(f"🛡️ GÜVENLIK KAPISI: {secilen_sembol} sinyal BEKLE'ye döndü, pozisyon açılmayacak.", state)
+                                continue
+                            
                             # V26/V28 (Eski): Dinamik Pozisyon Boyutu — güven skoruna göre limit değişir
                             # V29: Confidence-Based Sizing aktifse bu blok çalışmaz (margin zaten hesaplandı)
                             if not getattr(cfg, "CONFIDENCE_BASED_SIZING", False):
@@ -1457,11 +1466,13 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 pass
 
                             sl_mesafe_pct = abs(fiyat - dsl_fiyat) / fiyat * 100 if fiyat > 0 else 0
-                            state["islem_gecmisi"].append({
-                                "zaman": zaman, "sembol": secilen_sembol, "sinyal": f"🟢 AÇ: {sinyal}",
-                                "fiyat": round(fiyat, 4), "kaldirac": f"{tavsiye_kaldirac}x", "poz_buyukluk": round(buyukluk_usdt, 2),
-                                "bakiye_usdt": round(state["bakiye"] + margin, 2), "kar_zarar": "—", "ai_notu": karar_paketi.get("dusunce", "")
-                            })
+                            # V31 FIX: Sadece gerçek LONG/SHORT sinyalleri kaydet, BEKLE asla geçmişe yazılmaz
+                            if sinyal in ["LONG", "SHORT"]:
+                                state["islem_gecmisi"].append({
+                                    "zaman": zaman, "sembol": secilen_sembol, "sinyal": f"🟢 AÇ: {sinyal}",
+                                    "fiyat": round(fiyat, 4), "kaldirac": f"{tavsiye_kaldirac}x", "poz_buyukluk": round(buyukluk_usdt, 2),
+                                    "bakiye_usdt": round(state["bakiye"] + margin, 2), "kar_zarar": "—", "ai_notu": karar_paketi.get("dusunce", "")
+                                })
                             log_ekle(f"💰 {tavsiye_kaldirac}x {sinyal} POZİSYON AÇILDI: {secilen_sembol}. Giriş: {fiyat:.4f} | Dinamik SL: ${dsl_fiyat:.4f} (%{sl_mesafe_pct:.1f})", state, is_breakout)
                             # V23: Detaylı Telegram açılış bildirimi
                             threading.Thread(
