@@ -15,6 +15,7 @@ import csv
 import asyncio
 import os
 import sqlite3
+from pathlib import Path
 from datetime import datetime, timezone
 
 import ccxt
@@ -1726,12 +1727,20 @@ class BotWorker:
         self.bootstrap()
 
     def bootstrap(self):
-        """Worker başlarken (UI yüklenmeden) state dosyasını okuyup kaldığı yerden devam ettirir."""
+        """Worker başlarken (UI yüklenmeden) state dosyasını okuyup kaldığı yerden devam ettirir.
+        Heartbeat: active_session.lock dosyası mevcutsa bot otonom olarak tekrar başlar.
+        """
         last_mode = ps.get_last_mode()
         self.state.set("use_real_api", last_mode)
         self.state.load_from_persistent()
 
-        if self.is_running:
+        lock_file = ps.get_lock_file_path()
+        if os.path.exists(lock_file):
+            self.state.set("bot_calisiyor", True)
+            mod_str = "Real" if last_mode else "Demo"
+            print(f"🔄 [Heartbeat] Lock dosyası bulundu → {mod_str} modu oto-başlatılıyor...")
+            self.start()
+        elif self.is_running:
             mod_str = "Real" if last_mode else "Demo"
             print(f"🔄 [Bootstrap] Auto-resume başlatıldı: {mod_str} modu aktif")
             self.start()
@@ -1756,6 +1765,12 @@ class BotWorker:
             
         # Immediate Save: Bot ilk başladığında anında kaydet
         self.state.save_to_persistent()
+
+        # Heartbeat: Lock dosyasını oluştur (beklenmedik kapanmada yerinde kalır)
+        try:
+            Path(ps.get_lock_file_path()).touch()
+        except OSError as e:
+            print(f"⚠️ Lock dosyası oluşturulamadı: {e}")
 
         # API Entegrasyonu
         if raw.get("use_real_api"):

@@ -291,6 +291,14 @@ with st.sidebar:
     with col2:
         if st.button("⏹️ Durdur", use_container_width=True, disabled=not worker.is_running):
             worker.stop()
+            # Heartbeat: İradeli durdurma → lock dosyasını sil
+            # (handle_sigterm bu dosyayı SİLMEZ → sistem kapanışında bot geri gelir)
+            try:
+                lock_path = ps.get_lock_file_path()
+                if os.path.exists(lock_path):
+                    os.remove(lock_path)
+            except OSError:
+                pass
             st.rerun()
 
     # Mod seçimi

@@ -67,6 +67,16 @@ def get_app_path():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def get_lock_file_path() -> str:
+    """Heartbeat lock dosyasının yolunu döndürür.
+    Bot çalışırken oluşturulur, iradeli durdurmada silinir.
+    Beklenmedik kapanma sonrası dosya yerinde kalır → bootstrap oto-başlatma yapar.
+    """
+    lock_dir = os.path.join(get_app_path(), "data")
+    os.makedirs(lock_dir, exist_ok=True)
+    return os.path.join(lock_dir, "active_session.lock")
+
+
 def set_last_mode(is_real: bool):
     """En son aktif olan modu global last_mode.json dosyasına mühürler."""
     last_mode_file = os.path.join(get_app_path(), "data", "last_mode.json")
