@@ -1,5 +1,5 @@
 """
-AI Karar Motoru (AI Decision Engine) v30
+AI Karar Motoru (AI Decision Engine) V34
 ========================================
 Breakout Tarayıcı, Hacim Anormallikleri, Trend/Web Simülasyonu,
 Twitter (X) Duyarlılık Analizi, Güven Skoru & Beklenen Artış,
@@ -8,6 +8,7 @@ Likidite Filtresi, USDT Dominance Kontrolü, Local ML Inference,
 EnsembleKararMotoru (V30) ve SQLite Loglama.
 v29: Ensemble AND Karar Motoru, Confidence-Based Sizing desteği.
 v30: Linear Regression Channel (LRC) analizi + Ensemble AI v2.0 (4-strateji AND).
+V34: TP1/TP2 Kısmi Kapatma (Partial Take Profit) + Break-Even SL desteği.
 """
 
 import math

@@ -1,8 +1,9 @@
 """
-Data Provider — WebSocket and REST API Background Fetcher v29
-==============================================================
+Data Provider — WebSocket and REST API Background Fetcher v29 / V34
+=====================================================================
 Isolated background tasks for fetching live prices, balances,
 and live trade streams (V29: watch_trades).
+V34: TP1/TP2 Kısmi Kapatma (Partial Take Profit) + Break-Even SL.
 Uses threading to decouple fetching from Streamlit UI entirely.
 """
 
@@ -108,7 +109,7 @@ class DataProvider:
 
     def _ws_runner(self):
         """Runs the Async loop for WebSockets inside a standard Thread."""
-        from bot_worker import islem_kapat, pnl_hesapla, pnl_hesapla_coklu, aktif_margin_toplami
+        from bot_worker import islem_kapat, pnl_hesapla, pnl_hesapla_coklu, aktif_margin_toplami, send_telegram_msg
         
         async def dinle():
             exchange = None
@@ -233,23 +234,89 @@ class DataProvider:
                                                     poz["trailing_stop_fiyat"] = poz["giris_fiyati"] * 0.997
                                                 else:
                                                     poz["trailing_stop_fiyat"] = poz["giris_fiyati"] * 1.003
-                                            elif pnl_pct >= 10.0 and not poz.get("kademeli_tp_yapildi", False):
-                                                poz["kademeli_tp_yapildi"] = True
-                                                real_pnl = aktif_pnl_val / 2
-                                                ret_margin = poz["islem_margin"] / 2
-                                                self.bot_state["bakiye"] += (ret_margin + real_pnl)
-                                                poz["islem_margin"] /= 2
-                                                poz["coin_miktar"] /= 2
-                                                poz["ts_aktif"] = True
-                                                poz["trailing_stop_fiyat"] = poz["giris_fiyati"]
-                                                z = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-                                                self.bot_state["islem_gecmisi"].append({
-                                                    "zaman": z, "sembol": p_sembol, "sinyal": "💰 %50 TP",
-                                                    "fiyat": round(f_s, 4), "kaldirac": f"{poz['islem_kaldirac']}x",
-                                                    "poz_buyukluk": round(poz["coin_miktar"], 2),
-                                                    "bakiye_usdt": round(self.bot_state["bakiye"], 2),
-                                                    "kar_zarar": f"{real_pnl:+.2f} USDT", "ai_notu": "%10 ROE: %50 Kâr Alındı, TS Başabaş."
-                                                })
+                                            # ── V34: TP1 Kısmi Kapatma (%2 ROE hedef) ──
+                                            elif poz.get("tp1_fiyat") and not poz.get("tp1_yapildi", False):
+                                                tp1_hit = False
+                                                tp1_f = poz["tp1_fiyat"]
+                                                if is_long and f_s >= tp1_f:
+                                                    tp1_hit = True
+                                                elif is_short and f_s <= tp1_f:
+                                                    tp1_hit = True
+
+                                                if tp1_hit:
+                                                    # Margin'in %50'sini realize et
+                                                    real_pnl = aktif_pnl_val / 2
+                                                    ret_margin = poz["islem_margin"] / 2
+                                                    self.bot_state["bakiye"] += (ret_margin + real_pnl)
+                                                    poz["islem_margin"] /= 2
+                                                    poz["coin_miktar"] /= 2
+
+                                                    # SL'yi giriş fiyatına çek (Break-Even)
+                                                    poz["dinamik_sl_fiyat"] = poz["giris_fiyati"]
+                                                    poz["ts_aktif"] = True
+                                                    poz["trailing_stop_fiyat"] = poz["giris_fiyati"]
+                                                    poz["tp1_yapildi"] = True
+                                                    poz["kademeli_tp_yapildi"] = True  # Eski mekanizmayı da işaretle
+
+                                                    z = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+                                                    self.bot_state["islem_gecmisi"].append({
+                                                        "zaman": z, "sembol": p_sembol, "sinyal": "🎯 TP1 %50",
+                                                        "fiyat": round(f_s, 4), "kaldirac": f"{poz['islem_kaldirac']}x",
+                                                        "poz_buyukluk": round(poz["coin_miktar"], 2),
+                                                        "bakiye_usdt": round(self.bot_state["bakiye"], 2),
+                                                        "kar_zarar": f"{real_pnl:+.2f} USDT",
+                                                        "ai_notu": "V34 TP1: %50 Kâr Alındı, SL Başabaşa çekildi."
+                                                    })
+                                                    self._log_ekle(
+                                                        f"🎯 V34 TP1 ALINDI: {p_sembol} | Kârın yarısı cebimizde (+{real_pnl:+.2f}$). "
+                                                        f"SL giriş seviyesine çekildi (${poz['giris_fiyati']:.4f}).",
+                                                        is_breakout=True
+                                                    )
+                                                    # V34: Telegram TP1 Bildirimi
+                                                    import threading as _th
+                                                    _th.Thread(
+                                                        target=send_telegram_msg,
+                                                        args=(
+                                                            f"🎯 <b>TP1 ALINDI!</b>\n"
+                                                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                                                            f"📌 <b>Coin:</b> {p_sembol}\n"
+                                                            f"💰 <b>Kâr:</b> {real_pnl:+.2f} USDT (yarısı cebimizde)\n"
+                                                            f"🛡️ <b>SL:</b> Giriş seviyesine çekildi (BE: ${poz['giris_fiyati']:.4f})\n"
+                                                            f"🎯 <b>TP2 Hedef:</b> ${poz.get('tp2_fiyat', 0):.4f}\n"
+                                                            f"🔑 <b>Trade ID:</b> #{p_tid}",
+                                                        ),
+                                                        daemon=True,
+                                                    ).start()
+
+                                            # ── V34: TP2 Tam Kapatma (%5 ROE hedef) ──
+                                            if poz.get("tp1_yapildi", False) and poz.get("tp2_fiyat"):
+                                                tp2_hit = False
+                                                tp2_f = poz["tp2_fiyat"]
+                                                if is_long and f_s >= tp2_f:
+                                                    tp2_hit = True
+                                                elif is_short and f_s <= tp2_f:
+                                                    tp2_hit = True
+
+                                                if tp2_hit:
+                                                    kapanacak_semboller.append(p_tid)
+                                                    poz["kapat_nedeni"] = f"🎯 V34 TP2: Hedef fiyat ${tp2_f:.4f} ulaşıldı! Tam kapatma."
+                                                    self._log_ekle(
+                                                        f"🌟 V34 TP2 ALINDI: {p_sembol} | Hedef ${tp2_f:.4f} ulaşıldı. Kalan pozisyon kapatlıyor.",
+                                                        is_breakout=True
+                                                    )
+                                                    # V34: Telegram TP2 Bildirimi
+                                                    import threading as _th
+                                                    _th.Thread(
+                                                        target=send_telegram_msg,
+                                                        args=(
+                                                            f"🌟 <b>TP2 ALINDI! TAM KAPATMA</b>\n"
+                                                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                                                            f"📌 <b>Coin:</b> {p_sembol}\n"
+                                                            f"💰 <b>Hedef:</b> ${tp2_f:.4f} ulaşıldı\n"
+                                                            f"🔑 <b>Trade ID:</b> #{p_tid}",
+                                                        ),
+                                                        daemon=True,
+                                                    ).start()
 
                                             if poz.get("ts_aktif"):
                                                 ts_hit = False

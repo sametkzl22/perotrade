@@ -1,6 +1,7 @@
 # ─────────────────────────────────────────────
-# PeroTrade Pro — Konfigürasyon v29
+# PeroTrade Pro — Konfigürasyon V34
 # 7/24 Bileşik Faiz Sistemi + Binance Futures
+# V34: TP1/TP2 Kısmi Kapatma (Partial Take Profit)
 # ─────────────────────────────────────────────
 
 # ───── Binance API (Gerçek İşlem İçin) ─────
@@ -57,6 +58,10 @@ SLIPPAGE_OB_DEPTH = 5              # Kontrol edilecek kademe sayısı
 
 # ───── V29: Confidence-Based Sizing (Free Will) ─────
 CONFIDENCE_BASED_SIZING = True     # True = güvene dayalı dinamik margin, False = eski TRADE_RISK_PCT
+
+# ───── V34: Kısmi Kapatma (Partial Take Profit) ─────
+TP1_ROE_PCT = 2.0    # TP1 hedefi: %2 ROE’de pozisyonun %50’sini kapat, SL’yi Break-Even’e çek
+TP2_ROE_PCT = 5.0    # TP2 hedefi: %5 ROE’de kalan pozisyonu tamamen kapat
 
 # ───── Likidite Filtresi (V25) ─────
 MIN_24H_VOLUME_USDT = 50_000_000  # 24s hacim < 50M USDT olan coinler asla taranmaz

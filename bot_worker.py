@@ -1,10 +1,11 @@
 """
-Bot Worker — Global Singleton + Background Thread Manager (v11)
-================================================================
+Bot Worker — Global Singleton + Background Thread Manager (v11 / V34)
+=====================================================================
 Streamlit UI'dan bağımsız çalışan arka plan işçisi.
 @st.cache_resource ile oluşturulur, sekme kapansa bile process
 yaşadığı sürece bellekte kalır ve bot 7/24 çalışmaya devam eder.
 v11: Binance Futures entegrasyonu, Cooling, GC, Auto-Reconnect.
+V34: TP1/TP2 Kısmi Kapatma (Partial Take Profit) + Break-Even SL.
 """
 
 import gc
@@ -1436,6 +1437,17 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 dsl_fiyat = likidasyon_hesapla(sinyal, fiyat, tavsiye_kaldirac)
 
                             tid = trade_id_olustur()
+
+                            # V34: TP1 (%2 ROE) ve TP2 (%5 ROE) hedef fiyat hesaplama
+                            tp1_pct = getattr(cfg, "TP1_ROE_PCT", 2.0) / 100.0
+                            tp2_pct = getattr(cfg, "TP2_ROE_PCT", 5.0) / 100.0
+                            if sinyal == "LONG":
+                                tp1_f = fiyat * (1 + tp1_pct / tavsiye_kaldirac)
+                                tp2_f = fiyat * (1 + tp2_pct / tavsiye_kaldirac)
+                            else:  # SHORT
+                                tp1_f = fiyat * (1 - tp1_pct / tavsiye_kaldirac)
+                                tp2_f = fiyat * (1 - tp2_pct / tavsiye_kaldirac)
+
                             yeni_poz = {
                                 "trade_id": tid,
                                 "sembol": secilen_sembol,
@@ -1451,7 +1463,11 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 "trailing_stop_fiyat": 0.0,
                                 "acilis_zamani": time.time(),
                                 "giris_nedeni": karar_paketi.get("dusunce", "")[:120],
-                                "beklenen_hedef": karar_paketi.get("expected_growth", 0.0)
+                                "beklenen_hedef": karar_paketi.get("expected_growth", 0.0),
+                                # V34: Kısmi Kapatma (Partial Take Profit)
+                                "tp1_fiyat": round(tp1_f, 8),
+                                "tp2_fiyat": round(tp2_f, 8),
+                                "tp1_yapildi": False,
                             }
                             state["aktif_pozisyonlar"][tid] = yeni_poz
                             state["bakiye"] -= margin
