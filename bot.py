@@ -130,17 +130,45 @@ def main():
     print("=" * 60)
 
     # ── 4. Watchdog Döngüsü ──
+    memory_warning_threshold = 1000  # 1 GB
     while _running:
         try:
+            # Memory Guard RAM Denetimi (Ultra-Lightweight Observer Check)
+            try:
+                import psutil
+                process = psutil.Process(os.getpid())
+                mem_mb = process.memory_info().rss / (1024 * 1024)
+                ui_mem_mb = 0
+                if streamlit_proc and streamlit_proc.poll() is None:
+                    try:
+                        ui_proc = psutil.Process(streamlit_proc.pid)
+                        ui_mem_mb = ui_proc.memory_info().rss / (1024 * 1024)
+                    except psutil.NoSuchProcess:
+                        pass
+                
+                total_mem = mem_mb + ui_mem_mb
+                if total_mem > memory_warning_threshold:
+                    print(f"⚠️ [MEMORY GUARD] Kritik RAM Seviyesi! Toplam: {total_mem:.0f}MB (Engine: {mem_mb:.0f}MB, UI: {ui_mem_mb:.0f}MB)")
+                
+                # Sadece her 5 döngüde bir debug yazdır (15 saniyede bir)
+                if int(time.time()) % 15 == 0:
+                    print(f"📊 Heartbeat | Engine RAM: {mem_mb:.0f}MB | UI RAM: {ui_mem_mb:.0f}MB")
+            except ImportError:
+                pass  # psutil yoksa atla
+
             # Engine sağlık kontrolü
             engine_th = getattr(worker, "_engine_thread", None)
             if engine_th and not engine_th.is_alive() and worker.is_running:
                 print("⚠️ Engine thread durmuş, yeniden başlatılıyor...")
                 worker.start()
 
-            # Dashboard sağlık kontrolü + yeniden başlatma
-            if streamlit_proc and streamlit_proc.poll() is not None:
-                print("⚠️ Dashboard kapandı. Yeniden başlatılıyor...")
+            # Otonom UI Uyanma & Sağlık Kontrolü
+            should_run_ui = not headless
+            lock_exists = os.path.exists(lock_path)
+            
+            # Eğer lock varsa ve UI headless mod istenmediyse, UI kapalıysa otonom uyandır
+            if should_run_ui and lock_exists and (streamlit_proc is None or streamlit_proc.poll() is not None):
+                print("⚠️ Dashboard aktif değil (active_session.lock bulundu). Otonom yeniden başlatılıyor...")
                 try:
                     streamlit_proc = subprocess.Popen(
                         [

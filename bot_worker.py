@@ -1,9 +1,8 @@
 """
 Bot Worker — Global Singleton + Background Thread Manager (v11 / V34)
 =====================================================================
-Streamlit UI'dan bağımsız çalışan arka plan işçisi.
-@st.cache_resource ile oluşturulur, sekme kapansa bile process
-yaşadığı sürece bellekte kalır ve bot 7/24 çalışmaya devam eder.
+Streamlit UI'dan bağımsız çalışan arka plan motor sınıfı.
+bot.py tarafından arka plan thread'i olarak başlatılır.
 v11: Binance Futures entegrasyonu, Cooling, GC, Auto-Reconnect.
 V34: TP1/TP2 Kısmi Kapatma (Partial Take Profit) + Break-Even SL.
 """
@@ -29,6 +28,7 @@ import persistent_state as ps
 import data_logger
 import train_model
 from data_provider import DataProvider
+from utils import pnl_hesapla, aktif_margin_toplami, pnl_hesapla_coklu, gunluk_kar_hesapla, likidasyon_hesapla
 
 
 # ─────────────────────────────────────────────
@@ -389,25 +389,9 @@ def log_ekle(mesaj: str, state: dict, is_breakout=False, is_liq=False):
         state["ai_dusunce_gunlugu"].pop()
 
 
-def pnl_hesapla(pozisyon, giris, anlik, miktar, kaldirac) -> float:
-    if pozisyon == "YOK" or giris == 0:
-        return 0.0
-    margin = miktar / kaldirac
-    if pozisyon == "LONG":
-        pnl_pct = ((anlik - giris) / giris)
-    else:
-        pnl_pct = ((giris - anlik) / giris)
-    return margin * pnl_pct * kaldirac
-
-
-def likidasyon_hesapla(pozisyon, giris, kaldirac) -> float:
-    if pozisyon == "YOK" or giris == 0:
-        return 0.0
-    if pozisyon == "LONG":
-        return giris * (1 - (1 / kaldirac))
-    elif pozisyon == "SHORT":
-        return giris * (1 + (1 / kaldirac))
-    return 0.0
+# ─── Math fonksiyonları artık utils.py'den geliyor (backward compat re-export) ───
+# pnl_hesapla, likidasyon_hesapla, aktif_margin_toplami, pnl_hesapla_coklu, gunluk_kar_hesapla
+# import satırında yukarıda tanımlı.
 
 
 def trade_id_olustur() -> str:
@@ -427,29 +411,6 @@ def sembol_icin_trade_id_bul(pozisyonlar: dict, sembol: str) -> str | None:
             return tid
     return None
 
-
-def aktif_margin_toplami(pozisyonlar: dict) -> float:
-    return sum(p.get("islem_margin", 0) for p in pozisyonlar.values())
-
-
-def pnl_hesapla_coklu(pozlar, guncel_fiyatlar: dict) -> float:
-    toplam_pnl = 0.0
-    for tid, poz in pozlar.items():
-        s = poz.get("sembol", tid)  # Geriye uyum: eski format sembol key ise tid=sembol
-        anlik = guncel_fiyatlar.get(s, poz.get("giris_fiyati", 0))
-        p_pnl = pnl_hesapla(poz.get("pozisyon", "YOK"), poz.get("giris_fiyati", 0), anlik,
-                             poz.get("islem_margin", 0) * poz.get("islem_kaldirac", 1),
-                             poz.get("islem_kaldirac", 1))
-        toplam_pnl += p_pnl
-    return toplam_pnl
-
-
-def gunluk_kar_hesapla(state: dict) -> float:
-    gun_baslangic = state.get("gun_baslangic_bakiye", state.get("baslangic_bakiye", cfg.INITIAL_BALANCE))
-    if gun_baslangic <= 0:
-        return 0.0
-    mevcut = state.get("bakiye", gun_baslangic) + aktif_margin_toplami(state.get("aktif_pozisyonlar", {}))
-    return ((mevcut - gun_baslangic) / gun_baslangic) * 100
 
 
 def islem_gecmisi_kaydet(gecmis: list, dosya="trade_history.csv"):

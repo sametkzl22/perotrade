@@ -9,9 +9,15 @@ v29: order_purpose, ai_confidence, liquidity_depth_score kolonları.
 
 import sqlite3
 import os
-import ccxt
 import sys
 from datetime import datetime, timezone
+
+# Lazy ccxt import — Dashboard process'e sızmaması için
+try:
+    import ccxt
+    _CcxtBaseError = ccxt.BaseError
+except ImportError:
+    _CcxtBaseError = OSError
 
 
 import sqlite3
@@ -97,7 +103,7 @@ def _init_db(db_path: str):
             CREATE INDEX IF NOT EXISTS idx_islem_etiket ON islem_log(etiket);
         """)
         conn.close()
-    except (ccxt.BaseError, sqlite3.Error, Exception) as e:
+    except (_CcxtBaseError, sqlite3.Error, Exception) as e:
         print(f"⚠️ data_logger init hatası: {e}")
 
 
@@ -121,10 +127,10 @@ def _migrate_db(db_path: str):
             try:
                 conn.execute(sql)
                 conn.commit()
-            except (ccxt.BaseError, sqlite3.Error, Exception):
+            except (_CcxtBaseError, sqlite3.Error, Exception):
                 pass  # Zaten var
         conn.close()
-    except (ccxt.BaseError, sqlite3.Error, Exception):
+    except (_CcxtBaseError, sqlite3.Error, Exception):
         pass
 
 
@@ -155,7 +161,7 @@ def _db_writer_worker():
                     )
                     conn.commit()
                     conn.close()
-                except (ccxt.BaseError, sqlite3.Error, Exception) as e:
+                except (_CcxtBaseError, sqlite3.Error, Exception) as e:
                     print(f"⚠️ DB Queue Tarama Insert Error: {e}")
             
             elif task_type == "islem":
@@ -176,11 +182,11 @@ def _db_writer_worker():
                     conn.commit()
                     conn.close()
                     print(f"✅ Trade logged to DB via Queue: {data['sembol']} {data['tip']} [tid:{data['trade_id']}] (PNL: ${data['pnl']:.2f})")
-                except (ccxt.BaseError, sqlite3.Error, Exception) as e:
+                except (_CcxtBaseError, sqlite3.Error, Exception) as e:
                     print(f"⚠️ DB Queue Islem Insert Error: {e}")
             
             _write_queue.task_done()
-        except (ccxt.BaseError, sqlite3.Error, Exception) as e:
+        except (_CcxtBaseError, sqlite3.Error, Exception) as e:
             print(f"⚠️ DB Worker Exception: {e}")
 
 # Start the background writer thread
@@ -245,7 +251,7 @@ def basari_orani_getir(son_n: int = 100) -> dict:
             "zarari": zarari,
             "oran": round((karli / len(rows)) * 100, 1) if rows else 0.0
         }
-    except (ccxt.BaseError, sqlite3.Error, Exception):
+    except (_CcxtBaseError, sqlite3.Error, Exception):
         return {"toplam": 0, "karli": 0, "zarari": 0, "oran": 0.0}
 
 
@@ -267,7 +273,7 @@ def son_islemler_getir(limit: int = 50) -> list:
              "order_purpose": r[10], "ai_confidence": r[11], "liquidity_depth_score": r[12]}
             for r in rows
         ]
-    except (ccxt.BaseError, sqlite3.Error, Exception):
+    except (_CcxtBaseError, sqlite3.Error, Exception):
         return []
 
 
@@ -281,7 +287,7 @@ def skor_gecmisi_getir(sembol: str, limit: int = 50) -> list:
         ).fetchall()
         conn.close()
         return [{"zaman": r[0], "skor": r[1], "fiyat": r[2], "karar": r[3]} for r in rows]
-    except (ccxt.BaseError, sqlite3.Error, Exception):
+    except (_CcxtBaseError, sqlite3.Error, Exception):
         return []
 
 
@@ -323,7 +329,7 @@ def en_iyi_korelasyonlari_getir(limit: int = 50) -> dict:
             "ortalama_hacim_artis": round(hacim_total / sayac, 2),
             "orneklem_sayisi": sayac
         }
-    except (ccxt.BaseError, sqlite3.Error, Exception):
+    except (_CcxtBaseError, sqlite3.Error, Exception):
         return {}
 
 
@@ -340,7 +346,7 @@ def gercek_pnl_getir(baslangic_zamani_timestamp: float) -> float:
         if row and row[0] is not None:
             return float(row[0])
         return 0.0
-    except (ccxt.BaseError, sqlite3.Error, Exception) as e:
+    except (_CcxtBaseError, sqlite3.Error, Exception) as e:
         print(f"⚠️ PNL Doğrulama Hatası: {e}")
         return 0.0
 
@@ -359,7 +365,7 @@ def challenge_pnl_getir(baslangic_zamani_timestamp: float) -> float:
         if row and row[0] is not None:
             return float(row[0])
         return 0.0
-    except (ccxt.BaseError, sqlite3.Error, Exception) as e:
+    except (_CcxtBaseError, sqlite3.Error, Exception) as e:
         print(f"⚠️ Challenge PNL Doğrulama Hatası: {e}")
         return 0.0
 
@@ -387,5 +393,5 @@ def evo_islemler_getir(limit: int = 200) -> list:
              "order_purpose": r[14], "ai_confidence": r[15], "liquidity_depth_score": r[16]}
             for r in rows
         ]
-    except (ccxt.BaseError, sqlite3.Error, Exception):
+    except (_CcxtBaseError, sqlite3.Error, Exception):
         return []

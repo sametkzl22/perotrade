@@ -1,7 +1,8 @@
 """
-PeroTrade Pro — AI Dashboard Viewer (Engine-First Architecture)
-===============================================================
-Bu dosya sadece görselleştirme yapar. Motor yönetimi bot.py tarafından yapılır.
+PeroTrade Pro — Ultra-Lightweight Dashboard Observer
+=====================================================
+Sıfır ağır bağımlılık: ccxt, xgboost, joblib, bot_worker ASLA import edilmez.
+Sadece utils.py (math), persistent_state.py (JSON I/O), config.py (sabitler).
 
 Veri Kaynağı: persistent_state.json (okuma)
 IPC Kanalı:   data/ui_settings.json, data/stop_signal.flag, data/close_commands.json
@@ -20,8 +21,7 @@ import streamlit.components.v1 as components
 
 import config as cfg
 import persistent_state as ps
-from bot_worker import aktif_margin_toplami, pnl_hesapla, pnl_hesapla_coklu
-import data_logger
+from utils import aktif_margin_toplami, pnl_hesapla, pnl_hesapla_coklu, gunluk_kar_hesapla
 
 
 # ─────────────────────────────────────────────
@@ -161,12 +161,8 @@ if "_onboarding_passed" not in st.session_state:
 # ─────────────────────────────────────────────
 # Yardımcı UI Fonksiyonları
 # ─────────────────────────────────────────────
-def gunluk_kar_hesapla_ui(snap):
-    gun_baslangic = snap.get("gun_baslangic_bakiye", snap.get("baslangic_bakiye", cfg.INITIAL_BALANCE))
-    if gun_baslangic <= 0:
-        return 0.0
-    mevcut = snap.get("bakiye", gun_baslangic) + aktif_margin_toplami(snap.get("aktif_pozisyonlar", {}))
-    return ((mevcut - gun_baslangic) / gun_baslangic) * 100
+# gunluk_kar_hesapla artık utils.py'den geliyor (import satırında yukarıda)
+guunluk_kar_hesapla_ui = gunluk_kar_hesapla  # backward compat alias
 
 
 # ─────────────────────────────────────────────
@@ -1035,7 +1031,9 @@ with tab_tv:
 
 with tab_gecmis:
     st.markdown("### 📚 Geçmiş Performans (SQLite Veritabanı)")
-    stats = data_logger.basari_orani_getir(son_n=100)
+    # Lazy import: data_logger sadece bu tab açıldığında yüklenir
+    import data_logger as _dl
+    stats = _dl.basari_orani_getir(son_n=100)
     
     st.markdown("#### Kümülatif Kâr/Zarar Başarısı (Son 100 İşlem)")
     gc1, gc2, gc3, gc4 = st.columns(4)
@@ -1045,7 +1043,7 @@ with tab_gecmis:
     gc4.metric("Başarı Oranı", f"%{stats['oran']}")
     
     st.markdown("---")
-    islemler = data_logger.son_islemler_getir(limit=50)
+    islemler = _dl.son_islemler_getir(limit=50)
     if islemler:
         df_log = pd.DataFrame(islemler)
         
