@@ -1,8 +1,11 @@
 """
-PeroTrade Pro — Headless Bot v5
-===============================
+PeroTrade Pro — Headless Bot v6 (V35)
+======================================
 7/24 arka planda çalışan, UI gerektirmeyen otonom trading engine.
 Persistent state ile PC yeniden başladığında kaldığı yerden devam eder.
+
+V35: active_session.lock veya bot durumu 'Çalışıyor' ise
+     BotWorker üzerinden otonom başlatma (arayüz gerektirmez).
 
 Kullanım:
     python bot.py              # Headless mod (UI yok)
@@ -12,6 +15,7 @@ Kullanım:
 import time
 import signal
 import sys
+import os
 from datetime import datetime, timezone
 
 import ccxt
@@ -32,6 +36,68 @@ def signal_handler(sig, frame):
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
+
+
+# ─────────────────────────────────────────────
+# V35: Otonom BotWorker Başlatma Kontrolü
+# ─────────────────────────────────────────────
+def _headless_botworker_baslat():
+    """active_session.lock varsa veya bot durumu 'Çalışıyor' ise
+    BotWorker'ı arayüz olmadan otonom başlatır.
+    True dönerse ana döngüye geçmez (BotWorker üzerinden çalışır).
+    """
+    lock_path = ps.get_lock_file_path()
+    lock_var = os.path.exists(lock_path)
+
+    # State'den bot durumunu kontrol et
+    try:
+        state = ps.state_yukle()
+        bot_calisiyor = state.get("bot_calisiyor", False)
+        bot_durumu = state.get("bot_durumu", "")
+    except Exception:
+        bot_calisiyor = False
+        bot_durumu = ""
+
+    if lock_var or bot_calisiyor or bot_durumu == "Çalışıyor":
+        neden = "Lock dosyası" if lock_var else f"Bot durumu: {bot_durumu}"
+        print(f"\n🔄 [V35 AUTOSTART] {neden} algılandı → BotWorker otonom başlatılıyor...")
+
+        try:
+            from bot_worker import BotWorker
+            worker = BotWorker()
+
+            if not worker.is_running:
+                worker.start()
+                print("✅ BotWorker otonom olarak başlatıldı (Headless mod)")
+            else:
+                print("✅ BotWorker zaten çalışıyor (Bootstrap tarafından başlatıldı)")
+
+            # Ana thread'i sinyal bekletecek şekilde canlı tut
+            print("🤖 Bot 7/24 çalışıyor. Durdurmak için Ctrl+C")
+            print("=" * 60)
+
+            global running
+            while running:
+                try:
+                    if not worker.is_running:
+                        print("⚠️ BotWorker durmuş, yeniden başlatılıyor...")
+                        worker.start()
+                    time.sleep(5)
+                except KeyboardInterrupt:
+                    break
+
+            # Temiz çıkış
+            print("\n⛔ Headless mod durduruluyor...")
+            worker.stop()
+            print("👋 Bot güvenle durduruldu.")
+            return True
+
+        except Exception as e:
+            print(f"❌ BotWorker başlatma hatası: {e}")
+            print("⚠️ Fallback: Eski headless moda geçiliyor...")
+            return False
+
+    return False
 
 
 # ─────────────────────────────────────────────
@@ -81,15 +147,22 @@ def likidasyon_hesapla(tip, fiyat, kaldirac):
 
 
 # ─────────────────────────────────────────────
-# Ana Bot Döngüsü (Headless)
+# Ana Bot Döngüsü (Headless — Fallback)
 # ─────────────────────────────────────────────
 def main():
     global running
     
     print("=" * 60)
-    print("  🤖 PeroTrade Pro — Headless Bot v5")
+    print("  🤖 PeroTrade Pro — Headless Bot v6 (V35)")
     print("  7/24 Otonom Algoritmik Trading Sistemi")
     print("=" * 60)
+
+    # V35: Önce BotWorker ile otonom başlatmayı dene
+    if _headless_botworker_baslat():
+        return  # BotWorker başarıyla çalıştı, eski fallback'e gerek yok
+    
+    # ── Eski Fallback Headless Mod ──
+    print("📋 Fallback headless mod aktif (BotWorker kullanılmıyor)")
     
     # Persistent state yükle
     state = ps.state_yukle()

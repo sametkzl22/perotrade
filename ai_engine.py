@@ -1621,16 +1621,45 @@ def haber_vetosu(haber_puanlari: dict, teknik_karar: str) -> dict:
 
 
 # ─────────────────────────────────────────────
-# 11) Yerel ML Model Yönetimi (XGBoost)
+# 11) Yerel ML Model Yönetimi (XGBoost) + V35 Scaler
 # ─────────────────────────────────────────────
 _ml_model = None
 _ml_model_lock = threading.Lock()
 _ml_model_mtime = 0.0
 
+_ml_scaler = None
+_ml_scaler_lock = threading.Lock()
+_ml_scaler_mtime = 0.0
+
 
 def _get_model_path() -> str:
     base = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base, getattr(cfg, "ML_MODEL_PATH", "models/xgb_model.joblib"))
+
+
+def _get_scaler_path() -> str:
+    base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, "models", "scaler.joblib")
+
+
+def _load_scaler():
+    """V35: StandardScaler dosyasını yükle ve global cache'e al. Thread-safe."""
+    global _ml_scaler, _ml_scaler_mtime
+    scaler_path = _get_scaler_path()
+    if not os.path.exists(scaler_path):
+        return None
+    try:
+        import joblib
+        mtime = os.path.getmtime(scaler_path)
+        with _ml_scaler_lock:
+            if _ml_scaler is not None and mtime == _ml_scaler_mtime:
+                return _ml_scaler
+            _ml_scaler = joblib.load(scaler_path)
+            _ml_scaler_mtime = mtime
+            return _ml_scaler
+    except (ccxt.BaseError, sqlite3.Error, Exception) as e:
+        print(f"⚠️ Scaler yüklenemedi: {e}")
+        return None
 
 
 def _load_ml_model():
@@ -1703,9 +1732,10 @@ def local_ml_karar(sembol: str, pazar: dict, sma_sinyal: str, acik_pozisyon: str
                    mod: str = "", mtf_guc: int = 0, order_flow: dict = None,
                    ensemble_df: pd.DataFrame = None) -> dict:
     """
-    Yerel ML model (XGBoost) ile anında karar verir.
+    V35: Yerel ML model (XGBoost) ile anında karar verir.
     Model yoksa mock_ai_karar'a fallback yapar.
-    Sınıf: 0=BEKLE, 1=LONG, 2=SHORT, 3=KAPAT
+    Sınıf: 0=BEKLE, 1=LONG, 2=SHORT (3 sınıflı yapı)
+    predict_proba %60 altındaysa → BEKLE'ye çekilir.
     """
     if not isinstance(pazar, dict):
         return {"sembol": sembol, "karar": "BEKLE", "skor": 0, "dusunce": "Pazar verisi yok",
@@ -1730,15 +1760,27 @@ def local_ml_karar(sembol: str, pazar: dict, sma_sinyal: str, acik_pozisyon: str
         features = _build_feature_vector(pazar, sma_sinyal, btc_trendi, fonlama, mtf_guc)
         features_2d = features.reshape(1, -1)
 
-        sinif_map = {0: "BEKLE", 1: "LONG", 2: "SHORT", 3: "KAPAT"}
+        # V35: StandardScaler ile normalize et
+        scaler = _load_scaler()
+        if scaler is not None:
+            features_2d = scaler.transform(features_2d)
+
+        # V35: 3 sınıflı yapı (KAPAT kaldırıldı)
+        sinif_map = {0: "BEKLE", 1: "LONG", 2: "SHORT"}
         tahmin = int(model.predict(features_2d)[0])
         karar = sinif_map.get(tahmin, "BEKLE")
 
-        # Olasılık tabanlı güven skoru
+        # V35: Olasılık tabanlı güven skoru + %60 eşik kontrolü
         ml_guven = guven
         if hasattr(model, "predict_proba"):
             probas = model.predict_proba(features_2d)[0]
-            ml_guven = float(max(probas)) * 100.0
+            max_proba = float(max(probas))
+            ml_guven = max_proba * 100.0
+
+            # V35: Tahmin olasılığı %60'ın altındaysa → BEKLE'ye çek
+            if max_proba < 0.60 and karar in ["LONG", "SHORT"]:
+                karar = "BEKLE"
+                neden_ek = f"⚠️ [ML DÜŞÜK GÜVEN] Olasılık %{max_proba*100:.1f} < %60 eşiği. Sinyal BEKLE'ye çekildi."
 
         # Açık pozisyon mantığı: Aynı yönde tekrar açma, ters yöndeyse KAPAT
         if acik_pozisyon != "YOK":
