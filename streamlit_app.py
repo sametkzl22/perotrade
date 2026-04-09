@@ -1,15 +1,18 @@
 """
-Kripto Paper-Trading Bot — AI Dashboard v5
-==========================================
-Background Worker mimarisi: Bot arka planda 7/24 çalışır,
-UI sadece Global Singleton'dan veri okur.
+PeroTrade Pro — AI Dashboard Viewer (Engine-First Architecture)
+===============================================================
+Bu dosya sadece görselleştirme yapar. Motor yönetimi bot.py tarafından yapılır.
+
+Veri Kaynağı: persistent_state.json (okuma)
+IPC Kanalı:   data/ui_settings.json, data/stop_signal.flag, data/close_commands.json
 """
 
-import threading
+import json
 import time
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -17,17 +20,86 @@ import streamlit.components.v1 as components
 
 import config as cfg
 import persistent_state as ps
-from bot_worker import BotWorker, GlobalBotState, aktif_margin_toplami, pnl_hesapla, pnl_hesapla_coklu, islem_kapat_with_retry
+from bot_worker import aktif_margin_toplami, pnl_hesapla, pnl_hesapla_coklu
 import data_logger
 
 
 # ─────────────────────────────────────────────
-# Singleton Worker (@st.cache_resource)
+# IPC Helpers (Dashboard → Engine)
 # ─────────────────────────────────────────────
-@st.cache_resource
-def get_bot_worker() -> BotWorker:
-    """Process boyunca tek instance. Sekme kapansa bile yaşar."""
-    return BotWorker()
+_APP_DIR = ps.get_app_path()
+_DATA_DIR = os.path.join(_APP_DIR, "data")
+
+
+def _engine_is_running() -> bool:
+    """Engine çalışıyor mu? Lock dosyasını kontrol eder."""
+    return os.path.exists(ps.get_lock_file_path())
+
+
+def _write_ui_setting(key: str, value):
+    """Dashboard'dan engine'e tek bir ayar gönder."""
+    settings_file = os.path.join(_DATA_DIR, "ui_settings.json")
+    os.makedirs(_DATA_DIR, exist_ok=True)
+    try:
+        existing = {}
+        if os.path.exists(settings_file):
+            with open(settings_file, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        existing[key] = value
+        with open(settings_file, "w", encoding="utf-8") as f:
+            json.dump(existing, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _write_ui_settings(updates: dict):
+    """Birden fazla ayarı toplu gönder."""
+    settings_file = os.path.join(_DATA_DIR, "ui_settings.json")
+    os.makedirs(_DATA_DIR, exist_ok=True)
+    try:
+        existing = {}
+        if os.path.exists(settings_file):
+            with open(settings_file, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        existing.update(updates)
+        with open(settings_file, "w", encoding="utf-8") as f:
+            json.dump(existing, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _request_stop():
+    """Engine'e durdurma sinyali gönder (IPC flag)."""
+    os.makedirs(_DATA_DIR, exist_ok=True)
+    Path(os.path.join(_DATA_DIR, "stop_signal.flag")).touch()
+
+
+def _request_start():
+    """Engine'e başlatma sinyali gönder (IPC flag)."""
+    os.makedirs(_DATA_DIR, exist_ok=True)
+    Path(os.path.join(_DATA_DIR, "start_signal.flag")).touch()
+
+
+def _request_close_trade(trade_id: str, fiyat: float = 0):
+    """Engine'e pozisyon kapatma komutu gönder (IPC command)."""
+    cmd_file = os.path.join(_DATA_DIR, "close_commands.json")
+    os.makedirs(_DATA_DIR, exist_ok=True)
+    try:
+        existing = []
+        if os.path.exists(cmd_file):
+            with open(cmd_file, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        existing.append({"trade_id": trade_id, "fiyat": fiyat})
+        with open(cmd_file, "w", encoding="utf-8") as f:
+            json.dump(existing, f)
+    except Exception:
+        pass
+
+
+def _switch_mode(use_real_api: bool):
+    """Demo/Real mod değiştir."""
+    ps.set_last_mode(use_real_api)
+    _write_ui_setting("use_real_api", use_real_api)
 
 
 def get_app_path():
@@ -72,45 +144,18 @@ st.markdown("""
 
 
 # ─────────────────────────────────────────────
-# Worker Singleton'ı Al
+# State Okuma (Persistent JSON — Read-Only Snapshot)
 # ─────────────────────────────────────────────
-worker = get_bot_worker()
-
-import signal
-import sys
-
-def handle_sigterm(signum, frame):
-    print("🛑 SIGTERM Sinyali Alındı. Graceful Shutdown başlatılıyor...")
-    if worker.state.get("bot_calisiyor", False):
-        worker.stop()
-    sys.exit(0)
-
-try:
-    signal.signal(signal.SIGTERM, handle_sigterm)
-    signal.signal(signal.SIGINT, handle_sigterm)
-except ValueError:
-    pass  # Sadece main thread'de çalışır, Streamlit thread'lerinde atla.
-
-# Graceful Auto-Start Logic
-if worker.state.get("bot_calisiyor", False):
-    engine_th = getattr(worker, "_engine_thread", None)
-    if engine_th is None or not engine_th.is_alive():
-        print("🔄 [Auto-Resume] Otonom mod aktif algılandı. Motor ve WebSocket başlatılıyor...")
-        try:
-            worker.start()
-        except Exception as e:
-            print(f"⚠️ [Auto-Resume] Başlatma Hatası: {e}")
+S = ps.state_yukle()
+_is_running = _engine_is_running()
 
 # UI-only session state (görünüm modu gibi)
 if "view_mode" not in st.session_state:
     st.session_state.view_mode = "📊 Profesyonel Dashboard"
 if "_onboarding_passed" not in st.session_state:
-    st.session_state._onboarding_passed = not worker.state.get("use_real_api", False) and not worker.state.get("api_key_enc", "")
-    if worker.state.get("api_key_enc", ""):
+    st.session_state._onboarding_passed = not S.get("use_real_api", False) and not S.get("api_key_enc", "")
+    if S.get("api_key_enc", ""):
         st.session_state._onboarding_passed = True
-
-# State snapshot (thread-safe kopya)
-S = worker.state.snapshot()
 
 
 # ─────────────────────────────────────────────
@@ -158,17 +203,28 @@ def api_kurulum_ekrani():
                             })
                             test_exc.fetch_balance()
                             
-                            worker.state.set("use_real_api", True)
-                            worker.state.set("api_key_enc", ps.encode_key(api_k))
-                            worker.state.set("api_secret_enc", ps.encode_key(sec_k))
-                            worker.state.save_to_persistent()
+                            # IPC: Engine'e API keys gönder + persistent state'e kaydet
+                            enc_key = ps.encode_key(api_k)
+                            enc_sec = ps.encode_key(sec_k)
+                            _write_ui_settings({
+                                "use_real_api": True,
+                                "api_key_enc": enc_key,
+                                "api_secret_enc": enc_sec,
+                            })
+                            ps.set_last_mode(True)
+                            # Persistent state'e de yaz (crash recovery için)
+                            state = ps.state_yukle()
+                            state["use_real_api"] = True
+                            state["api_key_enc"] = enc_key
+                            state["api_secret_enc"] = enc_sec
+                            ps.state_kaydet(state)
                             st.session_state._onboarding_passed = True
                             st.rerun()
                         except Exception as e:
                             err_placeholder.error(f"❌ API Bağlantı Hatası: Lütfen anahtarlarınızı kontrol edin. ({e})")
                 else:
-                    worker.state.set("use_real_api", False)
-                    worker.state.save_to_persistent()
+                    _write_ui_setting("use_real_api", False)
+                    ps.set_last_mode(False)
                     st.session_state._onboarding_passed = True
                     st.rerun()
     st.stop()
@@ -182,7 +238,8 @@ if not st.session_state.get("_onboarding_passed", True):
     b1, b2 = st.columns(2)
     with b1:
         if st.button("🔑 Gerçek Binance API Kurulumu", use_container_width=True):
-            worker.state.set("use_real_api", True)
+            _write_ui_setting("use_real_api", True)
+            ps.set_last_mode(True)
             st.rerun()
     with b2:
         if st.button("🎮 Sanal Parayla (Paper Trading) Başla", use_container_width=True, type="primary"):
@@ -197,16 +254,20 @@ if not st.session_state.get("_onboarding_passed", True):
 with st.sidebar:
     st.markdown("## ⚙️ Kontrol Paneli")
 
+    # Motor durumu banner
+    if not _is_running:
+        st.warning("⚠️ Motor çalışmıyor. `python3 bot.py` ile başlatın.")
+
     # Çalışma Modu
     cur_is_real = S.get("use_real_api", False)
     cur_mod_str = "💰 Real (Binance API)" if cur_is_real else "🎮 Demo (Sanal Para)"
     yeni_mod = st.radio("🕹️ Çalışma Modu", ["🎮 Demo (Sanal Para)", "💰 Real (Binance API)"],
                         index=1 if cur_is_real else 0,
-                        disabled=worker.is_running)
+                        disabled=_is_running)
 
     if yeni_mod != cur_mod_str:
         new_real = (yeni_mod == "💰 Real (Binance API)")
-        worker.switch_mode(new_real)
+        _switch_mode(new_real)
         st.rerun()
 
     st.markdown("---")
@@ -255,50 +316,51 @@ with st.sidebar:
                         'options': {'defaultType': getattr(cfg, "FUTURES_TYPE", "future")}
                     })
                     
-                    # Test Bağlantısı - BAŞARISIZ OLURSA EXCEPTION ATACAKTIR
                     bal_data = test_exc.fetch_balance()
                     free_usdt = float(bal_data.get('USDT', {}).get('free', 0.0))
                     
-                    # BAŞARILI -> Şimdi Kaydet
-                    worker.state.set("api_key_enc", ps.encode_key(api_k))
-                    worker.state.set("api_secret_enc", ps.encode_key(sec_k))
-                    worker.state.save_to_persistent()
+                    # IPC: Engine'e gönder + persistent state'e kaydet
+                    enc_key = ps.encode_key(api_k)
+                    enc_sec = ps.encode_key(sec_k)
+                    _write_ui_settings({
+                        "api_key_enc": enc_key,
+                        "api_secret_enc": enc_sec,
+                    })
+                    state = ps.state_yukle()
+                    state["api_key_enc"] = enc_key
+                    state["api_secret_enc"] = enc_sec
+                    ps.state_kaydet(state)
                     
                     st.session_state.balance = free_usdt
                     ping_res.success(f"✅ Doğrulandı ve Kaydedildi! Gerçek Bakiye: ${free_usdt:.2f}")
                     time.sleep(1)
                     st.rerun()
-                except ccxt.AuthenticationError:
-                    ping_res.error("❌ Kimlik Doğrulama Hatası (Authentication Error): API anahtarlarınız geçersiz, IP kısıtlaması var veya süresi dolmuş.")
                 except Exception as e:
-                    ping_res.error(f"❌ Bağlantı Başarısız: Futures erişimi (Enable Futures) kapalı olabilir veya bakiye okunamadı. ({str(e)[:60]})")
+                    if "Authentication" in str(e):
+                        ping_res.error("❌ Kimlik Doğrulama Hatası: API anahtarlarınız geçersiz, IP kısıtlaması var veya süresi dolmuş.")
+                    else:
+                        ping_res.error(f"❌ Bağlantı Başarısız: ({str(e)[:60]})")
 
     st.markdown("---")
 
-    # Start / Stop
+    # Start / Stop (IPC ile)
     col1, col2 = st.columns(2)
     start_err = st.empty()
     with col1:
-        start_disabled = worker.is_running
+        start_disabled = _is_running
         if st.button("▶️ Başlat", use_container_width=True, type="primary", disabled=start_disabled):
             k_val = st.session_state.get("binance_key_input", "")
             s_val = st.session_state.get("binance_secret_input", "")
             if cur_is_real and (not k_val or not s_val):
-                start_err.error("⚠️ Lütfen gerçek işlem (Real Mode) için Binance API Key ve Secret bilgilerini girin!")
+                start_err.error("⚠️ Lütfen Real Mode için API Key ve Secret girin!")
             else:
-                worker.start()
+                _request_start()
+                time.sleep(1)
                 st.rerun()
     with col2:
-        if st.button("⏹️ Durdur", use_container_width=True, disabled=not worker.is_running):
-            worker.stop()
-            # Heartbeat: İradeli durdurma → lock dosyasını sil
-            # (handle_sigterm bu dosyayı SİLMEZ → sistem kapanışında bot geri gelir)
-            try:
-                lock_path = ps.get_lock_file_path()
-                if os.path.exists(lock_path):
-                    os.remove(lock_path)
-            except OSError:
-                pass
+        if st.button("⏹️ Durdur", use_container_width=True, disabled=not _is_running):
+            _request_stop()
+            time.sleep(1)
             st.rerun()
 
     # Mod seçimi
@@ -308,19 +370,14 @@ with st.sidebar:
     mevcut_idx = mod_listesi.index(mevcut_mod) if mevcut_mod in mod_listesi else 0
     secilen_mod = st.selectbox("🎯 İşlem Modu", mod_listesi, index=mevcut_idx)
     if secilen_mod != mevcut_mod:
-        worker.state.set("mod", secilen_mod)
+        _write_ui_setting("mod", secilen_mod)
         # Challenge mod aktivasyonu
         if secilen_mod == "🚀 94-Day Challenge":
-            ch = worker.state.get("challenge_session", {})
+            ch = S.get("challenge_session", {})
             if not isinstance(ch, dict):
                 ch = {}
             if not ch.get("aktif"):
-                # İlk kez aktifleştirme → sermaye girişi iste
                 st.session_state["_challenge_setup_pending"] = True
-        else:
-            # Başka moda geçildiğinde challenge durağan kalır (veriler silinmez)
-            pass
-        worker.state.save_to_persistent()
         st.rerun()
 
     # Challenge başlangıç sermayesi kurulum dialogu
@@ -350,8 +407,7 @@ with st.sidebar:
                 "cuzdan_gecmisi": [],
                 "max_drawdown": 0.0,
             }
-            worker.state.set("challenge_session", ch_yeni)
-            worker.state.save_to_persistent()
+            _write_ui_setting("challenge_session", ch_yeni)
             st.session_state["_challenge_setup_pending"] = False
             st.sidebar.success(f"✅ Challenge başlatıldı! Sanal Sermaye: ${ch_baslangic_sermaye:.2f}")
             time.sleep(1)
@@ -362,13 +418,13 @@ with st.sidebar:
                                   help="Kapatıldığında bot, haberlerdeki 'Savaş', 'Çöküş' gibi kelimeleri yoksayarak sadece teknik verilere göre işlem açar.")
     if haber_veto_aktif != cfg.ENABLE_NEWS_VETO:
         cfg.ENABLE_NEWS_VETO = haber_veto_aktif
+        _write_ui_setting("ENABLE_NEWS_VETO", haber_veto_aktif)
 
     # Opsiyonel Martingale Toggle
     mart_aktif = st.toggle("🔄 Martingale Stratejisi (Deneysel)", value=S.get("martingale_aktif", False), 
                            help="Sadece kayıplı işlemlerde bakiyeyi korumak için margin miktarını katlayarak yeni işlem açar.")
     if mart_aktif != S.get("martingale_aktif", False):
-        worker.state.set("martingale_aktif", mart_aktif)
-        worker.state.save_to_persistent()
+        _write_ui_setting("martingale_aktif", mart_aktif)
         
     # V19: Gelişmiş Risk Yönetimi Slider'ları
     st.sidebar.markdown("### 🛡️ Risk Yönetimi (V29)")
@@ -383,12 +439,10 @@ with st.sidebar:
         trade_risk_pct = st.sidebar.slider("İşlem Başına Risk (%)", min_value=1.0, max_value=50.0, value=float(S.get("trade_risk_pct", getattr(cfg, "TRADE_RISK_PCT", 10.0))), help="Her işleme toplam cüzdanın en fazla yüzde kaçı margin olarak ayrılabilir?")
     
     if max_wallet_risk_pct != S.get("max_wallet_risk_pct") or trade_risk_pct != S.get("trade_risk_pct"):
-        worker.state.set("max_wallet_risk_pct", max_wallet_risk_pct)
-        worker.state.set("trade_risk_pct", trade_risk_pct)
-        worker.state.save_to_persistent()
+        _write_ui_settings({"max_wallet_risk_pct": max_wallet_risk_pct, "trade_risk_pct": trade_risk_pct})
 
     # Bot durumu gösterge
-    if worker.is_running:
+    if _is_running:
         st.markdown(f"**🔵 Durum:** {S.get('bot_durumu', 'Çalışıyor')} (Analiz: {S.get('sonraki_analiz_sn', 0)}sn)")
     else:
         st.markdown(f"**🔴 Durum:** {S.get('bot_durumu', 'Durduruldu')}")
@@ -411,9 +465,10 @@ with st.sidebar:
     st.sidebar.markdown(f"**🔒 İşlemdeki Margin:** ${margin_total:.2f}")
 
     if st.sidebar.button("Günlük İstatistikleri ve Kilidi Sıfırla", use_container_width=True, help="Günlük kâr hedefine ulaşıldıysa ve botu tekrar çalıştırmak istiyorsanız bu butona basarak başlangıç bakiyesini güncelleyebilir ve Güvenli Mod'u kapatabilirsiniz."):
-        worker.state.set("gun_baslangic_bakiye", state_bakiye + margin_total)
-        worker.state.set("bot_durumu", "Çalışıyor (Resetlendi)")
-        worker.state.save_to_persistent()
+        _write_ui_settings({
+            "gun_baslangic_bakiye": state_bakiye + margin_total,
+            "bot_durumu": "Çalışıyor (Resetlendi)",
+        })
         st.sidebar.success("✅ Günlük İstatistikler ve Kâr Kilidi Sıfırlandı!")
         time.sleep(1)
         st.rerun()
@@ -428,16 +483,13 @@ with st.sidebar:
         ch_toplam_gun = getattr(cfg, "CHALLENGE_TOTAL_DAYS", 94)
         ch_baslangic = ch_data.get("baslangic_bakiye", 10.0)
         ch_gun_bas = ch_data.get("gun_baslangic_bakiye", 10.0)
-        # v10: Challenge bakiyesi = Başlangıç + Sadece Challenge Net PNL
         ch_bakiye = ch_data.get("bakiye", ch_gun_bas)
         ch_hedef = getattr(cfg, "CHALLENGE_TARGET_BALANCE", 100000.0)
         ch_daily_target = getattr(cfg, "CHALLENGE_DAILY_TARGET_PCT", 10.0)
 
-        # Günlük kâr/zarar
         ch_gunluk_pnl = ((ch_bakiye - ch_gun_bas) / ch_gun_bas * 100) if ch_gun_bas > 0 else 0
         ch_kalan_pct = max(0.0, ch_daily_target - ch_gunluk_pnl)
 
-        # Toplam yolculuk ilerlemesi
         import math
         if ch_bakiye > ch_baslangic and ch_hedef > ch_baslangic:
             ch_progress = min(1.0, math.log(ch_bakiye / ch_baslangic) / math.log(ch_hedef / ch_baslangic))
@@ -446,7 +498,6 @@ with st.sidebar:
 
         ch_ts = ch_data.get("trailing_stop_seviyesi", 0.0)
 
-        # Görseller
         ch_pnl_renk = "#00ff88" if ch_gunluk_pnl >= 0 else "#ff4444"
         ch_gun_emoji = "🎯" if ch_gunluk_pnl >= ch_daily_target else "📈" if ch_gunluk_pnl > 0 else "📉"
 
@@ -489,7 +540,6 @@ with st.sidebar:
         </div>
         """, unsafe_allow_html=True)
 
-        # v10: Challenge Verilerini Sıfırla butonu (sadece .json, .db korunur)
         if st.sidebar.button("🔄 Challenge Verilerini Sıfırla", use_container_width=True,
                              help="Sadece challenge gününü ve bakiyesini sıfırlar. AI eğitimi için kritik olan trade_logs.db veritabanına DOKUNMAZ."):
             import time as _time
@@ -513,8 +563,7 @@ with st.sidebar:
                 "cuzdan_gecmisi": [],
                 "max_drawdown": 0.0,
             }
-            worker.state.set("challenge_session", yeni_ch)
-            worker.state.save_to_persistent()
+            _write_ui_setting("challenge_session", yeni_ch)
             st.sidebar.success(f"✅ Challenge sıfırlandı (${ch_baslangic:.0f}'dan tekrar)! 📊 trade_logs.db verileri korunuyor.")
             time.sleep(1)
             st.rerun()
@@ -592,8 +641,7 @@ with st.sidebar:
         st.sidebar.markdown("### ⏳ Demo Test Süresi")
         hedef_saat = st.sidebar.number_input("Test Süresi (Saat)", min_value=1, max_value=720, value=int(S.get("hedef_sure_saat", 48)))
         if hedef_saat != S.get("hedef_sure_saat", 48.0):
-            worker.state.set("hedef_sure_saat", float(hedef_saat))
-            worker.state.save_to_persistent()
+            _write_ui_setting("hedef_sure_saat", float(hedef_saat))
             
         bas_zamani = S.get("baslangic_zamani", 0)
         gecen_saniye = (time.time() - bas_zamani) if bas_zamani > 0 else 0
@@ -664,7 +712,7 @@ if st.session_state.view_mode == "📜 Sadece İşlem Logları":
     else:
         st.info("Henüz işlem yok.")
 
-    if worker.is_running:
+    if _is_running:
         time.sleep(0.5)
         st.rerun()
     st.stop()
@@ -682,7 +730,7 @@ col_baslik, col_durum = st.columns([3, 1])
 col_baslik.markdown("<h1 style='color: #66fcf1; font-weight: 800; margin-bottom: 0;'>🚀 PeroTrade Pro AI v5 (7/24)</h1>", unsafe_allow_html=True)
 
 status_class = "status-stopped"
-if worker.is_running:
+if _is_running:
     status_class = "status-breakout" if S.get("is_breakout") else "status-running"
 elif "Hedef" in S.get("bot_durumu", ""):
     status_class = "status-target"
@@ -709,7 +757,7 @@ st.metric("Kullanılan Margin", f"${kullanilan:,.2f}")
 
 gecen_sure = (time.time() - S.get("baslangic_zamani", 0)) / 3600 if S.get("baslangic_zamani", 0) > 0 else 0
 kalan_sure = max(0, S.get("hedef_sure_saat", 24) - gecen_sure)
-if worker.is_running:
+if _is_running:
     st.info(f"⏳ Kalan Hedef Süresi: {kalan_sure:.1f} Saat")
 
 st.markdown("---")
@@ -855,15 +903,13 @@ with tab_dash:
             </div>
             """, unsafe_allow_html=True)
 
-            # V23: Manuel Kapatma Butonu
+            # Manuel Kapatma Butonu (IPC ile)
             if st.button(f"❌ İşlemi Kapat", key=f"close_{tid}", use_container_width=False):
-                fiyat_haritasi_close = S.get("guncel_fiyatlar", {})
-                close_fiyat = fiyat_haritasi_close.get(s, guncel_fiyat)
+                close_fiyat = fiyat_haritasi.get(s, guncel_fiyat)
                 if close_fiyat > 0:
-                    raw = worker.state.raw()
-                    with worker.state.lock:
-                        islem_kapat_with_retry(raw, tid, close_fiyat, "👤 Manuel Kapatma (UI)")
-                    worker.state.save_to_persistent()
+                    _request_close_trade(tid, close_fiyat)
+                    st.success(f"📤 {s} kapatma komutu gönderildi. Engine işleyecek...")
+                    time.sleep(1)
                     st.rerun()
                 else:
                     st.warning(f"⚠️ {s} için güncel fiyat alınamadı. Lütfen tekrar deneyin.")
@@ -893,7 +939,6 @@ with tab_dash:
         fiyat_placeholder = st.empty()
         anlik_s = S.get('fiyat', 0)
         
-        # Sadece fiyat değiştiğinde st.empty() güncellenecek (V19 Optimizasyonu)
         if "last_fiyat_val" not in st.session_state:
             st.session_state.last_fiyat_val = -1
             
@@ -946,7 +991,6 @@ with tab_tv:
     st.markdown("### 📈 TradingView Gözlem Ekranı")
     aktif_s = S.get("aktif_sembol", "")
     if aktif_s and aktif_s != "Bekleniyor...":
-        # V31 FIX: Binance Futures Perpetual formatı — .P suffix ile sürekli vadeli kontrat
         tv_base = aktif_s.replace('/', '')
         tv_symbol = f"BINANCE:{tv_base}.P"
         tv_html = f"""
@@ -1005,13 +1049,10 @@ with tab_gecmis:
     if islemler:
         df_log = pd.DataFrame(islemler)
         
-        # PNL Grafiği
         st.markdown("#### Yakın Geçmiş PNL Trendi ($)")
-        # Renklendirme için pozitif ve negatif değerleri ayır
         st.bar_chart(df_log.set_index("zaman")["pnl"])
         
         st.markdown("#### Son Kapanan İşlemler Defteri")
-        # Kolonları isimlendir
         df_ui = df_log.rename(columns={
             "zaman": "Tarih", "sembol": "Coin", "tip": "Yön", 
             "giris": "Giriş", "cikis": "Çıkış", "pnl": "PNL ($)", 
@@ -1048,7 +1089,6 @@ with tab_canli:
             trades_list = canli_data.get(sembol_canli, [])
             if trades_list:
                 df_trades = pd.DataFrame(trades_list)
-                # Renk kodlaması için stil
                 def renk_isle(row):
                     renk = 'color: #00ff88' if 'Buy' in str(row.get('yon', '')) else 'color: #ff4444'
                     return [renk] * len(row)
@@ -1062,7 +1102,6 @@ with tab_canli:
                     use_container_width=True, hide_index=True, height=350
                 )
 
-                # Basit istatistik
                 toplam_buy = sum(1 for t in trades_list if 'Buy' in str(t.get('yon', '')))
                 toplam_sell = len(trades_list) - toplam_buy
                 buy_pct = (toplam_buy / len(trades_list) * 100) if trades_list else 0
@@ -1081,10 +1120,8 @@ with tab_canli:
     st.caption("🔄 Veriler ccxt.pro WebSocket üzerinden canlı olarak güncellenir. Sadece aktif pozisyonlu semboller izlenir.")
 
 # ─────────────────────────────────────────────
-# Auto-Refresh (Bot çalışırken)
+# Auto-Refresh (Engine çalışırken)
 # ─────────────────────────────────────────────
-if worker.is_running:
-    # 2 saniyede bir arayüz yenilenir (CPU ve flicker düşürüldü)
+if _is_running:
     time.sleep(2.0)
     st.rerun()
-

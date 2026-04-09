@@ -13,6 +13,7 @@ import uuid
 import threading
 import time
 import csv
+import json
 import asyncio
 import os
 import sqlite3
@@ -631,6 +632,64 @@ def islem_kapat_with_retry(state, trade_id, fiyat, neden, exchange=None, max_ret
     return False
 
 
+def _process_ui_commands(state: dict, lock: threading.Lock):
+    """Dashboard'dan gelen ayar değişikliklerini ve komutları işler (IPC).
+    - data/ui_settings.json → Engine state'e merge edilir
+    - data/close_commands.json → Pozisyon kapatma komutları işlenir
+    """
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(app_dir, "data")
+
+    # ── 1. UI Settings (mod, risk, API keys, etc.) ──
+    settings_file = os.path.join(data_dir, "ui_settings.json")
+    if os.path.exists(settings_file):
+        try:
+            with open(settings_file, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+            os.remove(settings_file)
+            if isinstance(settings, dict):
+                with lock:
+                    for key, value in settings.items():
+                        if key.startswith("_"):
+                            continue
+                        state[key] = value
+                    # Özel config güncellemeleri
+                    if "use_real_api" in settings:
+                        cfg.USE_REAL_API = settings["use_real_api"]
+                    if "api_key_enc" in settings:
+                        cfg.API_KEY = ps.decode_key(settings["api_key_enc"])
+                    if "api_secret_enc" in settings:
+                        cfg.SECRET_KEY = ps.decode_key(settings["api_secret_enc"])
+                    if "ENABLE_NEWS_VETO" in settings:
+                        cfg.ENABLE_NEWS_VETO = settings["ENABLE_NEWS_VETO"]
+                    log_ekle("🔄 Dashboard ayarları uygulandı.", state)
+        except Exception:
+            pass
+
+    # ── 2. Close Commands ──
+    close_file = os.path.join(data_dir, "close_commands.json")
+    if os.path.exists(close_file):
+        try:
+            with open(close_file, "r", encoding="utf-8") as f:
+                commands = json.load(f)
+            os.remove(close_file)
+            if isinstance(commands, list):
+                with lock:
+                    for cmd in commands:
+                        tid = cmd.get("trade_id") if isinstance(cmd, dict) else str(cmd)
+                        cmd_fiyat = cmd.get("fiyat", 0) if isinstance(cmd, dict) else 0
+                        poz = state.get("aktif_pozisyonlar", {}).get(tid)
+                        if poz:
+                            sembol = poz.get("sembol", tid)
+                            if cmd_fiyat <= 0:
+                                cmd_fiyat = state.get("guncel_fiyatlar", {}).get(sembol, poz.get("giris_fiyati", 0))
+                            if cmd_fiyat > 0:
+                                islem_kapat_with_retry(state, tid, cmd_fiyat, "👤 Manuel Kapatma (Dashboard)")
+                                log_ekle(f"👤 Dashboard'dan {sembol} [{tid}] kapatıldı.", state)
+        except Exception:
+            pass
+
+
 def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
     # v11: Futures exchange init + auto-reconnect
     exchange = None
@@ -694,6 +753,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
 
     while not dur_sinyali.is_set():
         try:
+            # Dashboard IPC: UI ayar değişikliklerini ve komutları işle
+            _process_ui_commands(state, lock)
+
             preset = MOD_PRESETLERI.get(state.get("mod", "⚡ Agresif Mod"), MOD_PRESETLERI["⚡ Agresif Mod"])
 
             # ─── V35: AKTİF POZİSYON MONİTÖRÜ (TP1/TP2 Takibi) ───

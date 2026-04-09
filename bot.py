@@ -1,374 +1,211 @@
 """
-PeroTrade Pro — Headless Bot v6 (V35)
-======================================
-7/24 arka planda çalışan, UI gerektirmeyen otonom trading engine.
-Persistent state ile PC yeniden başladığında kaldığı yerden devam eder.
-
-V35: active_session.lock veya bot durumu 'Çalışıyor' ise
-     BotWorker üzerinden otonom başlatma (arayüz gerektirmez).
+PeroTrade Pro — Master Entry Point (Engine-First Architecture)
+==============================================================
+Sistemin tek giriş noktası. Motor + Dashboard birlikte yönetilir.
 
 Kullanım:
-    python bot.py              # Headless mod (UI yok)
-    streamlit run streamlit_app.py  # Dashboard ile
+    python3 bot.py              # Motor + Dashboard başlat
+    python3 bot.py --headless   # Sadece motor (UI yok)
 """
 
-import time
 import signal
 import sys
 import os
-from datetime import datetime, timezone
+import time
+import subprocess
+from pathlib import Path
 
-import ccxt
-
-import config as cfg
-import ai_engine
 import persistent_state as ps
 
-# ─────────────────────────────────────────────
-# Global stop flag
-# ─────────────────────────────────────────────
-running = True
-
-def signal_handler(sig, frame):
-    global running
-    print("\n⛔ Durdurma sinyali alındı. Pozisyonlar korunarak çıkılıyor...")
-    running = False
-
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
-
 
 # ─────────────────────────────────────────────
-# V35: Otonom BotWorker Başlatma Kontrolü
+# Global Shutdown Flag
 # ─────────────────────────────────────────────
-def _headless_botworker_baslat():
-    """active_session.lock varsa veya bot durumu 'Çalışıyor' ise
-    BotWorker'ı arayüz olmadan otonom başlatır.
-    True dönerse ana döngüye geçmez (BotWorker üzerinden çalışır).
-    """
-    lock_path = ps.get_lock_file_path()
-    lock_var = os.path.exists(lock_path)
+_running = True
 
-    # State'den bot durumunu kontrol et
-    try:
-        state = ps.state_yukle()
-        bot_calisiyor = state.get("bot_calisiyor", False)
-        bot_durumu = state.get("bot_durumu", "")
-    except Exception:
-        bot_calisiyor = False
-        bot_durumu = ""
 
-    if lock_var or bot_calisiyor or bot_durumu == "Çalışıyor":
-        neden = "Lock dosyası" if lock_var else f"Bot durumu: {bot_durumu}"
-        print(f"\n🔄 [V35 AUTOSTART] {neden} algılandı → BotWorker otonom başlatılıyor...")
+def _signal_handler(sig, frame):
+    global _running
+    print("\n⛔ Durdurma sinyali alındı. Graceful shutdown başlıyor...")
+    _running = False
 
+
+signal.signal(signal.SIGINT, _signal_handler)
+signal.signal(signal.SIGTERM, _signal_handler)
+
+
+# ─────────────────────────────────────────────
+# IPC Flag Helpers
+# ─────────────────────────────────────────────
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+_DATA_DIR = os.path.join(_APP_DIR, "data")
+_STOP_FLAG = os.path.join(_DATA_DIR, "stop_signal.flag")
+_START_FLAG = os.path.join(_DATA_DIR, "start_signal.flag")
+
+
+def _check_stop_signal() -> bool:
+    """Dashboard'dan gelen durdurma sinyalini kontrol eder."""
+    if os.path.exists(_STOP_FLAG):
         try:
-            from bot_worker import BotWorker
-            worker = BotWorker()
-
-            if not worker.is_running:
-                worker.start()
-                print("✅ BotWorker otonom olarak başlatıldı (Headless mod)")
-            else:
-                print("✅ BotWorker zaten çalışıyor (Bootstrap tarafından başlatıldı)")
-
-            # Ana thread'i sinyal bekletecek şekilde canlı tut
-            print("🤖 Bot 7/24 çalışıyor. Durdurmak için Ctrl+C")
-            print("=" * 60)
-
-            global running
-            while running:
-                try:
-                    if not worker.is_running:
-                        print("⚠️ BotWorker durmuş, yeniden başlatılıyor...")
-                        worker.start()
-                    time.sleep(5)
-                except KeyboardInterrupt:
-                    break
-
-            # Temiz çıkış
-            print("\n⛔ Headless mod durduruluyor...")
-            worker.stop()
-            print("👋 Bot güvenle durduruldu.")
-            return True
-
-        except Exception as e:
-            print(f"❌ BotWorker başlatma hatası: {e}")
-            print("⚠️ Fallback: Eski headless moda geçiliyor...")
-            return False
-
+            os.remove(_STOP_FLAG)
+        except OSError:
+            pass
+        return True
     return False
 
 
-# ─────────────────────────────────────────────
-# Exchange Oluşturma (API destekli)
-# ─────────────────────────────────────────────
-_exchange_logged = False
+def _check_start_signal() -> bool:
+    """Dashboard'dan gelen başlatma sinyalini kontrol eder."""
+    if os.path.exists(_START_FLAG):
+        try:
+            os.remove(_START_FLAG)
+        except OSError:
+            pass
+        return True
+    return False
 
-def exchange_olustur() -> ccxt.Exchange:
-    global _exchange_logged
-    params = {"enableRateLimit": True}
-    
-    if cfg.USE_REAL_API and cfg.API_KEY and cfg.SECRET_KEY:
-        params["apiKey"] = cfg.API_KEY
-        params["secret"] = cfg.SECRET_KEY
-        params["options"] = {"defaultType": "future"}
-        if not _exchange_logged:
-            print("🔑 Binance Futures API bağlantısı (GERÇEK İŞLEM)")
-            _exchange_logged = True
-    else:
-        if not _exchange_logged:
-            print("📄 Paper Trading modu (API anahtarı yok)")
-            _exchange_logged = True
-    
-    exchange = getattr(ccxt, cfg.EXCHANGE_NAME)(params)
-    return exchange
+
+def _cleanup_flags():
+    """Eski IPC flag dosyalarını temizle."""
+    for f in [_STOP_FLAG, _START_FLAG]:
+        try:
+            if os.path.exists(f):
+                os.remove(f)
+        except OSError:
+            pass
 
 
 # ─────────────────────────────────────────────
-# PNL Hesaplama  
-# ─────────────────────────────────────────────
-def pnl_hesapla(tip, giris, guncel, kaldirac):
-    if tip == "LONG":
-        return ((guncel - giris) / giris) * kaldirac * (giris * kaldirac)
-    else:
-        return ((giris - guncel) / giris) * kaldirac * (giris * kaldirac)
-
-
-# ─────────────────────────────────────────────
-# Likidasyon Fiyatı
-# ─────────────────────────────────────────────
-def likidasyon_hesapla(tip, fiyat, kaldirac):
-    marj = 1.0 / kaldirac
-    if tip == "LONG":
-        return fiyat * (1 - marj * 0.90)
-    else:
-        return fiyat * (1 + marj * 0.90)
-
-
-# ─────────────────────────────────────────────
-# Ana Bot Döngüsü (Headless — Fallback)
+# Main Orchestrator
 # ─────────────────────────────────────────────
 def main():
-    global running
-    
+    global _running
+    headless = "--headless" in sys.argv or "--no-ui" in sys.argv
+
     print("=" * 60)
-    print("  🤖 PeroTrade Pro — Headless Bot v6 (V35)")
-    print("  7/24 Otonom Algoritmik Trading Sistemi")
+    print("  🤖 PeroTrade Pro — Engine-First Architecture")
+    print("  Motor + Dashboard Orkestrasyon Sistemi")
     print("=" * 60)
 
-    # V35: Önce BotWorker ile otonom başlatmayı dene
-    if _headless_botworker_baslat():
-        return  # BotWorker başarıyla çalıştı, eski fallback'e gerek yok
-    
-    # ── Eski Fallback Headless Mod ──
-    print("📋 Fallback headless mod aktif (BotWorker kullanılmıyor)")
-    
-    # Persistent state yükle
-    state = ps.state_yukle()
-    
-    # Exchange bağlantısı
-    exchange = exchange_olustur()
-    # Market Yükleme Güvencesi: try-except + retry
-    for _mkt_attempt in range(3):
+    os.makedirs(_DATA_DIR, exist_ok=True)
+    _cleanup_flags()
+
+    # ── 1. BotWorker Engine başlat ──
+    from bot_worker import BotWorker
+    worker = BotWorker()
+    if not worker.is_running:
+        worker.start()
+    print("✅ Trading Engine başlatıldı (arka plan thread)")
+
+    # ── 2. Lock dosyası ──
+    lock_path = ps.get_lock_file_path()
+    Path(lock_path).touch()
+    print(f"🔒 Lock: {lock_path}")
+
+    # ── 3. Streamlit Dashboard ──
+    streamlit_proc = None
+    if not headless:
         try:
-            exchange.load_markets()
-            break
-        except Exception as _mkt_err:
-            print(f"⚠️ Market data fetch failed, retrying... ({_mkt_attempt+1}/3): {str(_mkt_err)[:60]}")
-            time.sleep(5)
-    print(f"  Exchange  : {cfg.EXCHANGE_NAME}")
-    print(f"  Bakiye    : ${state['bakiye']:.2f}")
-    print(f"  Gün #     : {state.get('gun_sayaci', 0)}")
-    hedef = ps.bilesik_faiz_hedef(state)
-    print(f"  Bugün Hedef: ${hedef:.2f} (+%{cfg.DAILY_TARGET_PCT})")
-    print("=" * 60)
-    
-    dongusayaci = 0
-    _son_bilinen_fiyatlar = {}  # Fallback price cache
-    _error_counts = {}  # Error throttling
-    _last_error_log_time = time.time()
-    
-    while running:
-        dongusayaci += 1
-        try:
-            # ─── Yeni Gün Kontrolü ───
-            bugun = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            if state.get("son_gun", "") != bugun:
-                # Gün sonu raporu
-                print("\n" + ps.gun_sonu_raporu(state))
-                # Bileşik faiz: Yeni günün bakiyesini ayarla
-                state["gun_baslangic_bakiye"] = state["bakiye"]
-                state["son_gun"] = bugun
-                state["gun_sayaci"] = state.get("gun_sayaci", 0) + 1
-                ps.state_kaydet(state)
-                print(f"\n📅 YENİ GÜN! Bileşik bakiye: ${state['bakiye']:.2f}")
-            
-            # ─── Günlük Risk Barometresi ───
-            gunluk_kar = ps.gunluk_kar_pct(state)
-            if gunluk_kar >= cfg.DAILY_PROFIT_LOCK:
-                print(f"🛡️ GÜVENLİ MOD: Günlük kâr %{gunluk_kar:.1f} (>=%{cfg.DAILY_PROFIT_LOCK}). Yeni işlem yok.")
-                time.sleep(cfg.HEADLESS_CHECK_INTERVAL * 5)
-                continue
-            elif gunluk_kar <= cfg.DAILY_LOSS_STOP:
-                print(f"🚨 PANİK KORUMASI: Günlük kayıp %{gunluk_kar:.1f}. İşlemler askıda.")
-                time.sleep(cfg.HEADLESS_CHECK_INTERVAL * 10)
-                continue
-            
-            # ─── BTC Trend ───
-            btc_trend = ai_engine.btc_trendi_analiz_et(exchange)
-            
-            # ─── Coin Tarama (CPU dostu limit) ───
-            top_coinler = ai_engine.top_coinleri_tara(exchange, limit=cfg.HEADLESS_COIN_SCAN_LIMIT)
-            tarama = ai_engine.anormallik_tara_ve_sec(exchange, top_coinler, cfg.SHORT_MA, cfg.LONG_MA)
-            
-            secilen = tarama.get("secilen_sembol") or "BTC/USDT"
-            pazar = tarama.get("secilen_pazar", {})
-            sma = tarama.get("secilen_sma", "BEKLE")
-            breakout = tarama.get("secilen_breakout", False)
-            rapor = tarama.get("karar_raporu", "")
-            haber_p = tarama.get("haber_puanlari", {})
-            
-            # ─── Bulk Ticker Cache (Rate Limit %90 azalır) ───
-            try:
-                _bulk_tickers = exchange.fetch_tickers()
-            except Exception:
-                _bulk_tickers = {}
-
-            # ─── Fiyat ───
-            try:
-                ticker = _bulk_tickers.get(secilen, {})
-                if not isinstance(ticker, dict) or not ticker.get("last"):
-                    ticker = exchange.fetch_ticker(secilen)
-                fiyat = ticker.get("last", pazar.get("fiyat", 0))
-            except Exception:
-                fiyat = pazar.get("fiyat", 0)
-            # Fallback: Son bilinen fiyat
-            if not fiyat or fiyat == 0:
-                fiyat = _son_bilinen_fiyatlar.get(secilen, pazar.get("fiyat", 0))
-            elif fiyat > 0:
-                _son_bilinen_fiyatlar[secilen] = fiyat
-            
-            # ─── AI Karar ───
-            poz_durumu = state["aktif_pozisyonlar"].get(secilen, {}).get("pozisyon", "YOK")
-            fonlama = ai_engine.fonlama_orani_getir(exchange, secilen)
-            skor = ai_engine.kompozit_skor_hesapla(pazar, sma)
-            karar = ai_engine.mock_ai_karar(secilen, pazar, skor, poz_durumu, btc_trend, fonlama)
-            
-            # ─── NLP Haber Veto ───
-            if haber_p:
-                veto = ai_engine.haber_vetosu(haber_p, karar["karar"])
-                if veto["veto"]:
-                    karar["karar"] = "BEKLE"
-
-            sinyal = karar["karar"]
-            dusunce = karar.get("dusunce", "")[:100]
-            curr_hash = f"{secilen}_{sinyal}_{skor:.1f}_{dusunce}"
-            
-            if curr_hash != state.get("last_analysis_hash"):
-                if rapor:
-                    print(f"\n{'─'*50}")
-                    for satir in rapor.split('\n'):
-                        print(f"  📊 {satir}")
-                print(f"  🎯 [{secilen}] Sinyal: {sinyal} | Skor: {skor:.1f} | BTC: {btc_trend}")
-                print(f"     {dusunce}")
-                state["last_analysis_hash"] = curr_hash
-            
-            # ─── İşlem Aç ───
-            if sinyal in ["LONG", "SHORT"] and secilen not in state["aktif_pozisyonlar"]:
-                oran = karar.get("tavsiye_oran", 0.10)
-                klvr = karar.get("tavsiye_kaldirac", 10)
-                margin = state["bakiye"] * min(oran, cfg.MAX_RISK_PER_TRADE)
-                
-                if margin > 0.5:
-                    state["aktif_pozisyonlar"][secilen] = {
-                        "pozisyon": sinyal,
-                        "giris_fiyati": fiyat,
-                        "islem_margin": margin,
-                        "islem_kaldirac": klvr,
-                        "likidasyon_fiyati": likidasyon_hesapla(sinyal, fiyat, klvr),
-                        "acilis_zamani": time.time(),
-                        "dca_sayisi": 0,
-                        "giris_nedeni": karar["dusunce"][:120]
-                    }
-                    state["bakiye"] -= margin
-                    state["toplam_islem_sayisi"] = state.get("toplam_islem_sayisi", 0) + 1
-                    print(f"  💰 {klvr}x {sinyal} AÇILDI: {secilen} @ ${fiyat:.4f} (Margin: ${margin:.2f})")
-            
-            # ─── İşlem Kapat ───
-            elif sinyal == "KAPAT" and secilen in state["aktif_pozisyonlar"]:
-                poz = state["aktif_pozisyonlar"][secilen]
-                pnl = pnl_hesapla(poz["pozisyon"], poz["giris_fiyati"], fiyat, poz["islem_kaldirac"])
-                state["bakiye"] += poz["islem_margin"] + pnl
-                state["toplam_kar"] = state.get("toplam_kar", 0) + pnl
-                del state["aktif_pozisyonlar"][secilen]
-                print(f"  {'🟢' if pnl >= 0 else '🔴'} KAPATILDI: {secilen} | PNL: {pnl:+.4f} USDT")
-            
-            # ─── DCA Kontrolü ───
-            for sym, poz in list(state["aktif_pozisyonlar"].items()):
-                try:
-                    t = _bulk_tickers.get(sym, {})
-                    if not isinstance(t, dict) or not t.get("last"):
-                        t = exchange.fetch_ticker(sym)
-                    g_fiyat = t.get("last", poz["giris_fiyati"])
-                except Exception:
-                    g_fiyat = _son_bilinen_fiyatlar.get(sym, poz["giris_fiyati"])
-                
-                dca = ai_engine.dca_hesapla(poz, g_fiyat, state["bakiye"])
-                if dca["uygun"]:
-                    ekleme = dca["ekleme_margin"]
-                    if ekleme <= state["bakiye"]:
-                        state["aktif_pozisyonlar"][sym]["islem_margin"] += ekleme
-                        state["aktif_pozisyonlar"][sym]["giris_fiyati"] = dca["yeni_ortalama"]
-                        state["aktif_pozisyonlar"][sym]["dca_sayisi"] = dca.get("dca_sayisi", 1)
-                        state["bakiye"] -= ekleme
-                        print(f"  💱 DCA: {sym} | {dca['neden']}")
-            
-            # ─── Peak & Drawdown ───
-            if state["bakiye"] > state.get("pik_bakiye", 0):
-                state["pik_bakiye"] = state["bakiye"]
-            dd = ((state["pik_bakiye"] - state["bakiye"]) / state["pik_bakiye"] * 100) if state["pik_bakiye"] > 0 else 0
-            if dd > state.get("max_drawdown", 0):
-                state["max_drawdown"] = dd
-            
-            # ─── Her 5 döngüde kaydet (CPU dostu) ───
-            if dongusayaci % 5 == 0:
-                ps.state_kaydet(state)
-                print(f"  💾 State kaydedildi (Bakiye: ${state['bakiye']:.2f}, Gün Kârı: %{gunluk_kar:+.1f})")
-            
-            # ─── Bekleme ───
-            wait = cfg.HEADLESS_CHECK_INTERVAL
-            if breakout:
-                wait = 5  # Breakout'ta hızlı analiz
-                print(f"  🔥 BREAKOUT! Hızlı analiz: {wait}s")
-            
-            time.sleep(wait)
-            
+            streamlit_proc = subprocess.Popen(
+                [
+                    sys.executable, "-m", "streamlit", "run",
+                    os.path.join(_APP_DIR, "streamlit_app.py"),
+                    "--server.headless", "true",
+                    "--server.port", "8501",
+                    "--browser.gatherUsageStats", "false",
+                ],
+                cwd=_APP_DIR,
+            )
+            print(f"✅ Dashboard başlatıldı (PID: {streamlit_proc.pid})")
+            print(f"   📊 http://localhost:8501")
         except Exception as e:
-            err_str = str(e)
-            is_auth = "Authentication" in err_str or "API-key" in err_str or "Invalid credentials" in err_str
-            if is_auth:
-                if not state.get("auth_error_notified"):
-                    print(f"\n❌ [AUTH ERROR] API Yetki/Bağlantı Hatası: {err_str[:100]}")
-                    state["auth_error_notified"] = True
-            else:
-                # Error Throttling: 30sn'de bir özet log (spam engelleme)
-                state["auth_error_notified"] = False
-                err_key = err_str[:50]
-                _error_counts[err_key] = _error_counts.get(err_key, 0) + 1
-                now = time.time()
-                if now - _last_error_log_time >= 30:
-                    for ek, ec in _error_counts.items():
-                        print(f"  ❌ Hata Özeti ({ec}x/30s): {ek}")
-                    _error_counts.clear()
-                    _last_error_log_time = now
-            time.sleep(10)
-    
-    # ─── Temiz Çıkış ───
-    print("\n" + ps.gun_sonu_raporu(state))
-    ps.state_kaydet(state)
-    print(f"\n💾 State kaydedildi. Bakiye: ${state['bakiye']:.2f}")
-    print("👋 Bot güvenle durduruldu. Tekrar başlatmak için: python bot.py")
+            print(f"⚠️ Dashboard başlatılamadı: {e}")
+            print("   Motor headless modda çalışmaya devam ediyor.")
+            streamlit_proc = None
+    else:
+        print("📋 Headless mod aktif — Dashboard yok")
+
+    print("=" * 60)
+    print("🤖 Sistem 7/24 çalışıyor. Durdurmak için Ctrl+C")
+    print("=" * 60)
+
+    # ── 4. Watchdog Döngüsü ──
+    while _running:
+        try:
+            # Engine sağlık kontrolü
+            engine_th = getattr(worker, "_engine_thread", None)
+            if engine_th and not engine_th.is_alive() and worker.is_running:
+                print("⚠️ Engine thread durmuş, yeniden başlatılıyor...")
+                worker.start()
+
+            # Dashboard sağlık kontrolü + yeniden başlatma
+            if streamlit_proc and streamlit_proc.poll() is not None:
+                print("⚠️ Dashboard kapandı. Yeniden başlatılıyor...")
+                try:
+                    streamlit_proc = subprocess.Popen(
+                        [
+                            sys.executable, "-m", "streamlit", "run",
+                            os.path.join(_APP_DIR, "streamlit_app.py"),
+                            "--server.headless", "true",
+                            "--server.port", "8501",
+                            "--browser.gatherUsageStats", "false",
+                        ],
+                        cwd=_APP_DIR,
+                    )
+                    print(f"✅ Dashboard yeniden başlatıldı (PID: {streamlit_proc.pid})")
+                except Exception:
+                    streamlit_proc = None
+
+            # IPC: Dashboard'dan durdurma sinyali
+            if _check_stop_signal():
+                if worker.is_running:
+                    print("🛑 Dashboard → Engine durduruluyor...")
+                    worker.stop()
+                    print("✅ Engine durduruldu (Dashboard açık — yeniden başlatılabilir)")
+
+            # IPC: Dashboard'dan başlatma sinyali
+            if _check_start_signal():
+                if not worker.is_running:
+                    print("▶️ Dashboard → Engine başlatılıyor...")
+                    worker.start()
+                    print("✅ Engine başlatıldı")
+
+            time.sleep(3)
+
+        except KeyboardInterrupt:
+            break
+
+    # ── 5. Graceful Shutdown ──
+    print("\n" + "=" * 60)
+    print("  ⛔ Graceful Shutdown")
+    print("=" * 60)
+
+    if worker.is_running:
+        print("  🔧 Engine durduruluyor...")
+        worker.stop()
+        print("  ✅ Engine durduruldu")
+
+    if streamlit_proc and streamlit_proc.poll() is None:
+        print("  🖥️ Dashboard durduruluyor...")
+        streamlit_proc.terminate()
+        try:
+            streamlit_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            streamlit_proc.kill()
+        print("  ✅ Dashboard durduruldu")
+
+    # Lock dosyası temizliği
+    try:
+        if os.path.exists(lock_path):
+            os.remove(lock_path)
+    except OSError:
+        pass
+
+    _cleanup_flags()
+
+    print("=" * 60)
+    print("  👋 Sistem güvenle kapatıldı.")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
