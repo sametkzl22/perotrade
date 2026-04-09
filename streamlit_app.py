@@ -815,10 +815,29 @@ with tab_dash:
             giris_nedeni = p.get('giris_nedeni', 'Otonom AI Kararı')
             liq_risk_pct = abs((guncel_fiyat - p.get('likidasyon_fiyati', 0)) / guncel_fiyat * 100) if guncel_fiyat > 0 else 0
 
+            # V35: TP1/TP2 hedef fiyatları ve tp1_yapildi badge
+            tp1_f = p.get('tp1_fiyat', 0)
+            tp2_f = p.get('tp2_fiyat', 0)
+            tp1_yapildi = p.get('tp1_yapildi', False)
+            tp1_badge_html = ""
+            if tp1_yapildi:
+                tp1_badge_html = "<span style='background: linear-gradient(135deg, #00b894, #00cec9); color: #fff; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; margin-left: 8px;'>🎯 TP1 ALINDI - Risksiz Mod</span>"
+            tp_satir_html = ""
+            if tp1_f > 0 or tp2_f > 0:
+                tp1_renk = '#00ff88' if tp1_yapildi else '#ffd200'
+                tp1_str = f"<span style='color:{tp1_renk}; font-weight:700;'>${tp1_f:.4f}</span>" if tp1_f > 0 else "—"
+                tp2_str = f"<span style='color:#ff6b6b; font-weight:700;'>${tp2_f:.4f}</span>" if tp2_f > 0 else "—"
+                tp1_check = ' ✅' if tp1_yapildi else ''
+                tp_satir_html = f"""
+                <div style='display: flex; gap: 24px; color: #c5c6c7; font-size: 13px; margin-top: 4px; padding-top: 4px; border-top: 1px dashed rgba(255,255,255,0.08);'>
+                    <span>🎯 TP1: {tp1_str}{tp1_check}</span>
+                    <span>💰 TP2: {tp2_str}</span>
+                </div>"""
+
             st.markdown(f"""
             <div style='background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 16px; margin-bottom: 12px; border-left: 4px solid {pnl_renk};'>
                 <div style='display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;'>
-                    <span style='font-size: 18px; font-weight: 700; color: #66fcf1;'>{s} ({p.get('pozisyon', '?')} {p.get('islem_kaldirac', 0)}x) <span style='font-size: 11px; color: #888;'>#{tid}</span></span>
+                    <span style='font-size: 18px; font-weight: 700; color: #66fcf1;'>{s} ({p.get('pozisyon', '?')} {p.get('islem_kaldirac', 0)}x) <span style='font-size: 11px; color: #888;'>#{tid}</span>{tp1_badge_html}</span>
                     <span style='font-size: 20px; font-weight: 800; color: {pnl_renk};'>{anlik_pnl:+.2f} USDT ({pnl_pct:+.1f}%)</span>
                 </div>
                 <div style='display: flex; gap: 24px; color: #c5c6c7; font-size: 13px; margin-bottom: 6px;'>
@@ -826,7 +845,7 @@ with tab_dash:
                     <span>📊 Anlık: <b>{f"${guncel_fiyat:.4f}" if guncel_fiyat > 0 else "Veri Bekleniyor..."}</b></span>
                     <span>🛡️ Margin: <b>${p.get('islem_margin', 0):.2f}</b></span>
                     <span>💣 Liq Riski: <b>%{liq_risk_pct:.1f}</b></span>
-                </div>
+                </div>{tp_satir_html}
                 <div style='color: #45a29e; font-size: 12px; margin-top: 4px;'>
                     <b>📝 Giriş Nedeni:</b> {giris_nedeni}
                 </div>
@@ -857,6 +876,8 @@ with tab_dash:
                 "Kullanılan Margin": f"${p.get('islem_margin', 0):.2f}",
                 "Anlık K/Z ($)": f"{anlik_pnl:+.2f}",
                 "ROE (%)": f"{pnl_pct:+.2f}%",
+                "TP1": (f"${tp1_f:.4f} ✅" if tp1_yapildi else f"${tp1_f:.4f}") if tp1_f > 0 else "—",
+                "TP2": f"${tp2_f:.4f}" if tp2_f > 0 else "—",
                 "Liq Riski": f"%{liq_risk_pct:.1f}",
                 "Giriş Gerekçesi": giris_nedeni[:60]
             })
