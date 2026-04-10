@@ -182,7 +182,7 @@ def api_kurulum_ekrani():
             
             b1, b2, b3 = st.columns([1, 2, 1])
             with b2:
-                submitted = st.form_submit_button("💾 Kaydet ve Başla", type="primary", use_container_width=True)
+                submitted = st.form_submit_button("💾 Kaydet ve Başla", type="primary", width='stretch')
             
             if submitted:
                 if use_real:
@@ -233,12 +233,12 @@ if not st.session_state.get("_onboarding_passed", True):
     st.markdown("""<div style='text-align:center; padding: 20px;'><h3>🚀 PeroTrade Pro 7/24 AI Bot'a Hoş Geldiniz!</h3></div>""", unsafe_allow_html=True)
     b1, b2 = st.columns(2)
     with b1:
-        if st.button("🔑 Gerçek Binance API Kurulumu", use_container_width=True):
+        if st.button("🔑 Gerçek Binance API Kurulumu", width='stretch'):
             _write_ui_setting("use_real_api", True)
             ps.set_last_mode(True)
             st.rerun()
     with b2:
-        if st.button("🎮 Sanal Parayla (Paper Trading) Başla", use_container_width=True, type="primary"):
+        if st.button("🎮 Sanal Parayla (Paper Trading) Başla", width='stretch', type="primary"):
             st.session_state._onboarding_passed = True
             st.rerun()
     st.stop()
@@ -344,7 +344,7 @@ with st.sidebar:
     start_err = st.empty()
     with col1:
         start_disabled = _is_running
-        if st.button("▶️ Başlat", use_container_width=True, type="primary", disabled=start_disabled):
+        if st.button("▶️ Başlat", width='stretch', type="primary", disabled=start_disabled):
             k_val = st.session_state.get("binance_key_input", "")
             s_val = st.session_state.get("binance_secret_input", "")
             if cur_is_real and (not k_val or not s_val):
@@ -354,7 +354,7 @@ with st.sidebar:
                 time.sleep(1)
                 st.rerun()
     with col2:
-        if st.button("⏹️ Durdur", use_container_width=True, disabled=not _is_running):
+        if st.button("⏹️ Durdur", width='stretch', disabled=not _is_running):
             _request_stop()
             time.sleep(1)
             st.rerun()
@@ -384,7 +384,7 @@ with st.sidebar:
             "Başlangıç Sermayesi ($)", min_value=1.0, max_value=10000.0,
             value=10.0, step=1.0, help="Challenge boyunca sanal bakiye olarak kullanılacak tutar."
         )
-        if st.sidebar.button("✅ Challenge'ı Başlat", use_container_width=True, type="primary"):
+        if st.sidebar.button("✅ Challenge'ı Başlat", width='stretch', type="primary"):
             import time as _time
             ch_yeni = {
                 "aktif": True,
@@ -460,7 +460,7 @@ with st.sidebar:
     st.sidebar.markdown(f"**💵 Boşta Kalan Para:** ${state_bakiye:.2f}")
     st.sidebar.markdown(f"**🔒 İşlemdeki Margin:** ${margin_total:.2f}")
 
-    if st.sidebar.button("Günlük İstatistikleri ve Kilidi Sıfırla", use_container_width=True, help="Günlük kâr hedefine ulaşıldıysa ve botu tekrar çalıştırmak istiyorsanız bu butona basarak başlangıç bakiyesini güncelleyebilir ve Güvenli Mod'u kapatabilirsiniz."):
+    if st.sidebar.button("Günlük İstatistikleri ve Kilidi Sıfırla", width='stretch', help="Günlük kâr hedefine ulaşıldıysa ve botu tekrar çalıştırmak istiyorsanız bu butona basarak başlangıç bakiyesini güncelleyebilir ve Güvenli Mod'u kapatabilirsiniz."):
         _write_ui_settings({
             "gun_baslangic_bakiye": state_bakiye + margin_total,
             "bot_durumu": "Çalışıyor (Resetlendi)",
@@ -536,7 +536,7 @@ with st.sidebar:
         </div>
         """, unsafe_allow_html=True)
 
-        if st.sidebar.button("🔄 Challenge Verilerini Sıfırla", use_container_width=True,
+        if st.sidebar.button("🔄 Challenge Verilerini Sıfırla", width='stretch',
                              help="Sadece challenge gününü ve bakiyesini sıfırlar. AI eğitimi için kritik olan trade_logs.db veritabanına DOKUNMAZ."):
             import time as _time
             yeni_ch = {
@@ -704,7 +704,7 @@ if st.session_state.view_mode == "📜 Sadece İşlem Logları":
     islem_gecmisi = S.get("islem_gecmisi", [])
     if islem_gecmisi:
         df_log = pd.DataFrame(islem_gecmisi).iloc[::-1].reset_index(drop=True)
-        st.dataframe(df_log, use_container_width=True, hide_index=True)
+        st.dataframe(df_log, width='stretch', hide_index=True)
     else:
         st.info("Henüz işlem yok.")
 
@@ -790,7 +790,7 @@ st.markdown(f"""
 if S.get("cuzdan_gecmisi"):
     st.markdown("### 📉 Portföy Değeri (Anlık)")
     chart_data = pd.DataFrame(S["cuzdan_gecmisi"])
-    st.line_chart(chart_data.set_index("zaman")["deger"], use_container_width=True, color="#66fcf1")
+    st.line_chart(chart_data.set_index("zaman")["deger"], width='stretch', color="#66fcf1")
 
 
 # ─────────────────────────────────────────────
@@ -900,7 +900,7 @@ with tab_dash:
             """, unsafe_allow_html=True)
 
             # Manuel Kapatma Butonu (IPC ile)
-            if st.button(f"❌ İşlemi Kapat", key=f"close_{tid}", use_container_width=False):
+            if st.button(f"❌ İşlemi Kapat", key=f"close_{tid}", width='content'):
                 close_fiyat = fiyat_haritasi.get(s, guncel_fiyat)
                 if close_fiyat > 0:
                     _request_close_trade(tid, close_fiyat)
@@ -925,7 +925,7 @@ with tab_dash:
             })
 
         st.markdown("#### 📋 Detaylı Tablo")
-        st.dataframe(pd.DataFrame(poz_liste), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(poz_liste), width='stretch', hide_index=True)
 
     st.markdown("---")
 
@@ -970,7 +970,7 @@ with tab_dash:
         islem_gecmisi = S.get("islem_gecmisi", [])
         if islem_gecmisi:
             df_log = pd.DataFrame(islem_gecmisi).iloc[::-1].reset_index(drop=True)
-            st.dataframe(df_log, use_container_width=True, hide_index=True, height=250)
+            st.dataframe(df_log, width='stretch', hide_index=True, height=250)
         else:
             st.info("Henüz işlem yok.")
 
@@ -1025,7 +1025,7 @@ with tab_tv:
     taranan = S.get("taranan_coinler", [])
     if taranan:
         df_scan = pd.DataFrame(taranan)
-        st.dataframe(df_scan, use_container_width=True, hide_index=True)
+        st.dataframe(df_scan, width='stretch', hide_index=True)
     else:
         st.info("Piyasa taraması bekleniyor...")
 
@@ -1057,7 +1057,7 @@ with tab_gecmis:
             "pnl_pct": "ROE (%)", "kaldirac": "Kaldıraç", 
             "margin": "Margin", "neden": "Kapatma Nedeni"
         })
-        st.dataframe(df_ui, use_container_width=True, hide_index=True)
+        st.dataframe(df_ui, width='stretch', hide_index=True)
     else:
         st.info("Henüz veritabanında işlem kaydı yok. Bot işlem yapmaya başladığında veriler buraya yansıyacaktır.")
 
@@ -1097,7 +1097,7 @@ with tab_canli:
                         "miktar": "Miktar", "yon": "Yön",
                         "buyukluk_usdt": "Büyüklük (USDT)"
                     }),
-                    use_container_width=True, hide_index=True, height=350
+                    width='stretch', hide_index=True, height=350
                 )
 
                 toplam_buy = sum(1 for t in trades_list if 'Buy' in str(t.get('yon', '')))
