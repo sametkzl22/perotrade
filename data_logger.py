@@ -51,9 +51,10 @@ def _get_conn():
         _init_db(db_path)
         _migrate_db(db_path)
         _initialized_dbs.add(db_path)
-        
-    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=5, isolation_level='EXCLUSIVE')
+
+    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30, isolation_level=None)
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 
@@ -144,13 +145,15 @@ def _db_writer_worker():
             task = _write_queue.get()
             if task is None:
                 break
-            
+
             task_type = task.get("type")
             data = task.get("data")
-            
+
             if task_type == "tarama":
+                conn = None
                 try:
                     conn = _get_conn()
+                    conn.execute("BEGIN")
                     conn.execute(
                         """INSERT INTO tarama_log
                            (zaman, sembol, fiyat, skor, atr, volatilite, hacim_artis, breakout, mtf_konsensus, karar)
@@ -159,14 +162,26 @@ def _db_writer_worker():
                          data["atr"], data["volatilite"], data["hacim_artis"], data["breakout"],
                          data["mtf_konsensus"], data["karar"])
                     )
-                    conn.commit()
-                    conn.close()
+                    conn.execute("COMMIT")
                 except (_CcxtBaseError, sqlite3.Error, Exception) as e:
                     print(f"⚠️ DB Queue Tarama Insert Error: {e}")
-            
+                    if conn:
+                        try:
+                            conn.execute("ROLLBACK")
+                        except Exception:
+                            pass
+                finally:
+                    if conn:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+
             elif task_type == "islem":
+                conn = None
                 try:
                     conn = _get_conn()
+                    conn.execute("BEGIN")
                     conn.execute(
                         """INSERT INTO islem_log
                            (zaman, sembol, tip, giris_fiyati, cikis_fiyati, pnl, pnl_pct,
@@ -179,12 +194,22 @@ def _db_writer_worker():
                          data["rsi"], data["bollinger_ust"], data["bollinger_alt"], data["hacim_oran"],
                          data["order_purpose"], data["ai_confidence"], data["liquidity_depth_score"])
                     )
-                    conn.commit()
-                    conn.close()
+                    conn.execute("COMMIT")
                     print(f"✅ Trade logged to DB via Queue: {data['sembol']} {data['tip']} [tid:{data['trade_id']}] (PNL: ${data['pnl']:.2f})")
                 except (_CcxtBaseError, sqlite3.Error, Exception) as e:
                     print(f"⚠️ DB Queue Islem Insert Error: {e}")
-            
+                    if conn:
+                        try:
+                            conn.execute("ROLLBACK")
+                        except Exception:
+                            pass
+                finally:
+                    if conn:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+
             _write_queue.task_done()
         except (_CcxtBaseError, sqlite3.Error, Exception) as e:
             print(f"⚠️ DB Worker Exception: {e}")
@@ -235,12 +260,12 @@ def islem_kaydet(sembol: str, tip: str, giris_fiyati: float,
 # ─────────────────────────────────────────────
 def basari_orani_getir(son_n: int = 100) -> dict:
     """Son N işlemin başarı oranını döner."""
+    conn = None
     try:
         conn = _get_conn()
         rows = conn.execute(
             "SELECT pnl FROM islem_log ORDER BY id DESC LIMIT ?", (son_n,)
         ).fetchall()
-        conn.close()
         if not rows:
             return {"toplam": 0, "karli": 0, "zarari": 0, "oran": 0.0}
         karli = sum(1 for r in rows if r[0] > 0)
@@ -253,10 +278,17 @@ def basari_orani_getir(son_n: int = 100) -> dict:
         }
     except (_CcxtBaseError, sqlite3.Error, Exception):
         return {"toplam": 0, "karli": 0, "zarari": 0, "oran": 0.0}
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def son_islemler_getir(limit: int = 50) -> list:
     """Son N işlemi liste olarak döner (dashboard grafik için)."""
+    conn = None
     try:
         conn = _get_conn()
         rows = conn.execute(
@@ -265,7 +297,6 @@ def son_islemler_getir(limit: int = 50) -> list:
                       order_purpose, ai_confidence, liquidity_depth_score
                FROM islem_log ORDER BY id DESC LIMIT ?""", (limit,)
         ).fetchall()
-        conn.close()
         return [
             {"zaman": r[0], "sembol": r[1], "tip": r[2],
              "giris": r[3], "cikis": r[4], "pnl": r[5],
@@ -275,39 +306,51 @@ def son_islemler_getir(limit: int = 50) -> list:
         ]
     except (_CcxtBaseError, sqlite3.Error, Exception):
         return []
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def skor_gecmisi_getir(sembol: str, limit: int = 50) -> list:
     """Belirli coin için skor geçmişi."""
+    conn = None
     try:
         conn = _get_conn()
         rows = conn.execute(
             "SELECT zaman, skor, fiyat, karar FROM tarama_log WHERE sembol=? ORDER BY id DESC LIMIT ?",
             (sembol, limit)
         ).fetchall()
-        conn.close()
         return [{"zaman": r[0], "skor": r[1], "fiyat": r[2], "karar": r[3]} for r in rows]
     except (_CcxtBaseError, sqlite3.Error, Exception):
         return []
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def en_iyi_korelasyonlari_getir(limit: int = 50) -> dict:
     """Geçmişteki kârlı işlemlerin ortalama volatilite ve hacim artışı değerlerini döner."""
+    conn = None
     try:
         conn = _get_conn()
         # PNL > 0 olan işlemleri çek
         rows = conn.execute(
             "SELECT sembol, zaman FROM islem_log WHERE pnl > 0 ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
-        
+
         if not rows:
-            conn.close()
             return {}
-            
+
         vol_total = 0.0
         hacim_total = 0.0
         sayac = 0
-        
+
         for sembol, zaman in rows:
             # İşlem zamanından önceki en son tarama kaydını al
             t_row = conn.execute(
@@ -318,12 +361,10 @@ def en_iyi_korelasyonlari_getir(limit: int = 50) -> dict:
                 vol_total += t_row[0] or 0
                 hacim_total += t_row[1] or 0
                 sayac += 1
-                
-        conn.close()
-        
+
         if sayac == 0:
             return {}
-            
+
         return {
             "ortalama_volatilite": round(vol_total / sayac, 2),
             "ortalama_hacim_artis": round(hacim_total / sayac, 2),
@@ -331,29 +372,42 @@ def en_iyi_korelasyonlari_getir(limit: int = 50) -> dict:
         }
     except (_CcxtBaseError, sqlite3.Error, Exception):
         return {}
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def gercek_pnl_getir(baslangic_zamani_timestamp: float) -> float:
     """Verilen UNIX zaman damgasından (baslangic_zamani) bu yana trade_logs.db'deki realize edilmiş toplam PNL'yi döner."""
+    conn = None
     try:
         dt_iso = datetime.fromtimestamp(baslangic_zamani_timestamp, tz=timezone.utc).isoformat()
         conn = _get_conn()
         row = conn.execute(
             "SELECT SUM(pnl) FROM islem_log WHERE zaman >= ?", (dt_iso,)
         ).fetchone()
-        conn.close()
-        
+
         if row and row[0] is not None:
             return float(row[0])
         return 0.0
     except (_CcxtBaseError, sqlite3.Error, Exception) as e:
         print(f"⚠️ PNL Doğrulama Hatası: {e}")
         return 0.0
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def challenge_pnl_getir(baslangic_zamani_timestamp: float) -> float:
     """Challenge modunda realize edilmiş (closed) işlemlerin toplam PNL'sini döner.
     Sadece etiket='CHALLENGE_MODE' olan kayıtları filtreler."""
+    conn = None
     try:
         dt_iso = datetime.fromtimestamp(baslangic_zamani_timestamp, tz=timezone.utc).isoformat()
         conn = _get_conn()
@@ -361,17 +415,23 @@ def challenge_pnl_getir(baslangic_zamani_timestamp: float) -> float:
             "SELECT SUM(pnl) FROM islem_log WHERE etiket='CHALLENGE_MODE' AND zaman >= ?",
             (dt_iso,)
         ).fetchone()
-        conn.close()
         if row and row[0] is not None:
             return float(row[0])
         return 0.0
     except (_CcxtBaseError, sqlite3.Error, Exception) as e:
         print(f"⚠️ Challenge PNL Doğrulama Hatası: {e}")
         return 0.0
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def evo_islemler_getir(limit: int = 200) -> list:
     """Evolutionary Trainer için genişletilmiş işlem verileri (RSI, Bollinger, hacim dahil)."""
+    conn = None
     try:
         conn = _get_conn()
         rows = conn.execute(
@@ -383,7 +443,6 @@ def evo_islemler_getir(limit: int = 200) -> list:
                WHERE etiket = 'EVO_TRAINER'
                ORDER BY id DESC LIMIT ?""", (limit,)
         ).fetchall()
-        conn.close()
         return [
             {"zaman": r[0], "sembol": r[1], "tip": r[2],
              "giris": r[3], "cikis": r[4], "pnl": r[5],
@@ -395,3 +454,9 @@ def evo_islemler_getir(limit: int = 200) -> list:
         ]
     except (_CcxtBaseError, sqlite3.Error, Exception):
         return []
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass

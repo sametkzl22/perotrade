@@ -387,6 +387,12 @@ def log_ekle(mesaj: str, state: dict, is_breakout=False, is_liq=False):
     state["ai_dusunce_gunlugu"].insert(0, {"time": zaman, "msg": mesaj, "breakout": is_breakout, "liq": is_liq})
     if len(state["ai_dusunce_gunlugu"]) > 60:
         state["ai_dusunce_gunlugu"].pop()
+    # Immediate State Sync: UI refresh lag fix — atomically persist after every log entry
+    try:
+        temiz = {k: v for k, v in state.items() if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
+        ps.state_kaydet(temiz)
+    except Exception:
+        pass
 
 
 # ─── Math fonksiyonları artık utils.py'den geliyor (backward compat re-export) ───
@@ -1797,6 +1803,7 @@ def korelasyon_rutini(state: dict, lock: threading.Lock, dur_sinyali: threading.
     v9: Otonom Öz-Değerlendirme + Korelasyon Döngüsü
     - Her 5 dakikada: Korelasyon güncelleme
     - Her 24 saatte (veya gün dönümünde): ML model yeniden eğitimi + hot-reload
+    Memory Guard: Eğitim sonrası model/df nesneleri açıkça temizlenir.
     """
     son_egitim_zamani = time.time()
     retrain_interval = getattr(cfg, "ML_RETRAIN_INTERVAL_HOURS", 24) * 3600
@@ -1824,6 +1831,7 @@ def korelasyon_rutini(state: dict, lock: threading.Lock, dur_sinyali: threading.
                     else:
                         log_ekle("🧠 ML RETRAIN: 24 saatlik eğitim döngüsü başlatılıyor...", state)
 
+                sonuc = None
                 try:
                     sonuc = train_model.run_training()
                     if sonuc.get("basarili"):
@@ -1845,12 +1853,16 @@ def korelasyon_rutini(state: dict, lock: threading.Lock, dur_sinyali: threading.
                 except (ccxt.BaseError, sqlite3.Error, Exception) as e:
                     with lock:
                         log_ekle(f"❌ ML RETRAIN HATA: {str(e)[:80]}", state)
+                finally:
+                    # Memory Guard: Explicitly release model/df objects to prevent RAM exhaustion
+                    del sonuc
+                    gc.collect()
 
                 son_egitim_zamani = time.time()
 
         except (ccxt.BaseError, sqlite3.Error, Exception):
             pass
-        
+
         # 300 saniye (5 dakika) bekle
         dur_sinyali.wait(300)
 

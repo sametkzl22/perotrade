@@ -162,7 +162,7 @@ if "_onboarding_passed" not in st.session_state:
 # Yardımcı UI Fonksiyonları
 # ─────────────────────────────────────────────
 # gunluk_kar_hesapla artık utils.py'den geliyor (import satırında yukarıda)
-guunluk_kar_hesapla_ui = gunluk_kar_hesapla  # backward compat alias
+gunluk_kar_hesapla_ui = gunluk_kar_hesapla  # backward compat alias
 
 
 # ─────────────────────────────────────────────
@@ -709,7 +709,7 @@ if st.session_state.view_mode == "📜 Sadece İşlem Logları":
         st.info("Henüz işlem yok.")
 
     if _is_running:
-        time.sleep(0.5)
+        time.sleep(1.0)
         st.rerun()
     st.stop()
 
@@ -1121,5 +1121,5 @@ with tab_canli:
 # Auto-Refresh (Engine çalışırken)
 # ─────────────────────────────────────────────
 if _is_running:
-    time.sleep(2.0)
+    time.sleep(1.0)
     st.rerun()
