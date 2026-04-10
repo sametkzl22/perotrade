@@ -725,107 +725,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
 
             preset = MOD_PRESETLERI.get(state.get("mod", "⚡ Agresif Mod"), MOD_PRESETLERI["⚡ Agresif Mod"])
 
-            # ─── V35: AKTİF POZİSYON MONİTÖRÜ (TP1/TP2 Takibi) ───
-            with lock:
-                _aktif_pozlar = list(state.get("aktif_pozisyonlar", {}).items())
-                _fiyat_cache = state.get("guncel_fiyatlar", {})
-
-            for _mon_tid, _mon_poz in _aktif_pozlar:
-                try:
-                    _mon_sembol = _mon_poz.get("sembol", _mon_tid)
-                    _mon_yon = _mon_poz.get("pozisyon", "YOK")
-                    _mon_giris = _mon_poz.get("giris_fiyati", 0)
-                    _mon_fiyat = _fiyat_cache.get(_mon_sembol, _mon_giris)
-                    _mon_tp1 = _mon_poz.get("tp1_fiyat", 0)
-                    _mon_tp2 = _mon_poz.get("tp2_fiyat", 0)
-                    _mon_tp1_yapildi = _mon_poz.get("tp1_yapildi", False)
-
-                    if _mon_fiyat <= 0 or _mon_giris <= 0:
-                        continue
-
-                    # TP1/TP2 yön bazlı kontrol
-                    if _mon_yon == "LONG":
-                        tp1_tetiklendi = _mon_tp1 > 0 and _mon_fiyat >= _mon_tp1
-                        tp2_tetiklendi = _mon_tp2 > 0 and _mon_fiyat >= _mon_tp2
-                    elif _mon_yon == "SHORT":
-                        tp1_tetiklendi = _mon_tp1 > 0 and _mon_fiyat <= _mon_tp1
-                        tp2_tetiklendi = _mon_tp2 > 0 and _mon_fiyat <= _mon_tp2
-                    else:
-                        continue
-
-                    # ── TP2 Kontrolü (önce kontrol — tüm pozisyonu kapat) ──
-                    if tp2_tetiklendi:
-                        with lock:
-                            log_ekle(f"💰 [{_mon_sembol}] TP2 HEDEFİNE ULAŞILDI! Fiyat: ${_mon_fiyat:.4f} → TP2: ${_mon_tp2:.4f}", state, is_breakout=True)
-                        islem_kapat_with_retry(state, _mon_tid, _mon_fiyat, f"🎯 TP2 Hedefi ({_mon_yon})", exchange)
-                        threading.Thread(
-                            target=send_telegram_msg,
-                            args=(f"💰 <b>{_mon_sembol}</b> TP2 HEDEFİNE ULAŞILDI!\nFiyat: ${_mon_fiyat:.4f}\nTüm pozisyon kapatıldı.",),
-                            daemon=True,
-                        ).start()
-                        continue
-
-                    # ── TP1 Kontrolü (yarı pozisyon kapat + SL girişe çek) ──
-                    if tp1_tetiklendi and not _mon_tp1_yapildi:
-                        with lock:
-                            poz_ref = state["aktif_pozisyonlar"].get(_mon_tid)
-                            if poz_ref:
-                                # Kısmi PNL hesapla (yarı pozisyon)
-                                _yari_margin = poz_ref["islem_margin"] / 2.0
-                                _kaldirac = poz_ref.get("islem_kaldirac", 1)
-                                _yari_pnl = pnl_hesapla(_mon_yon, _mon_giris, _mon_fiyat, _yari_margin * _kaldirac, _kaldirac)
-
-                                # Yarı margin + PNL'yi bakiyeye ekle
-                                state["bakiye"] += _yari_margin + _yari_pnl
-
-                                # Kalan margin güncelle
-                                poz_ref["islem_margin"] = _yari_margin
-                                poz_ref["tp1_yapildi"] = True
-
-                                # Break-Even: SL'yi giriş fiyatına çek
-                                poz_ref["dinamik_sl_fiyat"] = _mon_giris
-
-                                log_ekle(
-                                    f"🎯 [{_mon_sembol}] TP1 ALINDI! SL Girişe Çekildi. "
-                                    f"Yarı PNL: {_yari_pnl:+.4f} USDT, Kalan Margin: ${_yari_margin:.2f}",
-                                    state, is_breakout=True
-                                )
-
-                                # İşlem geçmişine kaydet
-                                _zaman_tp1 = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-                                state["islem_gecmisi"].append({
-                                    "zaman": _zaman_tp1, "sembol": _mon_sembol,
-                                    "sinyal": f"🎯 TP1: {_mon_yon}",
-                                    "fiyat": round(_mon_fiyat, 4), "kaldirac": f"{_kaldirac}x",
-                                    "poz_buyukluk": round(_yari_margin * _kaldirac, 2),
-                                    "bakiye_usdt": round(state["bakiye"], 2),
-                                    "kar_zarar": f"{_yari_pnl:+.2f} USDT",
-                                    "ai_notu": "TP1 Kısmi Kapatma + Break-Even SL"
-                                })
-
-                        # Telegram bildirimi
-                        threading.Thread(
-                            target=send_telegram_msg,
-                            args=(
-                                f"🎯 <b>{_mon_sembol}</b> TP1 ALINDI!\n"
-                                f"Fiyat: ${_mon_fiyat:.4f} → TP1: ${_mon_tp1:.4f}\n"
-                                f"Yarı pozisyon kapatıldı. PNL: {_yari_pnl:+.4f} USDT\n"
-                                f"🛡️ SL giriş fiyatına (${_mon_giris:.4f}) çekildi.",
-                            ),
-                            daemon=True,
-                        ).start()
-
-                        # Immediate Save
-                        try:
-                            _tp1_save = {k: v for k, v in state.items() if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
-                            ps.state_kaydet(_tp1_save)
-                        except Exception:
-                            pass
-
-                except (ccxt.BaseError, sqlite3.Error, Exception) as _mon_err:
-                    with lock:
-                        log_ekle(f"⚠️ TP Monitor Hatası [{_mon_tid}]: {str(_mon_err)[:60]}", state)
-            # ─── V35: TP1/TP2 Monitör Sonu ───
+            # ─── V36: Pozisyon monitörü ayrı thread'e taşındı (position_monitor_loop) ───
 
             with lock:
                 acik_poz_var_mi = len(state.get("aktif_pozisyonlar", {})) > 0
@@ -1867,6 +1767,198 @@ def korelasyon_rutini(state: dict, lock: threading.Lock, dur_sinyali: threading.
         dur_sinyali.wait(300)
 
 # ─────────────────────────────────────────────
+# V36: High-Frequency Position Monitor (Detached Thread)
+# ─────────────────────────────────────────────
+def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
+    """V36: Bağımsız yüksek frekanslı pozisyon monitörü.
+    Her 1 saniyede aktif pozisyonların TP1/TP2/SL seviyelerini kontrol eder.
+    Sadece aktif sembollerin ticker'larını çeker — minimum API weight.
+    """
+    # Kendi exchange bağlantısını oluştur (bot_engine'den bağımsız)
+    mon_exchange = None
+    for _attempt in range(5):
+        try:
+            mon_exchange = _exchange_olustur(state, pro=False)
+            mon_exchange.load_markets()
+            with lock:
+                log_ekle("🎯 V36: Pozisyon Monitörü başlatıldı (1s frekans, bağımsız thread)", state)
+            break
+        except (ccxt.BaseError, sqlite3.Error, Exception) as e:
+            print(f"⚠️ Position Monitor exchange init hatası ({_attempt+1}/5): {str(e)[:60]}")
+            time.sleep(3)
+    else:
+        with lock:
+            log_ekle("❌ V36: Pozisyon Monitörü exchange bağlantısı kurulamadı. Thread sonlandırılıyor.", state)
+        return
+
+    while not dur_sinyali.is_set():
+        try:
+            # Thread-safe snapshot: aktif pozisyonları kopyala
+            with lock:
+                _aktif_pozlar = list(state.get("aktif_pozisyonlar", {}).items())
+
+            if not _aktif_pozlar:
+                # Açık pozisyon yok — 2 saniye bekle ve tekrar kontrol et
+                dur_sinyali.wait(2.0)
+                continue
+
+            # High-Frequency Tickers: Sadece aktif sembollerin fiyatlarını çek
+            aktif_semboller = list(set(
+                p.get("sembol", tid) for tid, p in _aktif_pozlar
+            ))
+            try:
+                if len(aktif_semboller) == 1:
+                    ticker_data = mon_exchange.fetch_ticker(aktif_semboller[0])
+                    tickers = {aktif_semboller[0]: ticker_data}
+                else:
+                    # Batch fetch sadece aktif semboller için
+                    tickers = mon_exchange.fetch_tickers(aktif_semboller)
+            except (ccxt.BaseError, sqlite3.Error, Exception):
+                tickers = {}
+
+            # Fiyat cache'ini güncelle (bot_engine de bu cache'i kullanır)
+            if tickers:
+                with lock:
+                    for sym, tick in tickers.items():
+                        if isinstance(tick, dict) and tick.get("last"):
+                            state.setdefault("guncel_fiyatlar", {})[sym] = float(tick["last"])
+
+            # Güncel fiyat cache'i al
+            with lock:
+                _fiyat_cache = state.get("guncel_fiyatlar", {}).copy()
+
+            for _mon_tid, _mon_poz in _aktif_pozlar:
+                try:
+                    _mon_sembol = _mon_poz.get("sembol", _mon_tid)
+                    _mon_yon = _mon_poz.get("pozisyon", "YOK")
+                    _mon_giris = _mon_poz.get("giris_fiyati", 0)
+                    _mon_fiyat = _fiyat_cache.get(_mon_sembol, _mon_giris)
+                    _mon_tp1 = _mon_poz.get("tp1_fiyat", 0)
+                    _mon_tp2 = _mon_poz.get("tp2_fiyat", 0)
+                    _mon_tp1_yapildi = _mon_poz.get("tp1_yapildi", False)
+                    _mon_sl = _mon_poz.get("dinamik_sl_fiyat", 0)
+                    _mon_liq = _mon_poz.get("likidasyon_fiyati", 0)
+
+                    if _mon_fiyat <= 0 or _mon_giris <= 0:
+                        continue
+
+                    # ── SL / Likidasyon Kontrolü (en yüksek öncelik) ──
+                    sl_tetiklendi = False
+                    sl_neden = ""
+                    if _mon_yon == "LONG":
+                        if _mon_sl > 0 and _mon_fiyat <= _mon_sl:
+                            sl_tetiklendi = True
+                            sl_neden = f"🛡️ Dinamik SL ({_mon_yon}): Fiyat ${_mon_fiyat:.4f} ≤ SL ${_mon_sl:.4f}"
+                        elif _mon_liq > 0 and _mon_fiyat <= _mon_liq:
+                            sl_tetiklendi = True
+                            sl_neden = f"☠️ Likidasyon ({_mon_yon}): Fiyat ${_mon_fiyat:.4f} ≤ Liq ${_mon_liq:.4f}"
+                    elif _mon_yon == "SHORT":
+                        if _mon_sl > 0 and _mon_fiyat >= _mon_sl:
+                            sl_tetiklendi = True
+                            sl_neden = f"🛡️ Dinamik SL ({_mon_yon}): Fiyat ${_mon_fiyat:.4f} ≥ SL ${_mon_sl:.4f}"
+                        elif _mon_liq > 0 and _mon_fiyat >= _mon_liq:
+                            sl_tetiklendi = True
+                            sl_neden = f"☠️ Likidasyon ({_mon_yon}): Fiyat ${_mon_fiyat:.4f} ≥ Liq ${_mon_liq:.4f}"
+
+                    if sl_tetiklendi:
+                        with lock:
+                            log_ekle(f"🚨 [{_mon_sembol}] {sl_neden}", state, is_liq="Likidasyon" in sl_neden)
+                        islem_kapat_with_retry(state, _mon_tid, _mon_fiyat, sl_neden, mon_exchange,
+                                               is_liq="Likidasyon" in sl_neden)
+                        continue
+
+                    # ── TP1/TP2 yön bazlı kontrol ──
+                    if _mon_yon == "LONG":
+                        tp1_tetiklendi = _mon_tp1 > 0 and _mon_fiyat >= _mon_tp1
+                        tp2_tetiklendi = _mon_tp2 > 0 and _mon_fiyat >= _mon_tp2
+                    elif _mon_yon == "SHORT":
+                        tp1_tetiklendi = _mon_tp1 > 0 and _mon_fiyat <= _mon_tp1
+                        tp2_tetiklendi = _mon_tp2 > 0 and _mon_fiyat <= _mon_tp2
+                    else:
+                        continue
+
+                    # ── TP2 Kontrolü (önce kontrol — tüm pozisyonu kapat) ──
+                    if tp2_tetiklendi:
+                        with lock:
+                            log_ekle(f"💰 [{_mon_sembol}] TP2 HEDEFİNE ULAŞILDI! Fiyat: ${_mon_fiyat:.4f} → TP2: ${_mon_tp2:.4f}", state, is_breakout=True)
+                        islem_kapat_with_retry(state, _mon_tid, _mon_fiyat, f"🎯 TP2 Hedefi ({_mon_yon})", mon_exchange)
+                        threading.Thread(
+                            target=send_telegram_msg,
+                            args=(f"💰 <b>{_mon_sembol}</b> TP2 HEDEFİNE ULAŞILDI!\nFiyat: ${_mon_fiyat:.4f}\nTüm pozisyon kapatıldı.",),
+                            daemon=True,
+                        ).start()
+                        continue
+
+                    # ── TP1 Kontrolü (yarı pozisyon kapat + SL girişe çek) ──
+                    if tp1_tetiklendi and not _mon_tp1_yapildi:
+                        with lock:
+                            poz_ref = state["aktif_pozisyonlar"].get(_mon_tid)
+                            if poz_ref:
+                                _yari_margin = poz_ref["islem_margin"] / 2.0
+                                _kaldirac = poz_ref.get("islem_kaldirac", 1)
+                                _yari_pnl = pnl_hesapla(_mon_yon, _mon_giris, _mon_fiyat, _yari_margin * _kaldirac, _kaldirac)
+
+                                state["bakiye"] += _yari_margin + _yari_pnl
+                                poz_ref["islem_margin"] = _yari_margin
+                                poz_ref["tp1_yapildi"] = True
+                                poz_ref["dinamik_sl_fiyat"] = _mon_giris  # Break-Even
+
+                                log_ekle(
+                                    f"🎯 [{_mon_sembol}] TP1 ALINDI! SL Girişe Çekildi. "
+                                    f"Yarı PNL: {_yari_pnl:+.4f} USDT, Kalan Margin: ${_yari_margin:.2f}",
+                                    state, is_breakout=True
+                                )
+
+                                _zaman_tp1 = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                                state["islem_gecmisi"].append({
+                                    "zaman": _zaman_tp1, "sembol": _mon_sembol,
+                                    "sinyal": f"🎯 TP1: {_mon_yon}",
+                                    "fiyat": round(_mon_fiyat, 4), "kaldirac": f"{_kaldirac}x",
+                                    "poz_buyukluk": round(_yari_margin * _kaldirac, 2),
+                                    "bakiye_usdt": round(state["bakiye"], 2),
+                                    "kar_zarar": f"{_yari_pnl:+.2f} USDT",
+                                    "ai_notu": "TP1 Kısmi Kapatma + Break-Even SL"
+                                })
+
+                        threading.Thread(
+                            target=send_telegram_msg,
+                            args=(
+                                f"🎯 <b>{_mon_sembol}</b> TP1 ALINDI!\n"
+                                f"Fiyat: ${_mon_fiyat:.4f} → TP1: ${_mon_tp1:.4f}\n"
+                                f"Yarı pozisyon kapatıldı. PNL: {_yari_pnl:+.4f} USDT\n"
+                                f"🛡️ SL giriş fiyatına (${_mon_giris:.4f}) çekildi.",
+                            ),
+                            daemon=True,
+                        ).start()
+
+                        # Immediate Save
+                        try:
+                            _tp1_save = {k: v for k, v in state.items() if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
+                            ps.state_kaydet(_tp1_save)
+                        except Exception:
+                            pass
+
+                except (ccxt.BaseError, sqlite3.Error, Exception) as _mon_err:
+                    with lock:
+                        log_ekle(f"⚠️ TP Monitor Hatası [{_mon_tid}]: {str(_mon_err)[:60]}", state)
+
+        except (ccxt.BaseError, sqlite3.Error, Exception) as e:
+            # Exchange bağlantı hatası — yeniden bağlan
+            err_str = str(e)
+            if "ExchangeNotAvailable" in err_str or "NetworkError" in err_str or "RequestTimeout" in err_str:
+                try:
+                    mon_exchange = _exchange_olustur(state, pro=False)
+                    mon_exchange.load_markets()
+                except Exception:
+                    pass
+            with lock:
+                log_ekle(f"⚠️ V36 Monitor Hatası: {str(e)[:80]}", state)
+
+        # 1 saniye aralıkla kontrol (high-frequency)
+        dur_sinyali.wait(1.0)
+
+
+# ─────────────────────────────────────────────
 # Bot Worker (Singleton Manager)
 # ─────────────────────────────────────────────
 class BotWorker:
@@ -1877,6 +1969,7 @@ class BotWorker:
         self._ws_thread = None
         self._engine_thread = None
         self._corr_thread = None
+        self._pos_monitor_thread = None
         self.bootstrap()
 
     def bootstrap(self):
@@ -1940,6 +2033,10 @@ class BotWorker:
 
         self._corr_thread = threading.Thread(target=korelasyon_rutini, args=(raw, lock, dur), daemon=True)
         self._corr_thread.start()
+
+        # V36: High-Frequency Position Monitor (1s interval, detached thread)
+        self._pos_monitor_thread = threading.Thread(target=position_monitor_loop, args=(raw, lock, dur), daemon=True)
+        self._pos_monitor_thread.start()
 
         # V23: Telegram Command Listener
         self._tg_listener_thread = threading.Thread(
