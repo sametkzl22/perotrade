@@ -443,6 +443,14 @@ with st.sidebar:
     else:
         st.markdown(f"**🔴 Durum:** {S.get('bot_durumu', 'Durduruldu')}")
 
+    # V40: Risk Level indicator
+    _risk_sev = S.get("risk_seviyesi", "🟢 Güvenli")
+    _ardisik_kayip = S.get("ardisik_kayip_sayaci", 0)
+    _risk_line = f"**🛡️ Risk:** {_risk_sev}"
+    if _ardisik_kayip > 0:
+        _risk_line += f" | Ard Arda Kayıp: {_ardisik_kayip}/3"
+    st.markdown(_risk_line)
+
     # BTC Trendi, Fonlama, MTF
     st.markdown("---")
     st.markdown(f"**₿ BTC Trendi:** {S.get('btc_trendi', 'Taranıyor')}")

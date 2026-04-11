@@ -32,10 +32,20 @@ COMPOUNDING = True         # Her günün kârı ertesi günün bakiyesine ekleni
 # ───── Risk Limitleri ─────
 DAILY_PROFIT_LOCK = 500.0  # %500 kâra ulaşınca -> Güvenli Mod (eski)
 PROFIT_LOCK_RATIO = 0.8    # Kazanılan %10 hedefin %80'i kilitlenir
-DAILY_LOSS_STOP = -15.0    # V25: %15 kayıpta MOLA tetiklenir
+DAILY_LOSS_STOP = -12.0    # V40: %12 kayıpta MOLA tetiklenir (eski -15, kurtarma %13.6 gerektirir)
 EMERGENCY_STOP_ENABLED = True  # V25: Acil durdurma aktif
 COOLING_OFF_HOURS = 4          # V26: Mola süresi (saat) — kayıp eşiği sonrası bekleme
 MAX_CONCURRENT_TRADES = 99 # Aynı anda açılabilecek maksimum işlem sayısı
+
+# ───── V40: Dynamic Risk Shield ─────
+RISK_TIER_1_LOSS_PCT = -5.0    # Günlük %-5 kayıpta margin %50'ye düşer
+RISK_TIER_2_LOSS_PCT = -10.0   # Günlük %-10 kayıpta margin %25'e düşer
+RISK_TIER_1_SCALE = 0.50       # Tier1: Önerilen margin'in %50'si
+RISK_TIER_2_SCALE = 0.25       # Tier2: Önerilen margin'in %25'i
+CONSECUTIVE_LOSS_LIMIT = 3     # Ard arda 3 zararlı kapanışta 2 saatlik MOLA
+CONSECUTIVE_LOSS_COOL_HOURS = 2  # Ard arda kayıp molası süresi
+HWM_DRAWDOWN_PCT = 10.0        # Günlük peak equity'den %10 düşüşte 4 saat stop
+HWM_COOL_HOURS = 4             # HWM drawdown molası süresi
 
 # V19/V25 Gelişmiş Risk Yönetimi Mimarisi
 MAX_WALLET_RISK_PCT = 100.0

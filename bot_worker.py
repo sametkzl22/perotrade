@@ -492,6 +492,12 @@ def islem_kapat(state, trade_id, fiyat, neden, is_breakout=False, is_liq=False):
     state["martingale_ardisik_kayip"] = 0
     state["martingale_carpan"] = 1.0
 
+    # V40: Consecutive Loss Guard — ard arda kayıp sayıcı
+    if aktif_pnl < 0:
+        state["ardisik_kayip_sayaci"] = state.get("ardisik_kayip_sayaci", 0) + 1
+    else:
+        state["ardisik_kayip_sayaci"] = 0
+
     # v7: SQLite'a işlem kapanışı kaydet
     # 🚀 Evolutionary Trainer: Genişletilmiş teknik indikatör verileri + ödül/ceza
     evo_rsi = None
@@ -547,7 +553,8 @@ def islem_kapat(state, trade_id, fiyat, neden, is_breakout=False, is_liq=False):
             liquidity_depth_score=state.get("liquidity_depth_score"),
             max_pnl_pct=_max_pnl_pct,
             atr_at_entry=_atr_at_entry,
-            exit_strategy=_exit_strategy
+            exit_strategy=_exit_strategy,
+            consecutive_loss_count=state.get("ardisik_kayip_sayaci", 0)
         )
     except (ccxt.BaseError, sqlite3.Error, Exception):
         pass
@@ -940,6 +947,10 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                     state["mola_bitis_zamani"] = 0
                     state["bot_durumu"] = "Çalışıyor"
                     state["gunluk_pik_kar"] = 0.0  # Günlük pik sıfırla
+                    # V40: HWM + ardışık kayıp reset
+                    state["daily_peak_equity"] = state['bakiye'] + aktif_margin_toplami(state.get('aktif_pozisyonlar', {}))
+                    state["ardisik_kayip_sayaci"] = 0
+                    state["risk_seviyesi"] = "🟢 Güvenli"
                     # V31 FIX: Mola sonrası bakiyeyi yeni sıfır noktası olarak kabul et
                     # Eski zararın tekrar mola tetiklemesini engeller
                     state['gun_baslangic_bakiye'] = state['bakiye'] + aktif_margin_toplami(state.get('aktif_pozisyonlar', {}))
@@ -1185,7 +1196,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                             # HFT devam! Durdurmak yok.
                             pass
 
-                    loss_stop = getattr(cfg, "DAILY_LOSS_STOP", -15.0)
+                    loss_stop = getattr(cfg, "DAILY_LOSS_STOP", -12.0)
                     if not is_challenge and gunluk_kar <= loss_stop and getattr(cfg, "EMERGENCY_STOP_ENABLED", True):
                         # V26: MOLA SİSTEMİ — tüm pozisyonları kapat, 4 saat bekle, sonra otomatik devam
                         mola_saat = getattr(cfg, "COOLING_OFF_HOURS", 4)
@@ -1219,6 +1230,61 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                             args=(tg_mola_msg,),
                             daemon=True,
                         ).start()
+
+                    # V40: Consecutive Loss Guard — ard arda 3 kayıpta 2 saatlik MOLA
+                    _ardisik = state.get("ardisik_kayip_sayaci", 0)
+                    _ardisik_limit = getattr(cfg, "CONSECUTIVE_LOSS_LIMIT", 3)
+                    if not is_challenge and _ardisik >= _ardisik_limit and state.get("mola_bitis_zamani", 0) <= 0:
+                        _cl_saat = getattr(cfg, "CONSECUTIVE_LOSS_COOL_HOURS", 2)
+                        _cl_bitis = time.time() + (_cl_saat * 3600)
+                        state["mola_bitis_zamani"] = _cl_bitis
+                        state["bot_durumu"] = f"🛡️ ARD ARDA KAYIP MOLASI ({_cl_saat}s)"
+                        state["ardisik_kayip_sayaci"] = 0  # Reset
+                        log_ekle(f"🛡️ V40 CONSECUTIVE LOSS: {_ardisik} ard arda kayıp! {_cl_saat} saatlik mola başlatıldı.", state, is_breakout=True)
+                        karar_paketi["karar"] = "BEKLE"
+                        karar_paketi["dusunce"] = f"🛡️ Ard arda {_ardisik} kayıp. {_cl_saat}s mola."
+                        threading.Thread(
+                            target=send_telegram_msg,
+                            args=(f"🛡️ Ard arda {_ardisik} kayıp! {_cl_saat} saatlik koruma molası başlatıldı.",),
+                            daemon=True,
+                        ).start()
+
+                    # V40: High-Water Mark (HWM) Drawdown Guard
+                    if not is_challenge:
+                        _hwm_equity = mevcut_bakiye  # mevcut_bakiye = bakiye + margin
+                        _daily_peak = state.get("daily_peak_equity", _hwm_equity)
+                        if _hwm_equity > _daily_peak:
+                            state["daily_peak_equity"] = _hwm_equity
+                            _daily_peak = _hwm_equity
+                        if _daily_peak > 0:
+                            _hwm_dd = ((_daily_peak - _hwm_equity) / _daily_peak) * 100
+                            _hwm_limit = getattr(cfg, "HWM_DRAWDOWN_PCT", 10.0)
+                            if _hwm_dd >= _hwm_limit and state.get("mola_bitis_zamani", 0) <= 0:
+                                _hwm_saat = getattr(cfg, "HWM_COOL_HOURS", 4)
+                                _hwm_bitis = time.time() + (_hwm_saat * 3600)
+                                state["mola_bitis_zamani"] = _hwm_bitis
+                                state["bot_durumu"] = f"🛡️ HWM KORUMA ({_hwm_saat}s)"
+                                log_ekle(f"🛡️ V40 HWM: Peak ${_daily_peak:.2f}'dan %{_hwm_dd:.1f} düşüş! {_hwm_saat}s mola.", state, is_breakout=True)
+                                karar_paketi["karar"] = "BEKLE"
+                                karar_paketi["dusunce"] = f"🛡️ HWM: Peak'ten %{_hwm_dd:.1f} düşüş. {_hwm_saat}s koruma."
+                                threading.Thread(
+                                    target=send_telegram_msg,
+                                    args=(f"🛡️ HWM KORUMA! Peak ${_daily_peak:.2f}’den %{_hwm_dd:.1f} düşüş. {_hwm_saat}s mola.",),
+                                    daemon=True,
+                                ).start()
+
+                    # V40: Dynamic Risk Level for dashboard
+                    if not is_challenge:
+                        _t1 = getattr(cfg, "RISK_TIER_1_LOSS_PCT", -5.0)
+                        _t2 = getattr(cfg, "RISK_TIER_2_LOSS_PCT", -10.0)
+                        if state.get("mola_bitis_zamani", 0) > 0 and time.time() < state.get("mola_bitis_zamani", 0):
+                            state["risk_seviyesi"] = "🔴 MOLA Aktif"
+                        elif gunluk_kar <= _t2:
+                            state["risk_seviyesi"] = "🟠 Azaltılmış Risk (%25)"
+                        elif gunluk_kar <= _t1:
+                            state["risk_seviyesi"] = "🟡 Azaltılmış Risk (%50)"
+                        else:
+                            state["risk_seviyesi"] = "🟢 Güvenli"
 
                     # DCA
                     dca_tid = sembol_icin_trade_id_bul(state.get("aktif_pozisyonlar", {}), secilen_sembol)
@@ -1409,7 +1475,20 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                     margin = min(margin_hedef, kalan_risk_limiti)
                                     margin = min(margin, mevcut_bakiye)
                                     margin = min(margin, mevcut_bakiye * 0.5)
-                                    
+
+                            # V40: Dynamic Risk Scaling — günlük zarara göre margin kıs
+                            _gunluk_kar_v40 = gunluk_kar_hesapla(state)
+                            _t1_loss = getattr(cfg, "RISK_TIER_1_LOSS_PCT", -5.0)
+                            _t2_loss = getattr(cfg, "RISK_TIER_2_LOSS_PCT", -10.0)
+                            if _gunluk_kar_v40 <= _t2_loss:
+                                _risk_scale = getattr(cfg, "RISK_TIER_2_SCALE", 0.25)
+                                margin = margin * _risk_scale
+                                log_ekle(f"🛡️ V40 RISK T2: Günlük %{_gunluk_kar_v40:.1f} ≤ %{_t2_loss}. Margin %25'e düşürüldü: ${margin:.2f}", state)
+                            elif _gunluk_kar_v40 <= _t1_loss:
+                                _risk_scale = getattr(cfg, "RISK_TIER_1_SCALE", 0.50)
+                                margin = margin * _risk_scale
+                                log_ekle(f"🛡️ V40 RISK T1: Günlük %{_gunluk_kar_v40:.1f} ≤ %{_t1_loss}. Margin %50'ye düşürüldü: ${margin:.2f}", state)
+
                             buyukluk_usdt = margin * tavsiye_kaldirac
                             
                             # V29: Slippage Guard (Market Impact Simulator)

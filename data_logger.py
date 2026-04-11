@@ -127,6 +127,8 @@ def _migrate_db(db_path: str):
             "ALTER TABLE islem_log ADD COLUMN max_pnl_pct REAL",
             "ALTER TABLE islem_log ADD COLUMN atr_at_entry REAL",
             "ALTER TABLE islem_log ADD COLUMN exit_strategy TEXT DEFAULT ''",
+            # V40 migration: Consecutive Loss Guard analytics
+            "ALTER TABLE islem_log ADD COLUMN consecutive_loss_count INTEGER DEFAULT 0",
         ]
         for sql in migrations:
             try:
@@ -191,14 +193,15 @@ def _db_writer_worker():
                            (zaman, sembol, tip, giris_fiyati, cikis_fiyati, pnl, pnl_pct,
                             kaldirac, margin, neden, etiket, trade_id, rsi, bollinger_ust, bollinger_alt, hacim_oran,
                             order_purpose, ai_confidence, liquidity_depth_score,
-                            max_pnl_pct, atr_at_entry, exit_strategy)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            max_pnl_pct, atr_at_entry, exit_strategy, consecutive_loss_count)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (data["zaman"], data["sembol"], data["tip"],
                          data["giris_fiyati"], data["cikis_fiyati"], data["pnl"], data["pnl_pct"],
                          data["kaldirac"], data["margin"], data["neden"], data["etiket"], data["trade_id"],
                          data["rsi"], data["bollinger_ust"], data["bollinger_alt"], data["hacim_oran"],
                          data["order_purpose"], data["ai_confidence"], data["liquidity_depth_score"],
-                         data["max_pnl_pct"], data["atr_at_entry"], data["exit_strategy"])
+                         data["max_pnl_pct"], data["atr_at_entry"], data["exit_strategy"],
+                         data["consecutive_loss_count"])
                     )
                     conn.execute("COMMIT")
                     print(f"✅ Trade logged to DB via Queue: {data['sembol']} {data['tip']} [tid:{data['trade_id']}] (PNL: ${data['pnl']:.2f})")
@@ -249,7 +252,8 @@ def islem_kaydet(sembol: str, tip: str, giris_fiyati: float,
                  order_purpose: str = "", ai_confidence: float = None,
                  liquidity_depth_score: float = None,
                  max_pnl_pct: float = None, atr_at_entry: float = None,
-                 exit_strategy: str = ""):
+                 exit_strategy: str = "",
+                 consecutive_loss_count: int = 0):
     data = {
         "zaman": datetime.now(timezone.utc).isoformat(),
         "sembol": sembol, "tip": tip, "giris_fiyati": giris_fiyati,
@@ -260,7 +264,8 @@ def islem_kaydet(sembol: str, tip: str, giris_fiyati: float,
         "order_purpose": order_purpose, "ai_confidence": ai_confidence,
         "liquidity_depth_score": liquidity_depth_score,
         "max_pnl_pct": max_pnl_pct, "atr_at_entry": atr_at_entry,
-        "exit_strategy": exit_strategy
+        "exit_strategy": exit_strategy,
+        "consecutive_loss_count": consecutive_loss_count
     }
     _write_queue.put({"type": "islem", "data": data})
 
