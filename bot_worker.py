@@ -530,6 +530,10 @@ def islem_kapat(state, trade_id, fiyat, neden, is_breakout=False, is_liq=False):
     try:
         pnl_pct_val = (aktif_pnl / margin * 100) if margin > 0 else 0
         evo_etiket = "EVO_TRAINER" if is_evo else etiket
+        # V39: Extract trailing stop metadata from position
+        _max_pnl_pct = poz.get("_max_pnl_pct", None)
+        _atr_at_entry = poz.get("atr_at_entry", None)
+        _exit_strategy = poz.get("exit_strategy", neden[:30] if neden else "")
         data_logger.islem_kaydet(
             sembol=sembol, tip=eski_poz, giris_fiyati=poz_giris,
             cikis_fiyati=fiyat, pnl=aktif_pnl, pnl_pct=pnl_pct_val,
@@ -540,7 +544,10 @@ def islem_kapat(state, trade_id, fiyat, neden, is_breakout=False, is_liq=False):
             bollinger_alt=evo_boll_alt, hacim_oran=evo_hacim_oran,
             order_purpose=neden[:80] if neden else "",
             ai_confidence=state.get("ai_guven_skoru"),
-            liquidity_depth_score=state.get("liquidity_depth_score")
+            liquidity_depth_score=state.get("liquidity_depth_score"),
+            max_pnl_pct=_max_pnl_pct,
+            atr_at_entry=_atr_at_entry,
+            exit_strategy=_exit_strategy
         )
     except (ccxt.BaseError, sqlite3.Error, Exception):
         pass
@@ -1469,15 +1476,32 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
 
                             tid = trade_id_olustur()
 
-                            # V34: TP1 (%2 ROE) ve TP2 (%5 ROE) hedef fiyat hesaplama
+                            # V39: ATR tabanlı dinamik TP2 hesaplama
                             tp1_pct = getattr(cfg, "TP1_ROE_PCT", 2.0) / 100.0
-                            tp2_pct = getattr(cfg, "TP2_ROE_PCT", 5.0) / 100.0
+                            atr_mult = getattr(cfg, "ATR_MULTIPLIER_TP2", 3.0)
+                            _entry_atr = 0.0
+                            try:
+                                _atr_df = ai_engine.mum_verisi_cek(exchange, secilen_sembol, "1h", limit=30)
+                                if _atr_df is not None and not _atr_df.empty:
+                                    _entry_atr = ai_engine.atr_hesapla(_atr_df, 14)
+                            except Exception:
+                                pass
+
                             if sinyal == "LONG":
                                 tp1_f = fiyat * (1 + tp1_pct / tavsiye_kaldirac)
-                                tp2_f = fiyat * (1 + tp2_pct / tavsiye_kaldirac)
+                                # V39: ATR dinamik TP2, fallback: sabit %ROE
+                                if _entry_atr > 0:
+                                    tp2_f = fiyat + (_entry_atr * atr_mult)
+                                else:
+                                    tp2_pct = getattr(cfg, "TP2_ROE_PCT", 5.0) / 100.0
+                                    tp2_f = fiyat * (1 + tp2_pct / tavsiye_kaldirac)
                             else:  # SHORT
                                 tp1_f = fiyat * (1 - tp1_pct / tavsiye_kaldirac)
-                                tp2_f = fiyat * (1 - tp2_pct / tavsiye_kaldirac)
+                                if _entry_atr > 0:
+                                    tp2_f = fiyat - (_entry_atr * atr_mult)
+                                else:
+                                    tp2_pct = getattr(cfg, "TP2_ROE_PCT", 5.0) / 100.0
+                                    tp2_f = fiyat * (1 - tp2_pct / tavsiye_kaldirac)
 
                             yeni_poz = {
                                 "trade_id": tid,
@@ -1499,6 +1523,10 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 "tp1_fiyat": round(tp1_f, 8),
                                 "tp2_fiyat": round(tp2_f, 8),
                                 "tp1_yapildi": False,
+                                # V39: Trend Following tracking
+                                "atr_at_entry": round(_entry_atr, 8),
+                                "max_fiyat": fiyat,  # Peak tracker
+                                "exit_strategy": "",
                             }
                             state["aktif_pozisyonlar"][tid] = yeni_poz
                             state["bakiye"] -= margin
@@ -1867,7 +1895,30 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
                                                is_liq="Likidasyon" in sl_neden)
                         continue
 
+                    # ── V39: max_pnl_pct sürekli takip ──
+                    _mon_margin = _mon_poz.get("islem_margin", 0)
+                    _mon_kaldirac = _mon_poz.get("islem_kaldirac", 1)
+                    if _mon_margin > 0:
+                        _mon_pnl = pnl_hesapla(_mon_yon, _mon_giris, _mon_fiyat, _mon_margin * _mon_kaldirac, _mon_kaldirac)
+                        _mon_roe_pct = (_mon_pnl / _mon_margin) * 100
+                    else:
+                        _mon_roe_pct = 0.0
+
+                    with lock:
+                        poz_ref_track = state["aktif_pozisyonlar"].get(_mon_tid)
+                        if poz_ref_track:
+                            _prev_max = poz_ref_track.get("_max_pnl_pct", 0.0)
+                            if _mon_roe_pct > _prev_max:
+                                poz_ref_track["_max_pnl_pct"] = round(_mon_roe_pct, 2)
+                            # V39: Peak fiyat takibi
+                            _old_peak = poz_ref_track.get("max_fiyat", _mon_giris)
+                            if _mon_yon == "LONG":
+                                poz_ref_track["max_fiyat"] = max(_old_peak, _mon_fiyat)
+                            elif _mon_yon == "SHORT":
+                                poz_ref_track["max_fiyat"] = min(_old_peak, _mon_fiyat) if _old_peak > 0 else _mon_fiyat
+
                     # ── TP1/TP2 yön bazlı kontrol ──
+                    _mon_ts_aktif = _mon_poz.get("ts_aktif", False)
                     if _mon_yon == "LONG":
                         tp1_tetiklendi = _mon_tp1 > 0 and _mon_fiyat >= _mon_tp1
                         tp2_tetiklendi = _mon_tp2 > 0 and _mon_fiyat >= _mon_tp2
@@ -1877,16 +1928,68 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
                     else:
                         continue
 
-                    # ── TP2 Kontrolü (önce kontrol — tüm pozisyonu kapat) ──
-                    if tp2_tetiklendi:
+                    # ── V39: Trailing Stop — TP2 tetiklendi ise pozisyon KAPATILMAZ, trailing moda geçilir ──
+                    if _mon_ts_aktif:
+                        # Trailing mod zaten aktif — peak retracement kontrolü
                         with lock:
-                            log_ekle(f"💰 [{_mon_sembol}] TP2 HEDEFİNE ULAŞILDI! Fiyat: ${_mon_fiyat:.4f} → TP2: ${_mon_tp2:.4f}", state, is_breakout=True)
-                        islem_kapat_with_retry(state, _mon_tid, _mon_fiyat, f"🎯 TP2 Hedefi ({_mon_yon})", mon_exchange)
+                            poz_ref_ts = state["aktif_pozisyonlar"].get(_mon_tid)
+                            if poz_ref_ts:
+                                _peak = poz_ref_ts.get("max_fiyat", _mon_giris)
+                                _trailing_pct = getattr(cfg, "TRAILING_PCT", 3.0)
+                                if _mon_yon == "LONG":
+                                    _retracement = ((_peak - _mon_fiyat) / _peak) * 100 if _peak > 0 else 0
+                                else:
+                                    _retracement = ((_mon_fiyat - _peak) / _peak) * 100 if _peak > 0 else 0
+
+                                if _retracement >= _trailing_pct:
+                                    _ts_neden = (
+                                        f"📉 V39 TRAILING STOP: {_mon_yon} peak ${_peak:.4f}'dan "
+                                        f"%{_retracement:.1f} geri çekilme (Eşik: %{_trailing_pct}). "
+                                        f"Max ROE: %{poz_ref_ts.get('_max_pnl_pct', 0):.1f}"
+                                    )
+                                    poz_ref_ts["exit_strategy"] = "TRAILING"
+                                    log_ekle(f"📉 [{_mon_sembol}] {_ts_neden}", state, is_breakout=True)
+                                    islem_kapat_with_retry(state, _mon_tid, _mon_fiyat, _ts_neden, mon_exchange)
+                                    threading.Thread(
+                                        target=send_telegram_msg,
+                                        args=(
+                                            f"📉 <b>{_mon_sembol}</b> TRAILING STOP!\n"
+                                            f"Peak: ${_peak:.4f} → Şimdi: ${_mon_fiyat:.4f}\n"
+                                            f"Geri Çekilme: %{_retracement:.1f} ≥ Eşik %{_trailing_pct}\n"
+                                            f"Max ROE: %{poz_ref_ts.get('_max_pnl_pct', 0):.1f}",
+                                        ),
+                                        daemon=True,
+                                    ).start()
+                                    continue
+
+                    elif tp2_tetiklendi and not _mon_ts_aktif:
+                        # V39: TP2'ye ulaşıldı — pozisyon KAPATILMAZ, trailing moda geç
+                        with lock:
+                            poz_ref_tp2 = state["aktif_pozisyonlar"].get(_mon_tid)
+                            if poz_ref_tp2:
+                                poz_ref_tp2["ts_aktif"] = True
+                                poz_ref_tp2["max_fiyat"] = _mon_fiyat
+                                log_ekle(
+                                    f"🚀 [{_mon_sembol}] V39 TRAILING MOD AKTİF! TP2 (${_mon_tp2:.4f}) aşıldı. "
+                                    f"Peak takibi başladı. Fiyat: ${_mon_fiyat:.4f}. "
+                                    f"Çıkış: peak'ten %{getattr(cfg, 'TRAILING_PCT', 3.0)} geri çekilmede.",
+                                    state, is_breakout=True
+                                )
                         threading.Thread(
                             target=send_telegram_msg,
-                            args=(f"💰 <b>{_mon_sembol}</b> TP2 HEDEFİNE ULAŞILDI!\nFiyat: ${_mon_fiyat:.4f}\nTüm pozisyon kapatıldı.",),
+                            args=(
+                                f"🚀 <b>{_mon_sembol}</b> TRAILING MOD AKTİF!\n"
+                                f"TP2 ${_mon_tp2:.4f} aşıldı. Peak takibi başladı.\n"
+                                f"Çıkış: Peak'ten %{getattr(cfg, 'TRAILING_PCT', 3.0)} geri çekilmede.",
+                            ),
                             daemon=True,
                         ).start()
+                        # Immediate Save
+                        try:
+                            _ts_save = {k: v for k, v in state.items() if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
+                            ps.state_kaydet(_ts_save)
+                        except Exception:
+                            pass
                         continue
 
                     # ── TP1 Kontrolü (yarı pozisyon kapat + SL girişe çek) ──
@@ -1902,6 +2005,7 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
                                 poz_ref["islem_margin"] = _yari_margin
                                 poz_ref["tp1_yapildi"] = True
                                 poz_ref["dinamik_sl_fiyat"] = _mon_giris  # Break-Even
+                                poz_ref["exit_strategy"] = "TP1"
 
                                 log_ekle(
                                     f"🎯 [{_mon_sembol}] TP1 ALINDI! SL Girişe Çekildi. "

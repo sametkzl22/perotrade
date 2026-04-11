@@ -123,6 +123,10 @@ def _migrate_db(db_path: str):
             "ALTER TABLE islem_log ADD COLUMN order_purpose TEXT DEFAULT ''",
             "ALTER TABLE islem_log ADD COLUMN ai_confidence REAL",
             "ALTER TABLE islem_log ADD COLUMN liquidity_depth_score REAL",
+            # V39 migrations: Trend Following + Trailing Stop analytics
+            "ALTER TABLE islem_log ADD COLUMN max_pnl_pct REAL",
+            "ALTER TABLE islem_log ADD COLUMN atr_at_entry REAL",
+            "ALTER TABLE islem_log ADD COLUMN exit_strategy TEXT DEFAULT ''",
         ]
         for sql in migrations:
             try:
@@ -186,13 +190,15 @@ def _db_writer_worker():
                         """INSERT INTO islem_log
                            (zaman, sembol, tip, giris_fiyati, cikis_fiyati, pnl, pnl_pct,
                             kaldirac, margin, neden, etiket, trade_id, rsi, bollinger_ust, bollinger_alt, hacim_oran,
-                            order_purpose, ai_confidence, liquidity_depth_score)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            order_purpose, ai_confidence, liquidity_depth_score,
+                            max_pnl_pct, atr_at_entry, exit_strategy)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (data["zaman"], data["sembol"], data["tip"],
                          data["giris_fiyati"], data["cikis_fiyati"], data["pnl"], data["pnl_pct"],
                          data["kaldirac"], data["margin"], data["neden"], data["etiket"], data["trade_id"],
                          data["rsi"], data["bollinger_ust"], data["bollinger_alt"], data["hacim_oran"],
-                         data["order_purpose"], data["ai_confidence"], data["liquidity_depth_score"])
+                         data["order_purpose"], data["ai_confidence"], data["liquidity_depth_score"],
+                         data["max_pnl_pct"], data["atr_at_entry"], data["exit_strategy"])
                     )
                     conn.execute("COMMIT")
                     print(f"✅ Trade logged to DB via Queue: {data['sembol']} {data['tip']} [tid:{data['trade_id']}] (PNL: ${data['pnl']:.2f})")
@@ -241,7 +247,9 @@ def islem_kaydet(sembol: str, tip: str, giris_fiyati: float,
                  rsi: float = None, bollinger_ust: float = None,
                  bollinger_alt: float = None, hacim_oran: float = None,
                  order_purpose: str = "", ai_confidence: float = None,
-                 liquidity_depth_score: float = None):
+                 liquidity_depth_score: float = None,
+                 max_pnl_pct: float = None, atr_at_entry: float = None,
+                 exit_strategy: str = ""):
     data = {
         "zaman": datetime.now(timezone.utc).isoformat(),
         "sembol": sembol, "tip": tip, "giris_fiyati": giris_fiyati,
@@ -250,7 +258,9 @@ def islem_kaydet(sembol: str, tip: str, giris_fiyati: float,
         "etiket": etiket, "trade_id": trade_id, "rsi": rsi,
         "bollinger_ust": bollinger_ust, "bollinger_alt": bollinger_alt, "hacim_oran": hacim_oran,
         "order_purpose": order_purpose, "ai_confidence": ai_confidence,
-        "liquidity_depth_score": liquidity_depth_score
+        "liquidity_depth_score": liquidity_depth_score,
+        "max_pnl_pct": max_pnl_pct, "atr_at_entry": atr_at_entry,
+        "exit_strategy": exit_strategy
     }
     _write_queue.put({"type": "islem", "data": data})
 
@@ -294,14 +304,16 @@ def son_islemler_getir(limit: int = 50) -> list:
         rows = conn.execute(
             """SELECT zaman, sembol, tip, giris_fiyati, cikis_fiyati,
                       pnl, pnl_pct, kaldirac, margin, neden,
-                      order_purpose, ai_confidence, liquidity_depth_score
+                      order_purpose, ai_confidence, liquidity_depth_score,
+                      max_pnl_pct, atr_at_entry, exit_strategy
                FROM islem_log ORDER BY id DESC LIMIT ?""", (limit,)
         ).fetchall()
         return [
             {"zaman": r[0], "sembol": r[1], "tip": r[2],
              "giris": r[3], "cikis": r[4], "pnl": r[5],
              "pnl_pct": r[6], "kaldirac": r[7], "margin": r[8], "neden": r[9],
-             "order_purpose": r[10], "ai_confidence": r[11], "liquidity_depth_score": r[12]}
+             "order_purpose": r[10], "ai_confidence": r[11], "liquidity_depth_score": r[12],
+             "max_pnl_pct": r[13], "atr_at_entry": r[14], "exit_strategy": r[15]}
             for r in rows
         ]
     except (_CcxtBaseError, sqlite3.Error, Exception):

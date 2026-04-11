@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
+
 
 import config as cfg
 import persistent_state as ps
@@ -796,7 +796,7 @@ if S.get("cuzdan_gecmisi"):
 # ─────────────────────────────────────────────
 # Dashboard Tabs
 # ─────────────────────────────────────────────
-tab_dash, tab_tv, tab_gecmis, tab_canli = st.tabs(["📊 Dashboard", "📈 Grafikler (TradingView)", "📚 Geçmiş Performans", "⚡ Canlı İşlem Akışı"])
+tab_dash, tab_gecmis, tab_canli = st.tabs(["📊 Dashboard", "📚 Geçmiş Performans", "⚡ Canlı İşlem Akışı"])
 
 with tab_dash:
     st.markdown("### 💼 Cüzdan Özeti")
@@ -863,8 +863,11 @@ with tab_dash:
             tp1_f = p.get('tp1_fiyat', 0)
             tp2_f = p.get('tp2_fiyat', 0)
             tp1_yapildi = p.get('tp1_yapildi', False)
+            ts_aktif = p.get('ts_aktif', False)
             tp1_badge_html = ""
-            if tp1_yapildi:
+            if ts_aktif:
+                tp1_badge_html = "<span style='background: linear-gradient(135deg, #f7971e, #ffd200); color: #1a1a2e; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; margin-left: 8px;'>🚀 TRAILING MOD AKTİF</span>"
+            elif tp1_yapildi:
                 tp1_badge_html = "<span style='background: linear-gradient(135deg, #00b894, #00cec9); color: #fff; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; margin-left: 8px;'>🎯 TP1 ALINDI - Risksiz Mod</span>"
             tp_satir_html = ""
             if tp1_f > 0 or tp2_f > 0:
@@ -983,51 +986,6 @@ with tab_dash:
                 cls_name = 'ai-log-breakout'
             log_kutusu.markdown(f"<div class='{cls_name}'>[{log.get('time', '')}] {log.get('msg', '')}</div>", unsafe_allow_html=True)
 
-with tab_tv:
-    st.markdown("### 📈 TradingView Gözlem Ekranı")
-    aktif_s = S.get("aktif_sembol", "")
-    if aktif_s and aktif_s != "Bekleniyor...":
-        tv_base = aktif_s.replace('/', '')
-        tv_symbol = f"BINANCE:{tv_base}.P"
-        tv_html = f"""
-        <!-- TradingView Widget BEGIN -->
-        <div class="tradingview-widget-container" style="height:600px;width:100%">
-          <div class="tradingview-widget-container__widget" style="height:calc(100% - 32px);width:100%"></div>
-          <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
-          {{
-          "autosize": true,
-          "symbol": "{tv_symbol}",
-          "interval": "15",
-          "timezone": "Etc/UTC",
-          "theme": "dark",
-          "style": "1",
-          "locale": "tr",
-          "allow_symbol_change": true,
-          "support_host": "https://www.tradingview.com",
-          "enable_publishing": false,
-          "backgroundColor": "rgba(11, 12, 16, 1)",
-          "gridColor": "rgba(42, 46, 57, 0.06)",
-          "hide_top_toolbar": false,
-          "hide_legend": false,
-          "save_image": false,
-          "studies": ["RSI@tv-basicstudies", "BB@tv-basicstudies", "Volume@tv-basicstudies"],
-          "container_id": "tradingview_futures"
-        }}
-          </script>
-        </div>
-        <!-- TradingView Widget END -->
-        """
-        components.html(tv_html, height=620)
-    else:
-        st.info("Kripto para bekleniyor...")
-
-    st.markdown("<div class='dashboard-header'><b>🔥 Breakout Radarı (Anlık Tarama)</b></div>", unsafe_allow_html=True)
-    taranan = S.get("taranan_coinler", [])
-    if taranan:
-        df_scan = pd.DataFrame(taranan)
-        st.dataframe(df_scan, width='stretch', hide_index=True)
-    else:
-        st.info("Piyasa taraması bekleniyor...")
 
 with tab_gecmis:
     st.markdown("### 📚 Geçmiş Performans (SQLite Veritabanı)")
@@ -1055,7 +1013,9 @@ with tab_gecmis:
             "zaman": "Tarih", "sembol": "Coin", "tip": "Yön", 
             "giris": "Giriş", "cikis": "Çıkış", "pnl": "PNL ($)", 
             "pnl_pct": "ROE (%)", "kaldirac": "Kaldıraç", 
-            "margin": "Margin", "neden": "Kapatma Nedeni"
+            "margin": "Margin", "neden": "Kapatma Nedeni",
+            "max_pnl_pct": "Max ROE (%)", "atr_at_entry": "ATR (Giriş)",
+            "exit_strategy": "Çıkış Stratejisi"
         })
         st.dataframe(df_ui, width='stretch', hide_index=True)
     else:
