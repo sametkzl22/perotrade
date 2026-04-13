@@ -201,12 +201,13 @@ def futures_sembol_donustur(sembol: str) -> str:
 
 
 def _exchange_olustur(state: dict, pro: bool = False) -> object:
-    """v11: Futures-uyumlu exchange nesnesi oluşturur. Real API ise credentials ekler."""
+    """Futures-uyumlu exchange nesnesi oluşturur. Real API ise credentials ekler."""
     exchange_adi = state.get("exchange_adi", "binance")
     futures_type = getattr(cfg, "FUTURES_TYPE", "future")
 
     params = {
         "enableRateLimit": True,
+        "timeout": 30000,  # 🚀 EKLE: 30 saniye sonra ağ isteğinden vazgeç ve hata döndür
         "options": {"defaultType": futures_type},
     }
 
