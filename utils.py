@@ -44,11 +44,23 @@ def pnl_hesapla_coklu(pozlar: dict, guncel_fiyatlar: dict) -> float:
 
 def gunluk_kar_hesapla(state: dict) -> float:
     """Günlük kâr/zarar yüzdesi hesaplar (Dashboard & Engine ortak)."""
-    gun_baslangic = state.get("gun_baslangic_bakiye", state.get("baslangic_bakiye", cfg.INITIAL_BALANCE))
-    if gun_baslangic <= 0:
-        return 0.0
-    mevcut = state.get("bakiye", gun_baslangic) + aktif_margin_toplami(state.get("aktif_pozisyonlar", {}))
-    return ((mevcut - gun_baslangic) / gun_baslangic) * 100
+    gun_baslangic = state.get("gun_baslangic_bakiye", state.get("baslangic_bakiye", getattr(cfg, "INITIAL_BALANCE", 100.0)))
+    if not isinstance(gun_baslangic, (int, float)) or gun_baslangic <= 0:
+        gun_baslangic = getattr(cfg, "INITIAL_BALANCE", 100.0)
+        if gun_baslangic <= 0:
+            return 0.0
+
+    bakiye = state.get("bakiye", gun_baslangic)
+    aktif_pozisyonlar = state.get("aktif_pozisyonlar", {})
+    guncel_fiyatlar = state.get("guncel_fiyatlar", {})
+
+    # Toplam Equity: Boş bakiye + Kullanılan Margin + Gerçekleşmemiş PNL
+    margin_toplami = aktif_margin_toplami(aktif_pozisyonlar)
+    unrealized_pnl = pnl_hesapla_coklu(aktif_pozisyonlar, guncel_fiyatlar)
+    
+    toplam_equity = bakiye + margin_toplami + unrealized_pnl
+
+    return ((toplam_equity - gun_baslangic) / gun_baslangic) * 100
 
 
 def likidasyon_hesapla(pozisyon: str, giris: float, kaldirac: int) -> float:

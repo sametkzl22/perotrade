@@ -1607,18 +1607,25 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 "max_fiyat": fiyat,  # Peak tracker
                                 "exit_strategy": "",
                             }
-                            state["aktif_pozisyonlar"][tid] = yeni_poz
-                            state["bakiye"] -= margin
-                            
-                            # Immediate Save: Açılan pozisyon sonrasında anında atomik kaydet
-                            try:
+                            with lock:
+                                state["aktif_pozisyonlar"][tid] = yeni_poz
+                                state["bakiye"] -= margin
+                                
+                                # Immediate Save: Kilit içerisindeyken atomik state'i çıkart
                                 temiz_save = {}
-                                for save_k, save_v in state.items():
-                                    if isinstance(save_v, (str, int, float, bool, list, dict, type(None))):
-                                        temiz_save[save_k] = save_v
-                                ps.state_kaydet(temiz_save)
-                            except Exception:
-                                pass
+                                try:
+                                    for save_k, save_v in state.items():
+                                        if isinstance(save_v, (str, int, float, bool, list, dict, type(None))):
+                                            temiz_save[save_k] = save_v
+                                except Exception:
+                                    pass
+
+                            # Dosyaya yazma işlemini (I/O) kilit dışına taşıyoruz ki thread kitlenmesin
+                            if temiz_save:
+                                try:
+                                    ps.state_kaydet(temiz_save)
+                                except Exception:
+                                    pass
 
                             sl_mesafe_pct = abs(fiyat - dsl_fiyat) / fiyat * 100 if fiyat > 0 else 0
                             # V31 FIX: Sadece gerçek LONG/SHORT sinyalleri kaydet, BEKLE asla geçmişe yazılmaz
