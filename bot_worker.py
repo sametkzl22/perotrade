@@ -594,7 +594,9 @@ def islem_kapat_with_retry(state, trade_id, fiyat, neden, exchange=None, max_ret
             guncel_fiyat = fiyat
             if exchange is not None and attempt > 0:
                 try:
+                    print('DEBUG: Starting exchange.fetch_ticker at line 597 ...')
                     ticker = exchange.fetch_ticker(sembol)
+                    print('DEBUG: Finished exchange.fetch_ticker at line 597.')
                     if isinstance(ticker, dict) and ticker.get("last"):
                         guncel_fiyat = float(ticker["last"])
                 except (ccxt.BaseError, sqlite3.Error, Exception):
@@ -687,19 +689,25 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                     except Exception as _mkt_err:
                         print(f"⚠️ Market data fetch failed, retrying... ({_mkt_attempt+1}/3): {str(_mkt_err)[:60]}")
                         time.sleep(5)
+                print('DEBUG: Waiting for lock in bot_engine')
                 with lock:
+                    print('DEBUG: Lock acquired in bot_engine')
                     if not state.get("rest_connected_logged"):
                         log_ekle(f"🌐 Futures REST API bağlantısı kuruldu (defaultType: {getattr(cfg, 'FUTURES_TYPE', 'future')})", state)
                         state["rest_connected_logged"] = True
                 return True
             except (ccxt.BaseError, sqlite3.Error, Exception) as e:
+                print('DEBUG: Waiting for lock in bot_engine')
                 with lock:
+                    print('DEBUG: Lock acquired in bot_engine')
                     log_ekle(f"❌ Exchange bağlantı hatası (deneme {attempt+1}/5): {str(e)[:80]}", state)
                 time.sleep(5)
         return False
 
     if not _baglanti_kur():
+        print('DEBUG: Waiting for lock in bot_engine')
         with lock:
+            print('DEBUG: Lock acquired in bot_engine')
             log_ekle("❌ Exchange bağlantısı 5 denemede kurulamadı. Bot durduruluyor.", state)
         return
 
@@ -712,8 +720,12 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
     # --- v10: Binance Position Sync (Prevent 0-price bug on restart) ---
     if state.get("use_real_api", False) and state.get("aktif_pozisyonlar"):
         try:
+            print('DEBUG: Starting exchange.fetch_positions at line 715 ...')
             positions = exchange.fetch_positions()
+            print('DEBUG: Finished exchange.fetch_positions at line 715.')
+            print('DEBUG: Waiting for lock in bot_engine')
             with lock:
+                print('DEBUG: Lock acquired in bot_engine')
                 for tid, poz in state["aktif_pozisyonlar"].items():
                     s = poz.get("sembol", tid)
                     for api_poz in positions:
@@ -726,7 +738,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 state["guncel_fiyatlar"][s] = float(api_poz.get("markPrice", entry_price))
                             break
         except (ccxt.BaseError, sqlite3.Error, Exception) as e:
+            print('DEBUG: Waiting for lock in bot_engine')
             with lock:
+                print('DEBUG: Lock acquired in bot_engine')
                 log_ekle(f"⚠️ Pozisyon Senkronizasyon Hatası: {e}", state)
 
     son_kayit_zamani = time.time()
@@ -741,7 +755,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
 
             # ─── V36: Pozisyon monitörü ayrı thread'e taşındı (position_monitor_loop) ───
 
+            print('DEBUG: Waiting for lock in bot_engine')
             with lock:
+                print('DEBUG: Lock acquired in bot_engine')
                 acik_poz_var_mi = len(state.get("aktif_pozisyonlar", {})) > 0
                 if not acik_poz_var_mi:
                     log_ekle("🔍 Live Test: Breakout, BTC Trendi ve Fonlama verileri sentezleniyor...", state)
@@ -767,7 +783,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
             if not secilen_coinler:
                 secilen_coinler = [{"sembol": "BTC/USDT", "pazar": {}, "sma": "BEKLE", "is_breakout": False, "rapor": ""}]
 
+            print('DEBUG: Waiting for lock in bot_engine')
             with lock:
+                print('DEBUG: Lock acquired in bot_engine')
                 state["taranan_coinler"] = state_taranan_liste
             
             is_breakout_global = False
@@ -776,7 +794,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
 
             # Bulk Ticker: Tüm fiyatları tek istekte çek (Rate Limit %90 azalır)
             try:
+                print('DEBUG: Starting exchange.fetch_tickers at line 779 ...')
                 _bulk_tickers = exchange.fetch_tickers()
+                print('DEBUG: Finished exchange.fetch_tickers at line 779.')
             except (ccxt.BaseError, sqlite3.Error, Exception):
                 _bulk_tickers = {}
 
@@ -784,7 +804,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                 if dur_sinyali.is_set():
                     break
                     
+                print('DEBUG: Waiting for lock in bot_engine')
                 with lock:
+                    print('DEBUG: Lock acquired in bot_engine')
                     mevcut_islem_sayisi = len(state.get("aktif_pozisyonlar", {}))
                 max_islem = getattr(cfg, "MAX_CONCURRENT_TRADES", 99)
                 
@@ -800,7 +822,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                 
                 if is_breakout: is_breakout_global = True
 
+                print('DEBUG: Waiting for lock in bot_engine')
                 with lock:
+                    print('DEBUG: Lock acquired in bot_engine')
                     state["taranan_coinler"] = tarama_sonucu.get("taranan_liste", [])
                     state["aktif_sembol"] = secilen_sembol
                     state["is_breakout"] = is_breakout
@@ -817,7 +841,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                 ticker = _bulk_tickers.get(secilen_sembol, {})
                 if not isinstance(ticker, dict) or not ticker.get("last"):
                     try:
+                        print('DEBUG: Starting exchange.fetch_ticker at line 820 ...')
                         ticker = exchange.fetch_ticker(secilen_sembol)
+                        print('DEBUG: Finished exchange.fetch_ticker at line 820.')
                     except (ccxt.BaseError, sqlite3.Error, Exception):
                         ticker = {}
                 if isinstance(ticker, dict) and ticker.get("last"):
@@ -825,11 +851,15 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                     degisim = ticker.get("percentage", 0) or 0
                     hacim = ticker.get("quoteVolume", 0) or 0
                     # Başarılı fiyatı cache'e yaz
+                    print('DEBUG: Waiting for lock in bot_engine')
                     with lock:
+                        print('DEBUG: Lock acquired in bot_engine')
                         state.setdefault("guncel_fiyatlar", {})[secilen_sembol] = fiyat
                 else:
                     # Fallback: Son bilinen fiyat (Proxy/IP kısıtlaması durumu)
+                    print('DEBUG: Waiting for lock in bot_engine')
                     with lock:
+                        print('DEBUG: Lock acquired in bot_engine')
                         fiyat = state.get("guncel_fiyatlar", {}).get(secilen_sembol, 0)
                     if not fiyat:
                         fiyat = secilen_pazar.get("fiyat", 0) if isinstance(secilen_pazar, dict) else 0
@@ -847,7 +877,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         s1s = d.get("1s", {}).get("sinyal", "?") if isinstance(d.get("1s"), dict) else "?"
                         s1w = d.get("haftalik", {}).get("sinyal", "?") if isinstance(d.get("haftalik"), dict) else "?"
                         s1m = d.get("aylik", {}).get("sinyal", "?") if isinstance(d.get("aylik"), dict) else "?"
+                        print('DEBUG: Waiting for lock in bot_engine')
                         with lock:
+                            print('DEBUG: Lock acquired in bot_engine')
                             state["mtf_konsensus"] = mtf.get("konsensus", "KARARSIZ")
                             state["makro_trend"] = mtf.get("makro_trend", "YATAY")
                             state["makro_risk_carpani"] = mtf.get("risk_carpani", 1.0)
@@ -866,7 +898,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                     df_grid = ai_engine.mum_verisi_cek(exchange, secilen_sembol, "1h", limit=30)
                     grid_bilgi = ai_engine.grid_destek_direnc(df_grid)
                     if grid_bilgi.get("grid_uygun") and not sembol_acik_mi(state.get("aktif_pozisyonlar", {}), secilen_sembol):
+                        print('DEBUG: Waiting for lock in bot_engine')
                         with lock:
+                            print('DEBUG: Lock acquired in bot_engine')
                             log_ekle(f"📏 GRID MODU: {secilen_sembol} yatay seyirde. Destek: ${grid_bilgi.get('destek', 0)}, Direnç: ${grid_bilgi.get('direnc', 0)}", state)
                             if fiyat <= grid_bilgi.get("destek", 0) * 1.01:
                                 karar_override = "LONG"
@@ -883,7 +917,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                 pozisyonu_kapat = False
                 kapat_sinyali_nedeni = ""
 
+                print('DEBUG: Waiting for lock in bot_engine')
                 with lock:
+                    print('DEBUG: Lock acquired in bot_engine')
                     state["btc_trendi"] = btc_trend
                     state["fonlama_orani"] = fonlama.get("oran", 0)
                     state["fonlama_riski"] = fonlama.get("risk", "Yok")
@@ -907,7 +943,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                     break
 
                 # --- YAPAY ZEKA TAHMİNİ ---
+                print('DEBUG: Waiting for lock in bot_engine')
                 with lock:
+                    print('DEBUG: Lock acquired in bot_engine')
                     _aktif_tid = sembol_icin_trade_id_bul(state.get("aktif_pozisyonlar", {}), secilen_sembol)
                     poz_durumu = state["aktif_pozisyonlar"][_aktif_tid].get("pozisyon", "YOK") if _aktif_tid else "YOK"
 
@@ -920,12 +958,16 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
 
                     if sure_orani >= 0.80 and hedef_farki_pct > 0.20:
                         zaman_baski_carpani = 4.0
+                        print('DEBUG: Waiting for lock in bot_engine')
                         with lock:
+                            print('DEBUG: Lock acquired in bot_engine')
                             state["bot_durumu"] = "💥 BERSERKER Modu!"
                             log_ekle(f"💥 BERSERKER MODU AKTİF! Süre: %{sure_orani * 100:.0f} geçti.", state)
                     elif sure_orani >= 0.70 and hedef_farki_pct > 0.30:
                         zaman_baski_carpani = 3.0
+                        print('DEBUG: Waiting for lock in bot_engine')
                         with lock:
+                            print('DEBUG: Lock acquired in bot_engine')
                             log_ekle(f"🎯 FINAL HUNTER MODU AKTİF! Süre: %{sure_orani * 100:.0f} geçti.", state)
                     elif sure_orani >= 0.50 and hedef_farki_pct > 0.05:
                         zaman_baski_carpani = 2.0
@@ -980,7 +1022,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         of_data = None
                         of_min_conf = getattr(cfg, "ORDERFLOW_MIN_CONFIDENCE", 75)
                         if guven_base >= of_min_conf:
+                            print('DEBUG: Waiting for lock in bot_engine')
                             with lock:
+                                print('DEBUG: Lock acquired in bot_engine')
                                 log_ekle(f"📊 {secilen_sembol} Güven (%{guven_base:.1f}) > %{of_min_conf}. Emir defteri (Order Book) on-demand analiz ediliyor...", state)
                             
                             # V28 HYBRID: WebSocket Orderbook stream for high confidence > 80%
@@ -1001,7 +1045,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 headers = exchange.last_response_headers
                                 if headers and hasattr(headers, "get") and headers.get('x-mbx-used-weight-1m'):
                                     used_w = int(headers.get('x-mbx-used-weight-1m'))
+                                    print('DEBUG: Waiting for lock in bot_engine')
                                     with lock:
+                                        print('DEBUG: Lock acquired in bot_engine')
                                         state["used_weight_1m"] = used_w
                                         if used_w > 4500:
                                             state["limit_uyari_kritik"] = True
@@ -1018,7 +1064,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 pass
                                 
                             if of_data and of_data.get("is_valid"):
+                                print('DEBUG: Waiting for lock in bot_engine')
                                 with lock:
+                                    print('DEBUG: Lock acquired in bot_engine')
                                     t_coinler = state.get("taranan_coinler", [])
                                     for idx_c, c in enumerate(t_coinler):
                                         if isinstance(c, dict) and (c.get("Sembol") == secilen_sembol or c.get("sembol", "") == secilen_sembol):
@@ -1041,7 +1089,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         # V29: Ensemble raporu loglama
                         ens_rapor = karar_paketi.get("ensemble_rapor", "")
                         if ens_rapor:
+                            print('DEBUG: Waiting for lock in bot_engine')
                             with lock:
+                                print('DEBUG: Lock acquired in bot_engine')
                                 log_ekle(ens_rapor, state)
 
                         # V30: LRC Raporlama + Extreme Overextension Cezası
@@ -1056,7 +1106,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                     _lrc_slope = _lrc["lrc_slope"]
                                     _slope_icon = "↗" if _lrc_slope > 0 else "↘" if _lrc_slope < 0 else "→"
 
+                                    print('DEBUG: Waiting for lock in bot_engine')
                                     with lock:
+                                        print('DEBUG: Lock acquired in bot_engine')
                                         # Kanal pozisyon raporu
                                         if fiyat < _lrc_alt:
                                             log_ekle(f"📉 [LRC] Fiyat kanal ALTINDA: ${fiyat:.4f} < Alt ${_lrc_alt:.4f} (Eğim: {_slope_icon}{_lrc_slope:.6f}). Geri dönüş bekleniyor.", state)
@@ -1080,7 +1132,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                             _mevcut_guven = karar_paketi.get("guven_skoru", 0)
                                             _cezali_guven = _mevcut_guven * 0.80
                                             karar_paketi["guven_skoru"] = _cezali_guven
+                                            print('DEBUG: Waiting for lock in bot_engine')
                                             with lock:
+                                                print('DEBUG: Lock acquired in bot_engine')
                                                 log_ekle(
                                                     f"🚨 [LRC] EXTREME OVEREXTENSION! Fiyat kanalın %{_tasma_pct:.1f} dışında. "
                                                     f"FOMO cezası: Güven %{_mevcut_guven:.0f} → %{_cezali_guven:.0f} (-%20). "
@@ -1116,12 +1170,16 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         if haber_puanlari:
                             veto_sonuc = ai_engine.haber_vetosu(haber_puanlari, karar_paketi.get("karar", "BEKLE"))
                             if veto_sonuc.get("veto"):
+                                print('DEBUG: Waiting for lock in bot_engine')
                                 with lock:
+                                    print('DEBUG: Lock acquired in bot_engine')
                                     log_ekle(veto_sonuc.get("neden", ""), state)
                                 karar_paketi["karar"] = "BEKLE"
                                 karar_paketi["dusunce"] = veto_sonuc.get("neden", "")
                             elif veto_sonuc.get("neden"):
+                                print('DEBUG: Waiting for lock in bot_engine')
                                 with lock:
+                                    print('DEBUG: Lock acquired in bot_engine')
                                     log_ekle(veto_sonuc["neden"], state)
                     # Bakiye Senkronizasyonu (Manual Injection Guard)
                     # Challenge modunda bu kontrolü ATLA — challenge kendi izole bakiyesiyle çalışır
@@ -1129,7 +1187,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                     mevcut_bakiye = state.get("bakiye", gun_baslangic) + aktif_margin_toplami(state.get("aktif_pozisyonlar", {}))
                 
                     if not (state.get("mod") == "🚀 94-Day Challenge") and gun_baslangic > 0 and ((mevcut_bakiye - gun_baslangic) / gun_baslangic) * 100 >= 100.0:
+                        print('DEBUG: Waiting for lock in bot_engine')
                         with lock:
+                            print('DEBUG: Lock acquired in bot_engine')
                             state["gun_baslangic_bakiye"] = mevcut_bakiye
                             log_ekle(f"🔄 Bakiye Senkronizasyonu: Manuel ekleme tespit edildi. Yeni Gün Başlangıç: ${mevcut_bakiye:.2f}", state)
 
@@ -1292,7 +1352,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         poz = state["aktif_pozisyonlar"][dca_tid]
                         dca = ai_engine.dca_hesapla(poz, fiyat, state.get("bakiye", 0))
                         if dca.get("uygun"):
+                            print('DEBUG: Waiting for lock in bot_engine')
                             with lock:
+                                print('DEBUG: Lock acquired in bot_engine')
                                 log_ekle(f"💱 DCA ÖNERİ: {secilen_sembol} - {dca.get('neden', '')}", state)
                                 ekleme = dca.get("ekleme_margin", 0)
                                 if ekleme <= state.get("bakiye", 0):
@@ -1315,7 +1377,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                     karar_paketi["karar"] = karar_override
 
                 # --- İŞLEM UYGULAMA ---
+                print('DEBUG: Waiting for lock in bot_engine')
                 with lock:
+                    print('DEBUG: Lock acquired in bot_engine')
                     state["fiyat"] = fiyat
                     state["degisim_24s"] = degisim
                     state["hacim_24s"] = hacim
@@ -1496,7 +1560,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 try:
                                     ob_depth = getattr(cfg, "SLIPPAGE_OB_DEPTH", 5)
                                     max_impact = getattr(cfg, "SLIPPAGE_MAX_IMPACT_PCT", 10.0)
+                                    print('DEBUG: Starting exchange.fetch_order_book at line 1499 ...')
                                     ob = exchange.fetch_order_book(secilen_sembol, limit=ob_depth)
+                                    print('DEBUG: Finished exchange.fetch_order_book at line 1499.')
                                     if ob:
                                         if sinyal == "LONG":
                                             kademe_toplam = sum(float(ask[1]) * float(ask[0]) for ask in ob.get("asks", [])[:ob_depth])
@@ -1607,7 +1673,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 "max_fiyat": fiyat,  # Peak tracker
                                 "exit_strategy": "",
                             }
+                            print('DEBUG: Waiting for lock in bot_engine')
                             with lock:
+                                print('DEBUG: Lock acquired in bot_engine')
                                 state["aktif_pozisyonlar"][tid] = yeni_poz
                                 state["bakiye"] -= margin
                                 
@@ -1654,7 +1722,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
 
             # V23: Yüksek güvenli fırsat bildirimi (her tarama döngüsü sonunda)
             try:
+                print('DEBUG: Waiting for lock in bot_engine')
                 with lock:
+                    print('DEBUG: Lock acquired in bot_engine')
                     taranan = state.get("taranan_coinler", [])
                 yuksek_guven = [
                     c for c in taranan
@@ -1671,7 +1741,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                 pass
 
             # Hedef bakiye kontrolü (for döngüsü bitti, while döngüsü içinde)
+            print('DEBUG: Waiting for lock in bot_engine')
             with lock:
+                print('DEBUG: Lock acquired in bot_engine')
                 if state.get("pik_bakiye", 0) >= state.get("hedef_bakiye", 100):
                     if state.get("mod") == "🚀 94-Day Challenge":
                         pass
@@ -1708,7 +1780,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
             if bakiye_degisti_mi or (time.time() - son_kayit_zamani >= 60):
                 try:
                     temiz = {}
+                    print('DEBUG: Waiting for lock in bot_engine')
                     with lock:
+                        print('DEBUG: Lock acquired in bot_engine')
                         for k, v in state.items():
                             if isinstance(v, (str, int, float, bool, list, dict, type(None))):
                                 temiz[k] = v
@@ -1725,19 +1799,25 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
             # v24/V28: Dinamik Soğuma (Order Flow limit uyarısı / Weight-Aware Throttling)
             if state.get("limit_uyari_kritik"):
                 cooling_sn = max(cooling_sn * 2, 30)  # V28: Kritik sınırda süreyi 2 katına çıkar (min 30s)
+                print('DEBUG: Waiting for lock in bot_engine')
                 with lock:
+                    print('DEBUG: Lock acquired in bot_engine')
                     state["limit_uyari_kritik"] = False
                     state["limit_uyari"] = False
             elif state.get("limit_uyari"):
                 cooling_sn = max(cooling_sn * 1.5, 15)  # Normal uyarıda 1.5x
+                print('DEBUG: Waiting for lock in bot_engine')
                 with lock:
+                    print('DEBUG: Lock acquired in bot_engine')
                     state["limit_uyari"] = False  # Sonraki tur için sıfırla
             gc_interval = getattr(cfg, "GC_COLLECT_INTERVAL", 100)
 
             # Bellek temizliği: Her N döngüde gc.collect()
             if _dongü_sayaci % gc_interval == 0:
                 gc.collect()
+                print('DEBUG: Waiting for lock in bot_engine')
                 with lock:
+                    print('DEBUG: Lock acquired in bot_engine')
                     log_ekle(f"🧹 GC: Bellek temizlendi (döngü #{_dongü_sayaci})", state)
 
             # --- BEKLEME (EVENT-DRIVEN + COOLING) ---
@@ -1748,7 +1828,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                 evo_carpan = getattr(cfg, "EVO_WAIT_MULTIPLIER", 0.30)
                 bekleme_suresi = max(3, int(bekleme_suresi * evo_carpan))  # En az 3s
                 
+            print('DEBUG: Waiting for lock in bot_engine')
             with lock:
+                print('DEBUG: Lock acquired in bot_engine')
                 state["sonraki_analiz_sn"] = bekleme_suresi
 
             state.get("analiz_tetikleyici", threading.Event()).clear()
@@ -1757,11 +1839,15 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                     return
                 tetiklendi = state.get("analiz_tetikleyici", threading.Event()).wait(timeout=1.0)
                 if tetiklendi:
+                    print('DEBUG: Waiting for lock in bot_engine')
                     with lock:
+                        print('DEBUG: Lock acquired in bot_engine')
                         log_ekle("⚡ SIFIR GECİKME: Anlık Hacim/Fiyat Patlaması tetiklendi!", state, is_breakout=True)
                         state["sonraki_analiz_sn"] = 0
                     break
+                print('DEBUG: Waiting for lock in bot_engine')
                 with lock:
+                    print('DEBUG: Lock acquired in bot_engine')
                     state["sonraki_analiz_sn"] -= 1
 
         except (ccxt.BaseError, sqlite3.Error, Exception) as e:
@@ -1769,17 +1855,23 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
             is_auth = "Authentication" in err_str or "API-key" in err_str or "Invalid credentials" in err_str
 
             if is_auth:
+                print('DEBUG: Waiting for lock in bot_engine')
                 with lock:
+                    print('DEBUG: Lock acquired in bot_engine')
                     if not state.get("auth_error_notified"):
                         log_ekle("❌ API Kimlik Doğrulama Hatası! Geçerli bakiye/veri çekilemiyor.", state)
                         state["auth_error_notified"] = True
                         state["auth_error_msg"] = err_str[:150]
                 time.sleep(10)
             elif "ExchangeNotAvailable" in err_str or "NetworkError" in err_str or "RequestTimeout" in err_str:
+                print('DEBUG: Waiting for lock in bot_engine')
                 with lock:
+                    print('DEBUG: Lock acquired in bot_engine')
                     log_ekle("🔄 Bağlantı hatası tespit edildi, exchange yeniden bağlanıyor...", state)
                 if not _baglanti_kur():
+                    print('DEBUG: Waiting for lock in bot_engine')
                     with lock:
+                        print('DEBUG: Lock acquired in bot_engine')
                         log_ekle("❌ Yeniden bağlantı başarısız. 30sn bekleniyor.", state)
                     time.sleep(30)
                 else:
@@ -1787,13 +1879,17 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
             else:
                 # Error Throttling: 30sn'de bir özet log (spam engelleme)
                 if state.get("auth_error_notified"):
+                    print('DEBUG: Waiting for lock in bot_engine')
                     with lock:
+                        print('DEBUG: Lock acquired in bot_engine')
                         state["auth_error_notified"] = False
                 err_key = err_str[:50]
                 _error_counts[err_key] = _error_counts.get(err_key, 0) + 1
                 now = time.time()
                 if now - _last_error_log_time >= 30:
+                    print('DEBUG: Waiting for lock in bot_engine')
                     with lock:
+                        print('DEBUG: Lock acquired in bot_engine')
                         for ek, ec in _error_counts.items():
                             log_ekle(f"❌ Hata Özeti ({ec}x/30s): {ek}", state)
                     _error_counts.clear()
@@ -1803,7 +1899,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
     # Bot durdurulduğunda son kayıt
     try:
         temiz = {}
+        print('DEBUG: Waiting for lock in bot_engine')
         with lock:
+            print('DEBUG: Lock acquired in bot_engine')
             for k, v in state.items():
                 if isinstance(v, (str, int, float, bool, list, dict, type(None))):
                     temiz[k] = v
@@ -1894,21 +1992,27 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
         try:
             mon_exchange = _exchange_olustur(state, pro=False)
             mon_exchange.load_markets()
+            print('DEBUG: Waiting for lock in position_monitor_loop')
             with lock:
+                print('DEBUG: Lock acquired in position_monitor_loop')
                 log_ekle("🎯 V36: Pozisyon Monitörü başlatıldı (1s frekans, bağımsız thread)", state)
             break
         except (ccxt.BaseError, sqlite3.Error, Exception) as e:
             print(f"⚠️ Position Monitor exchange init hatası ({_attempt+1}/5): {str(e)[:60]}")
             time.sleep(3)
     else:
+        print('DEBUG: Waiting for lock in position_monitor_loop')
         with lock:
+            print('DEBUG: Lock acquired in position_monitor_loop')
             log_ekle("❌ V36: Pozisyon Monitörü exchange bağlantısı kurulamadı. Thread sonlandırılıyor.", state)
         return
 
     while not dur_sinyali.is_set():
         try:
             # Thread-safe snapshot: aktif pozisyonları kopyala
+            print('DEBUG: Waiting for lock in position_monitor_loop')
             with lock:
+                print('DEBUG: Lock acquired in position_monitor_loop')
                 _aktif_pozlar = list(state.get("aktif_pozisyonlar", {}).items())
 
             if not _aktif_pozlar:
@@ -1922,23 +2026,31 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
             ))
             try:
                 if len(aktif_semboller) == 1:
+                    print('DEBUG: Starting mon_exchange.fetch_ticker at line 1925 ...')
                     ticker_data = mon_exchange.fetch_ticker(aktif_semboller[0])
+                    print('DEBUG: Finished mon_exchange.fetch_ticker at line 1925.')
                     tickers = {aktif_semboller[0]: ticker_data}
                 else:
                     # Batch fetch sadece aktif semboller için
+                    print('DEBUG: Starting mon_exchange.fetch_tickers at line 1929 ...')
                     tickers = mon_exchange.fetch_tickers(aktif_semboller)
+                    print('DEBUG: Finished mon_exchange.fetch_tickers at line 1929.')
             except (ccxt.BaseError, sqlite3.Error, Exception):
                 tickers = {}
 
             # Fiyat cache'ini güncelle (bot_engine de bu cache'i kullanır)
             if tickers:
+                print('DEBUG: Waiting for lock in position_monitor_loop')
                 with lock:
+                    print('DEBUG: Lock acquired in position_monitor_loop')
                     for sym, tick in tickers.items():
                         if isinstance(tick, dict) and tick.get("last"):
                             state.setdefault("guncel_fiyatlar", {})[sym] = float(tick["last"])
 
             # Güncel fiyat cache'i al
+            print('DEBUG: Waiting for lock in position_monitor_loop')
             with lock:
+                print('DEBUG: Lock acquired in position_monitor_loop')
                 _fiyat_cache = state.get("guncel_fiyatlar", {}).copy()
 
             for _mon_tid, _mon_poz in _aktif_pozlar:
@@ -1975,7 +2087,9 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
                             sl_neden = f"☠️ Likidasyon ({_mon_yon}): Fiyat ${_mon_fiyat:.4f} ≥ Liq ${_mon_liq:.4f}"
 
                     if sl_tetiklendi:
+                        print('DEBUG: Waiting for lock in position_monitor_loop')
                         with lock:
+                            print('DEBUG: Lock acquired in position_monitor_loop')
                             log_ekle(f"🚨 [{_mon_sembol}] {sl_neden}", state, is_liq="Likidasyon" in sl_neden)
                         islem_kapat_with_retry(state, _mon_tid, _mon_fiyat, sl_neden, mon_exchange,
                                                is_liq="Likidasyon" in sl_neden)
@@ -1990,7 +2104,9 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
                     else:
                         _mon_roe_pct = 0.0
 
+                    print('DEBUG: Waiting for lock in position_monitor_loop')
                     with lock:
+                        print('DEBUG: Lock acquired in position_monitor_loop')
                         poz_ref_track = state["aktif_pozisyonlar"].get(_mon_tid)
                         if poz_ref_track:
                             _prev_max = poz_ref_track.get("_max_pnl_pct", 0.0)
@@ -2017,7 +2133,9 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
                     # ── V39: Trailing Stop — TP2 tetiklendi ise pozisyon KAPATILMAZ, trailing moda geçilir ──
                     if _mon_ts_aktif:
                         # Trailing mod zaten aktif — peak retracement kontrolü
+                        print('DEBUG: Waiting for lock in position_monitor_loop')
                         with lock:
+                            print('DEBUG: Lock acquired in position_monitor_loop')
                             poz_ref_ts = state["aktif_pozisyonlar"].get(_mon_tid)
                             if poz_ref_ts:
                                 _peak = poz_ref_ts.get("max_fiyat", _mon_giris)
@@ -2050,7 +2168,9 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
 
                     elif tp2_tetiklendi and not _mon_ts_aktif:
                         # V39: TP2'ye ulaşıldı — pozisyon KAPATILMAZ, trailing moda geç
+                        print('DEBUG: Waiting for lock in position_monitor_loop')
                         with lock:
+                            print('DEBUG: Lock acquired in position_monitor_loop')
                             poz_ref_tp2 = state["aktif_pozisyonlar"].get(_mon_tid)
                             if poz_ref_tp2:
                                 poz_ref_tp2["ts_aktif"] = True
@@ -2080,7 +2200,9 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
 
                     # ── TP1 Kontrolü (yarı pozisyon kapat + SL girişe çek) ──
                     if tp1_tetiklendi and not _mon_tp1_yapildi:
+                        print('DEBUG: Waiting for lock in position_monitor_loop')
                         with lock:
+                            print('DEBUG: Lock acquired in position_monitor_loop')
                             poz_ref = state["aktif_pozisyonlar"].get(_mon_tid)
                             if poz_ref:
                                 _yari_margin = poz_ref["islem_margin"] / 2.0
@@ -2129,7 +2251,9 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
                             pass
 
                 except (ccxt.BaseError, sqlite3.Error, Exception) as _mon_err:
+                    print('DEBUG: Waiting for lock in position_monitor_loop')
                     with lock:
+                        print('DEBUG: Lock acquired in position_monitor_loop')
                         log_ekle(f"⚠️ TP Monitor Hatası [{_mon_tid}]: {str(_mon_err)[:60]}", state)
 
         except (ccxt.BaseError, sqlite3.Error, Exception) as e:
@@ -2141,7 +2265,9 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
                     mon_exchange.load_markets()
                 except Exception:
                     pass
+            print('DEBUG: Waiting for lock in position_monitor_loop')
             with lock:
+                print('DEBUG: Lock acquired in position_monitor_loop')
                 log_ekle(f"⚠️ V36 Monitor Hatası: {str(e)[:80]}", state)
 
         # 1 saniye aralıkla kontrol (high-frequency)
