@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────
-# PeroTrade Pro — Konfigürasyon V39
+# PeroTrade Pro — Konfigürasyon V41
 # 7/24 Bileşik Faiz Sistemi + Binance Futures
-# V39: Dynamic Trend Following + ATR Trailing Stop
+# V41: Deadlock Fix + Signal Hub + Extended Scan
 # ─────────────────────────────────────────────
 
 # ───── Binance API (Gerçek İşlem İçin) ─────
@@ -36,6 +36,7 @@ DAILY_LOSS_STOP = -12.0    # V40: %12 kayıpta MOLA tetiklenir (eski -15, kurtar
 EMERGENCY_STOP_ENABLED = True  # V25: Acil durdurma aktif
 COOLING_OFF_HOURS = 4          # V26: Mola süresi (saat) — kayıp eşiği sonrası bekleme
 MAX_CONCURRENT_TRADES = 99 # Aynı anda açılabilecek maksimum işlem sayısı
+MAX_SCAN_LIMIT = 150       # V41: AI engine tarama limiti (top coinleri tara)
 
 # ───── V40: Dynamic Risk Shield ─────
 RISK_TIER_1_LOSS_PCT = -5.0    # Günlük %-5 kayıpta margin %50'ye düşer

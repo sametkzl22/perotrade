@@ -995,6 +995,54 @@ with tab_dash:
             log_kutusu.markdown(f"<div class='{cls_name}'>[{log.get('time', '')}] {log.get('msg', '')}</div>", unsafe_allow_html=True)
 
 
+    # ─────────────────────────────────────────────
+    # V41: 🔥 Top 10 Sinyal Masası (Signal Hub Table)
+    # ─────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("""<div class='dashboard-header'><b>🔥 Top 10 Sinyal Masası</b></div>""", unsafe_allow_html=True)
+    _taranan_raw = S.get("taranan_coinler", [])
+    _sinyal_liste = []
+    for _coin in _taranan_raw:
+        if not isinstance(_coin, dict):
+            continue
+        _s_sembol = _coin.get("sembol", _coin.get("Sembol", _coin.get("symbol", "?")))
+        _s_skor = _coin.get("guven_skoru", _coin.get("skor", _coin.get("score", 0)))
+        try:
+            _s_skor_val = float(_s_skor)
+        except (ValueError, TypeError):
+            _s_skor_val = 0.0
+        _s_sinyal = _coin.get("sinyal", _coin.get("yon", _coin.get("signal", "BEKLE")))
+        _s_growth = _coin.get("beklenen_artis", _coin.get("expected_growth", 0))
+        try:
+            _s_growth_val = float(_s_growth)
+        except (ValueError, TypeError):
+            _s_growth_val = 0.0
+        _s_trend = _coin.get("trend", _coin.get("sma_trend", _coin.get("trend_status", "—")))
+        # Normalize signal to LONG/SHORT/BEKLE
+        if _s_sinyal in ["LONG", "AL", "GÜÇLÜ AL", "ZAYIF AL"]:
+            _s_sinyal_display = "🟢 LONG"
+        elif _s_sinyal in ["SHORT", "SAT", "GÜÇLÜ SAT", "ZAYIF SAT"]:
+            _s_sinyal_display = "🔴 SHORT"
+        else:
+            _s_sinyal_display = "⚪ BEKLE"
+        _sinyal_liste.append({
+            "Sembol": _s_sembol,
+            "Sinyal": _s_sinyal_display,
+            "Güven (%)": round(_s_skor_val, 1),
+            "Beklenen Büyüme (%)": round(_s_growth_val, 2),
+            "Trend Durumu": str(_s_trend),
+        })
+
+    if _sinyal_liste:
+        # Sort by confidence descending, take top 10
+        _sinyal_liste.sort(key=lambda x: x["Güven (%)"], reverse=True)
+        _sinyal_top10 = _sinyal_liste[:10]
+        _df_sinyal = pd.DataFrame(_sinyal_top10)
+        st.dataframe(_df_sinyal, width='stretch', hide_index=True, height=400)
+    else:
+        st.info("📡 Tarama verileri bekleniyor... Bot çalıştığında sinyal tablosu burada görünecek.")
+
+
 with tab_gecmis:
     st.markdown("### 📚 Geçmiş Performans (SQLite Veritabanı)")
     # Lazy import: data_logger sadece bu tab açıldığında yüklenir

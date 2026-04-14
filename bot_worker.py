@@ -1,10 +1,12 @@
 """
-Bot Worker — Global Singleton + Background Thread Manager (v11 / V34)
+Bot Worker — Global Singleton + Background Thread Manager (v11 / V41)
 =====================================================================
 Streamlit UI'dan bağımsız çalışan arka plan motor sınıfı.
 bot.py tarafından arka plan thread'i olarak başlatılır.
 v11: Binance Futures entegrasyonu, Cooling, GC, Auto-Reconnect.
 V34: TP1/TP2 Kısmi Kapatma (Partial Take Profit) + Break-Even SL.
+V41: Deadlock Fix (log_ekle I/O removal, centralized atomic save,
+     lock timeout=5, CPU breathing room) + Signal Hub + Extended Scan.
 """
 
 import gc
@@ -133,12 +135,18 @@ def telegram_komut_dinleyici(state_ref, lock, dur_sinyali: threading.Event):
         return []
 
     def _status_ozeti() -> str:
-        with lock:
-            bakiye = state_ref.get("bakiye", 0)
-            aktif = state_ref.get("aktif_pozisyonlar", {})
-            durum = state_ref.get("bot_durumu", "?")
-            mod = state_ref.get("mod", "?")
-            guncel_fiyatlar = state_ref.get("guncel_fiyatlar", {})
+        _acquired = lock.acquire(timeout=5.0)
+        if _acquired:
+            try:
+                bakiye = state_ref.get("bakiye", 0)
+                aktif = state_ref.get("aktif_pozisyonlar", {})
+                durum = state_ref.get("bot_durumu", "?")
+                mod = state_ref.get("mod", "?")
+                guncel_fiyatlar = state_ref.get("guncel_fiyatlar", {})
+            finally:
+                lock.release()
+        else:
+            bakiye, aktif, durum, mod, guncel_fiyatlar = 0, {}, "?", "?", {}
 
         satirlar = [
             "<b>📊 PeroTrade — Durum Özeti</b>",
@@ -384,16 +392,12 @@ MOD_PRESETLERI = {
 
 
 def log_ekle(mesaj: str, state: dict, is_breakout=False, is_liq=False):
+    """V41: In-memory only — disk I/O removed to prevent deadlocks.
+    State is persisted centrally at the end of the bot_engine while loop."""
     zaman = datetime.now(timezone.utc).strftime("%H:%M:%S")
     state["ai_dusunce_gunlugu"].insert(0, {"time": zaman, "msg": mesaj, "breakout": is_breakout, "liq": is_liq})
     if len(state["ai_dusunce_gunlugu"]) > 60:
         state["ai_dusunce_gunlugu"].pop()
-    # Immediate State Sync: UI refresh lag fix — atomically persist after every log entry
-    try:
-        temiz = {k: v for k, v in state.items() if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
-        ps.state_kaydet(temiz)
-    except Exception:
-        pass
 
 
 # ─── Math fonksiyonları artık utils.py'den geliyor (backward compat re-export) ───
@@ -691,25 +695,37 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         print(f"⚠️ Market data fetch failed, retrying... ({_mkt_attempt+1}/3): {str(_mkt_err)[:60]}")
                         time.sleep(5)
                 print('DEBUG: Waiting for lock in bot_engine')
-                with lock:
-                    print('DEBUG: Lock acquired in bot_engine')
-                    if not state.get("rest_connected_logged"):
-                        log_ekle(f"🌐 Futures REST API bağlantısı kuruldu (defaultType: {getattr(cfg, 'FUTURES_TYPE', 'future')})", state)
-                        state["rest_connected_logged"] = True
+                _acquired = lock.acquire(timeout=5.0)
+                if _acquired:
+                    try:
+                        print('DEBUG: Lock acquired in bot_engine')
+                        if not state.get("rest_connected_logged"):
+                            log_ekle(f"🌐 Futures REST API bağlantısı kuruldu (defaultType: {getattr(cfg, 'FUTURES_TYPE', 'future')})", state)
+                            state["rest_connected_logged"] = True
+                    finally:
+                        lock.release()
                 return True
             except (ccxt.BaseError, sqlite3.Error, Exception) as e:
                 print('DEBUG: Waiting for lock in bot_engine')
-                with lock:
-                    print('DEBUG: Lock acquired in bot_engine')
-                    log_ekle(f"❌ Exchange bağlantı hatası (deneme {attempt+1}/5): {str(e)[:80]}", state)
+                _acquired = lock.acquire(timeout=5.0)
+                if _acquired:
+                    try:
+                        print('DEBUG: Lock acquired in bot_engine')
+                        log_ekle(f"❌ Exchange bağlantı hatası (deneme {attempt+1}/5): {str(e)[:80]}", state)
+                    finally:
+                        lock.release()
                 time.sleep(5)
         return False
 
     if not _baglanti_kur():
         print('DEBUG: Waiting for lock in bot_engine')
-        with lock:
-            print('DEBUG: Lock acquired in bot_engine')
-            log_ekle("❌ Exchange bağlantısı 5 denemede kurulamadı. Bot durduruluyor.", state)
+        _acquired = lock.acquire(timeout=5.0)
+        if _acquired:
+            try:
+                print('DEBUG: Lock acquired in bot_engine')
+                log_ekle("❌ Exchange bağlantısı 5 denemede kurulamadı. Bot durduruluyor.", state)
+            finally:
+                lock.release()
         return
 
     # v11: Döngü sayacı (GC + Cooling)
@@ -769,7 +785,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                 btc_trend = "BİLİNMİYOR"
 
             try:
-                top_coinler = ai_engine.top_coinleri_tara(exchange, limit=100)
+                top_coinler = ai_engine.top_coinleri_tara(exchange, limit=cfg.MAX_SCAN_LIMIT)
             except (ccxt.BaseError, sqlite3.Error, Exception):
                 top_coinler = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
 
@@ -804,6 +820,10 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
             for index, c_data in enumerate(secilen_coinler):
                 if dur_sinyali.is_set():
                     break
+
+                # V41: CPU breathing room — prevent CPU exhaustion on small instances
+                if index > 0:
+                    time.sleep(0.3)
                     
                 print('DEBUG: Waiting for lock in bot_engine')
                 with lock:
@@ -1774,20 +1794,26 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                             dur_sinyali.set()
 
 
-            # Persistent State: Her 60 saniyede bir veya bakiye değiştiğinde (Atomic Save) kaydet
+            # V41: Centralized Atomic Save — STRICTLY OUTSIDE any `with lock:` block.
+            # This prevents disk I/O from ever holding the thread lock.
             guncel_bakiye = state.get("bakiye", 0.0)
             bakiye_degisti_mi = abs(guncel_bakiye - son_kayit_bakiye) > 0.01
 
             if bakiye_degisti_mi or (time.time() - son_kayit_zamani >= 60):
                 try:
+                    # Step 1: Snapshot state under lock (fast, in-memory only)
                     temiz = {}
-                    print('DEBUG: Waiting for lock in bot_engine')
-                    with lock:
-                        print('DEBUG: Lock acquired in bot_engine')
-                        for k, v in state.items():
-                            if isinstance(v, (str, int, float, bool, list, dict, type(None))):
-                                temiz[k] = v
-                    ps.state_kaydet(temiz)
+                    _acquired = lock.acquire(timeout=5.0)
+                    if _acquired:
+                        try:
+                            for k, v in state.items():
+                                if isinstance(v, (str, int, float, bool, list, dict, type(None))):
+                                    temiz[k] = v
+                        finally:
+                            lock.release()
+                    # Step 2: Disk write OUTSIDE lock — this is the key deadlock fix
+                    if temiz:
+                        ps.state_kaydet(temiz)
                 except (ccxt.BaseError, sqlite3.Error, Exception):
                     pass
                 son_kayit_zamani = time.time()
@@ -1926,9 +1952,13 @@ def korelasyon_rutini(state: dict, lock: threading.Lock, dur_sinyali: threading.
             # --- Korelasyon Güncellemesi (her 5dk) ---
             korelasyonlar = data_logger.en_iyi_korelasyonlari_getir(limit=50)
             if korelasyonlar:
-                with lock:
-                    state["kesin_kar_parametreleri"] = korelasyonlar
-                    log_ekle(f"🧠 Derin Analiz: Geçmiş işlemlere göre Kesin Kâr güncellendi. (A.Vol: %{korelasyonlar.get('ortalama_volatilite', 0):.1f}, Hacim: %{korelasyonlar.get('ortalama_hacim_artis', 0):.0f})", state)
+                _acquired = lock.acquire(timeout=5.0)
+                if _acquired:
+                    try:
+                        state["kesin_kar_parametreleri"] = korelasyonlar
+                        log_ekle(f"🧠 Derin Analiz: Geçmiş işlemlere göre Kesin Kâr güncellendi. (A.Vol: %{korelasyonlar.get('ortalama_volatilite', 0):.1f}, Hacim: %{korelasyonlar.get('ortalama_hacim_artis', 0):.0f})", state)
+                    finally:
+                        lock.release()
 
             # --- ML Model Eğitimi (her 24 saat VEYA 10 başarılı işlemde bir) ---
             islem_gecmisi = state.get("islem_gecmisi", [])
@@ -1937,12 +1967,16 @@ def korelasyon_rutini(state: dict, lock: threading.Lock, dur_sinyali: threading.
             limit_doldu_mu = (basarili_sayisi - son_egitim_sayaci) >= 10
 
             if time.time() - son_egitim_zamani >= retrain_interval or limit_doldu_mu:
-                with lock:
-                    if limit_doldu_mu:
-                        state["son_egitim_islem_sayaci"] = basarili_sayisi
-                        log_ekle(f"🧠 ML RETRAIN: 10 Başarılı işlem tamamlandı. Eğitim döngüsü başlatılıyor...", state)
-                    else:
-                        log_ekle("🧠 ML RETRAIN: 24 saatlik eğitim döngüsü başlatılıyor...", state)
+                _acquired = lock.acquire(timeout=5.0)
+                if _acquired:
+                    try:
+                        if limit_doldu_mu:
+                            state["son_egitim_islem_sayaci"] = basarili_sayisi
+                            log_ekle(f"🧠 ML RETRAIN: 10 Başarılı işlem tamamlandı. Eğitim döngüsü başlatılıyor...", state)
+                        else:
+                            log_ekle("🧠 ML RETRAIN: 24 saatlik eğitim döngüsü başlatılıyor...", state)
+                    finally:
+                        lock.release()
 
                 sonuc = None
                 try:
@@ -1952,20 +1986,32 @@ def korelasyon_rutini(state: dict, lock: threading.Lock, dur_sinyali: threading.
                         reload_ok = ai_engine._reload_ml_model()
                         detay = sonuc.get("detay", {})
                         egitim_info = detay.get("egitim", {})
-                        with lock:
-                            state["son_ml_egitim"] = datetime.now(timezone.utc).isoformat()
-                            state["ml_accuracy"] = egitim_info.get("accuracy", 0)
-                            log_ekle(
-                                f"✅ ML RETRAIN TAMAMLANDI: Accuracy %{egitim_info.get('accuracy', 0):.1f}, "
-                                f"{'Model yüklendi ✓' if reload_ok else 'Yükleme bekliyor'}",
-                                state, is_breakout=True
-                            )
+                        _acquired = lock.acquire(timeout=5.0)
+                        if _acquired:
+                            try:
+                                state["son_ml_egitim"] = datetime.now(timezone.utc).isoformat()
+                                state["ml_accuracy"] = egitim_info.get("accuracy", 0)
+                                log_ekle(
+                                    f"✅ ML RETRAIN TAMAMLANDI: Accuracy %{egitim_info.get('accuracy', 0):.1f}, "
+                                    f"{'Model yüklendi ✓' if reload_ok else 'Yükleme bekliyor'}",
+                                    state, is_breakout=True
+                                )
+                            finally:
+                                lock.release()
                     else:
-                        with lock:
-                            log_ekle(f"⚠️ ML RETRAIN BAŞARISIZ: {sonuc.get('neden', '?')}", state)
+                        _acquired = lock.acquire(timeout=5.0)
+                        if _acquired:
+                            try:
+                                log_ekle(f"⚠️ ML RETRAIN BAŞARISIZ: {sonuc.get('neden', '?')}", state)
+                            finally:
+                                lock.release()
                 except (ccxt.BaseError, sqlite3.Error, Exception) as e:
-                    with lock:
-                        log_ekle(f"❌ ML RETRAIN HATA: {str(e)[:80]}", state)
+                    _acquired = lock.acquire(timeout=5.0)
+                    if _acquired:
+                        try:
+                            log_ekle(f"❌ ML RETRAIN HATA: {str(e)[:80]}", state)
+                        finally:
+                            lock.release()
                 finally:
                     # Memory Guard: Explicitly release model/df objects to prevent RAM exhaustion
                     del sonuc
@@ -1994,27 +2040,41 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
             mon_exchange = _exchange_olustur(state, pro=False)
             mon_exchange.load_markets()
             print('DEBUG: Waiting for lock in position_monitor_loop')
-            with lock:
-                print('DEBUG: Lock acquired in position_monitor_loop')
-                log_ekle("🎯 V36: Pozisyon Monitörü başlatıldı (1s frekans, bağımsız thread)", state)
+            _acquired = lock.acquire(timeout=5.0)
+            if _acquired:
+                try:
+                    print('DEBUG: Lock acquired in position_monitor_loop')
+                    log_ekle("🎯 V36: Pozisyon Monitörü başlatıldı (1s frekans, bağımsız thread)", state)
+                finally:
+                    lock.release()
             break
         except (ccxt.BaseError, sqlite3.Error, Exception) as e:
             print(f"⚠️ Position Monitor exchange init hatası ({_attempt+1}/5): {str(e)[:60]}")
             time.sleep(3)
     else:
         print('DEBUG: Waiting for lock in position_monitor_loop')
-        with lock:
-            print('DEBUG: Lock acquired in position_monitor_loop')
-            log_ekle("❌ V36: Pozisyon Monitörü exchange bağlantısı kurulamadı. Thread sonlandırılıyor.", state)
+        _acquired = lock.acquire(timeout=5.0)
+        if _acquired:
+            try:
+                print('DEBUG: Lock acquired in position_monitor_loop')
+                log_ekle("❌ V36: Pozisyon Monitörü exchange bağlantısı kurulamadı. Thread sonlandırılıyor.", state)
+            finally:
+                lock.release()
         return
 
     while not dur_sinyali.is_set():
         try:
             # Thread-safe snapshot: aktif pozisyonları kopyala
             print('DEBUG: Waiting for lock in position_monitor_loop')
-            with lock:
+            _acquired = lock.acquire(timeout=5.0)
+            if not _acquired:
+                dur_sinyali.wait(1.0)
+                continue
+            try:
                 print('DEBUG: Lock acquired in position_monitor_loop')
                 _aktif_pozlar = list(state.get("aktif_pozisyonlar", {}).items())
+            finally:
+                lock.release()
 
             if not _aktif_pozlar:
                 # Açık pozisyon yok — 2 saniye bekle ve tekrar kontrol et
@@ -2042,17 +2102,27 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
             # Fiyat cache'ini güncelle (bot_engine de bu cache'i kullanır)
             if tickers:
                 print('DEBUG: Waiting for lock in position_monitor_loop')
-                with lock:
-                    print('DEBUG: Lock acquired in position_monitor_loop')
-                    for sym, tick in tickers.items():
-                        if isinstance(tick, dict) and tick.get("last"):
-                            state.setdefault("guncel_fiyatlar", {})[sym] = float(tick["last"])
+                _acquired = lock.acquire(timeout=5.0)
+                if _acquired:
+                    try:
+                        print('DEBUG: Lock acquired in position_monitor_loop')
+                        for sym, tick in tickers.items():
+                            if isinstance(tick, dict) and tick.get("last"):
+                                state.setdefault("guncel_fiyatlar", {})[sym] = float(tick["last"])
+                    finally:
+                        lock.release()
 
             # Güncel fiyat cache'i al
             print('DEBUG: Waiting for lock in position_monitor_loop')
-            with lock:
-                print('DEBUG: Lock acquired in position_monitor_loop')
-                _fiyat_cache = state.get("guncel_fiyatlar", {}).copy()
+            _acquired = lock.acquire(timeout=5.0)
+            if _acquired:
+                try:
+                    print('DEBUG: Lock acquired in position_monitor_loop')
+                    _fiyat_cache = state.get("guncel_fiyatlar", {}).copy()
+                finally:
+                    lock.release()
+            else:
+                _fiyat_cache = {}
 
             for _mon_tid, _mon_poz in _aktif_pozlar:
                 try:
@@ -2089,9 +2159,13 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
 
                     if sl_tetiklendi:
                         print('DEBUG: Waiting for lock in position_monitor_loop')
-                        with lock:
-                            print('DEBUG: Lock acquired in position_monitor_loop')
-                            log_ekle(f"🚨 [{_mon_sembol}] {sl_neden}", state, is_liq="Likidasyon" in sl_neden)
+                        _acquired = lock.acquire(timeout=5.0)
+                        if _acquired:
+                            try:
+                                print('DEBUG: Lock acquired in position_monitor_loop')
+                                log_ekle(f"🚨 [{_mon_sembol}] {sl_neden}", state, is_liq="Likidasyon" in sl_neden)
+                            finally:
+                                lock.release()
                         islem_kapat_with_retry(state, _mon_tid, _mon_fiyat, sl_neden, mon_exchange,
                                                is_liq="Likidasyon" in sl_neden)
                         continue
@@ -2106,19 +2180,23 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
                         _mon_roe_pct = 0.0
 
                     print('DEBUG: Waiting for lock in position_monitor_loop')
-                    with lock:
-                        print('DEBUG: Lock acquired in position_monitor_loop')
-                        poz_ref_track = state["aktif_pozisyonlar"].get(_mon_tid)
-                        if poz_ref_track:
-                            _prev_max = poz_ref_track.get("_max_pnl_pct", 0.0)
-                            if _mon_roe_pct > _prev_max:
-                                poz_ref_track["_max_pnl_pct"] = round(_mon_roe_pct, 2)
-                            # V39: Peak fiyat takibi
-                            _old_peak = poz_ref_track.get("max_fiyat", _mon_giris)
-                            if _mon_yon == "LONG":
-                                poz_ref_track["max_fiyat"] = max(_old_peak, _mon_fiyat)
-                            elif _mon_yon == "SHORT":
-                                poz_ref_track["max_fiyat"] = min(_old_peak, _mon_fiyat) if _old_peak > 0 else _mon_fiyat
+                    _acquired = lock.acquire(timeout=5.0)
+                    if _acquired:
+                        try:
+                            print('DEBUG: Lock acquired in position_monitor_loop')
+                            poz_ref_track = state["aktif_pozisyonlar"].get(_mon_tid)
+                            if poz_ref_track:
+                                _prev_max = poz_ref_track.get("_max_pnl_pct", 0.0)
+                                if _mon_roe_pct > _prev_max:
+                                    poz_ref_track["_max_pnl_pct"] = round(_mon_roe_pct, 2)
+                                # V39: Peak fiyat takibi
+                                _old_peak = poz_ref_track.get("max_fiyat", _mon_giris)
+                                if _mon_yon == "LONG":
+                                    poz_ref_track["max_fiyat"] = max(_old_peak, _mon_fiyat)
+                                elif _mon_yon == "SHORT":
+                                    poz_ref_track["max_fiyat"] = min(_old_peak, _mon_fiyat) if _old_peak > 0 else _mon_fiyat
+                        finally:
+                            lock.release()
 
                     # ── TP1/TP2 yön bazlı kontrol ──
                     _mon_ts_aktif = _mon_poz.get("ts_aktif", False)
@@ -2135,7 +2213,9 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
                     if _mon_ts_aktif:
                         # Trailing mod zaten aktif — peak retracement kontrolü
                         print('DEBUG: Waiting for lock in position_monitor_loop')
-                        with lock:
+                        _acquired = lock.acquire(timeout=5.0)
+                        if _acquired:
+                          try:
                             print('DEBUG: Lock acquired in position_monitor_loop')
                             poz_ref_ts = state["aktif_pozisyonlar"].get(_mon_tid)
                             if poz_ref_ts:
@@ -2166,11 +2246,15 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
                                         daemon=True,
                                     ).start()
                                     continue
+                          finally:
+                            lock.release()
 
                     elif tp2_tetiklendi and not _mon_ts_aktif:
                         # V39: TP2'ye ulaşıldı — pozisyon KAPATILMAZ, trailing moda geç
                         print('DEBUG: Waiting for lock in position_monitor_loop')
-                        with lock:
+                        _acquired = lock.acquire(timeout=5.0)
+                        if _acquired:
+                          try:
                             print('DEBUG: Lock acquired in position_monitor_loop')
                             poz_ref_tp2 = state["aktif_pozisyonlar"].get(_mon_tid)
                             if poz_ref_tp2:
@@ -2182,6 +2266,8 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
                                     f"Çıkış: peak'ten %{getattr(cfg, 'TRAILING_PCT', 3.0)} geri çekilmede.",
                                     state, is_breakout=True
                                 )
+                          finally:
+                            lock.release()
                         threading.Thread(
                             target=send_telegram_msg,
                             args=(
@@ -2191,18 +2277,14 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
                             ),
                             daemon=True,
                         ).start()
-                        # Immediate Save
-                        try:
-                            _ts_save = {k: v for k, v in state.items() if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
-                            ps.state_kaydet(_ts_save)
-                        except Exception:
-                            pass
                         continue
 
                     # ── TP1 Kontrolü (yarı pozisyon kapat + SL girişe çek) ──
                     if tp1_tetiklendi and not _mon_tp1_yapildi:
                         print('DEBUG: Waiting for lock in position_monitor_loop')
-                        with lock:
+                        _acquired = lock.acquire(timeout=5.0)
+                        if _acquired:
+                          try:
                             print('DEBUG: Lock acquired in position_monitor_loop')
                             poz_ref = state["aktif_pozisyonlar"].get(_mon_tid)
                             if poz_ref:
@@ -2232,6 +2314,8 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
                                     "kar_zarar": f"{_yari_pnl:+.2f} USDT",
                                     "ai_notu": "TP1 Kısmi Kapatma + Break-Even SL"
                                 })
+                          finally:
+                            lock.release()
 
                         threading.Thread(
                             target=send_telegram_msg,
@@ -2244,18 +2328,17 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
                             daemon=True,
                         ).start()
 
-                        # Immediate Save
-                        try:
-                            _tp1_save = {k: v for k, v in state.items() if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
-                            ps.state_kaydet(_tp1_save)
-                        except Exception:
-                            pass
+                        # V41: Immediate Save removed — centralized atomic save handles persistence
 
                 except (ccxt.BaseError, sqlite3.Error, Exception) as _mon_err:
                     print('DEBUG: Waiting for lock in position_monitor_loop')
-                    with lock:
-                        print('DEBUG: Lock acquired in position_monitor_loop')
-                        log_ekle(f"⚠️ TP Monitor Hatası [{_mon_tid}]: {str(_mon_err)[:60]}", state)
+                    _acquired = lock.acquire(timeout=5.0)
+                    if _acquired:
+                        try:
+                            print('DEBUG: Lock acquired in position_monitor_loop')
+                            log_ekle(f"⚠️ TP Monitor Hatası [{_mon_tid}]: {str(_mon_err)[:60]}", state)
+                        finally:
+                            lock.release()
 
         except (ccxt.BaseError, sqlite3.Error, Exception) as e:
             # Exchange bağlantı hatası — yeniden bağlan
@@ -2267,9 +2350,13 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
                 except Exception:
                     pass
             print('DEBUG: Waiting for lock in position_monitor_loop')
-            with lock:
-                print('DEBUG: Lock acquired in position_monitor_loop')
-                log_ekle(f"⚠️ V36 Monitor Hatası: {str(e)[:80]}", state)
+            _acquired = lock.acquire(timeout=5.0)
+            if _acquired:
+                try:
+                    print('DEBUG: Lock acquired in position_monitor_loop')
+                    log_ekle(f"⚠️ V36 Monitor Hatası: {str(e)[:80]}", state)
+                finally:
+                    lock.release()
 
         # 1 saniye aralıkla kontrol (high-frequency)
         dur_sinyali.wait(1.0)
