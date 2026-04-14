@@ -711,10 +711,10 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                 if _acquired:
                     try:
                         print('DEBUG: Lock acquired in bot_engine')
-                        log_ekle(f"❌ Exchange bağlantı hatası (deneme {attempt+1}/5): {str(e)[:80]}", state)
+                        log_ekle(f"🔄 Exchange connecting... (deneme {attempt+1}/5): {str(e)[:80]}", state)
                     finally:
                         lock.release()
-                time.sleep(5)
+                time.sleep(2)
         return False
 
     if not _baglanti_kur():
@@ -804,7 +804,23 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
             with lock:
                 print('DEBUG: Lock acquired in bot_engine')
                 state["taranan_coinler"] = state_taranan_liste
-            
+
+            # V41-TURBO: Instant snapshot save — populate Signal Hub without waiting for timer
+            try:
+                _snap = {}
+                _acq = lock.acquire(timeout=5.0)
+                if _acq:
+                    try:
+                        for _k, _v in state.items():
+                            if isinstance(_v, (str, int, float, bool, list, dict, type(None))):
+                                _snap[_k] = _v
+                    finally:
+                        lock.release()
+                if _snap:
+                    ps.state_kaydet(_snap)
+            except Exception:
+                pass
+
             is_breakout_global = False
             bekleme_suresi_global = 30
             karar_paketi = {}
@@ -821,9 +837,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                 if dur_sinyali.is_set():
                     break
 
-                # V41: CPU breathing room — prevent CPU exhaustion on small instances
+                # V41-TURBO: CPU breathing room — 50ms is enough for t2.micro without causing scan delays
                 if index > 0:
-                    time.sleep(0.3)
+                    time.sleep(0.05)
                     
                 print('DEBUG: Waiting for lock in bot_engine')
                 with lock:
@@ -1799,7 +1815,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
             guncel_bakiye = state.get("bakiye", 0.0)
             bakiye_degisti_mi = abs(guncel_bakiye - son_kayit_bakiye) > 0.01
 
-            if bakiye_degisti_mi or (time.time() - son_kayit_zamani >= 60):
+            if bakiye_degisti_mi or (time.time() - son_kayit_zamani >= 10):
                 try:
                     # Step 1: Snapshot state under lock (fast, in-memory only)
                     temiz = {}

@@ -1018,6 +1018,19 @@ with tab_dash:
         except (ValueError, TypeError):
             _s_growth_val = 0.0
         _s_trend = _coin.get("trend", _coin.get("sma_trend", _coin.get("trend_status", "—")))
+
+        # V41-TURBO: Long/Short probability columns
+        _s_long_prob = _coin.get("long_ihtimali", _coin.get("long_prob", _coin.get("prob_long", None)))
+        _s_short_prob = _coin.get("short_ihtimali", _coin.get("short_prob", _coin.get("prob_short", None)))
+        try:
+            _s_long_str = f"%{float(_s_long_prob):.1f}" if _s_long_prob is not None else "—"
+        except (ValueError, TypeError):
+            _s_long_str = "—"
+        try:
+            _s_short_str = f"%{float(_s_short_prob):.1f}" if _s_short_prob is not None else "—"
+        except (ValueError, TypeError):
+            _s_short_str = "—"
+
         # Normalize signal to LONG/SHORT/BEKLE
         if _s_sinyal in ["LONG", "AL", "GÜÇLÜ AL", "ZAYIF AL"]:
             _s_sinyal_display = "🟢 LONG"
@@ -1029,6 +1042,8 @@ with tab_dash:
             "Sembol": _s_sembol,
             "Sinyal": _s_sinyal_display,
             "Güven (%)": round(_s_skor_val, 1),
+            "Long İhtimali": _s_long_str,
+            "Short İhtimali": _s_short_str,
             "Beklenen Büyüme (%)": round(_s_growth_val, 2),
             "Trend Durumu": str(_s_trend),
         })
