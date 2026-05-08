@@ -405,12 +405,11 @@ MOD_PRESETLERI = {
 
 
 def log_ekle(mesaj: str, state: dict, is_breakout=False, is_liq=False):
-    """V41: In-memory only — disk I/O removed to prevent deadlocks.
-    State is persisted centrally at the end of the bot_engine while loop."""
+    """V46: In-memory only — aggressive truncation to prevent swap pressure on t2.micro."""
     zaman = datetime.now(timezone.utc).strftime("%H:%M:%S")
     state["ai_dusunce_gunlugu"].insert(0, {"time": zaman, "msg": mesaj, "breakout": is_breakout, "liq": is_liq})
-    if len(state["ai_dusunce_gunlugu"]) > 60:
-        state["ai_dusunce_gunlugu"].pop()
+    if len(state["ai_dusunce_gunlugu"]) > 50:
+        state["ai_dusunce_gunlugu"] = state["ai_dusunce_gunlugu"][:50]
 
 
 # ─── Math fonksiyonları artık utils.py'den geliyor (backward compat re-export) ───
@@ -809,6 +808,20 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
             is_breakout_global = False
             bekleme_suresi_global = 30
             karar_paketi = {}
+
+            # V46: Pre-compute risk tier ONCE per scan (not per coin)
+            _gunluk_kar_prescan = gunluk_kar_hesapla(state)
+            _t1_loss_prescan = getattr(cfg, "RISK_TIER_1_LOSS_PCT", -5.0)
+            _t2_loss_prescan = getattr(cfg, "RISK_TIER_2_LOSS_PCT", -10.0)
+            _risk_tier_prescan = "NORMAL"
+            if _gunluk_kar_prescan <= _t2_loss_prescan:
+                _risk_tier_prescan = "T2"
+                with lock:
+                    log_ekle(f"🛡️ V40 RISK T2: Günlük %{_gunluk_kar_prescan:.1f} ≤ %{_t2_loss_prescan}. Tüm marginler %25'e düşürülecek.", state)
+            elif _gunluk_kar_prescan <= _t1_loss_prescan:
+                _risk_tier_prescan = "T1"
+                with lock:
+                    log_ekle(f"🛡️ V40 RISK T1: Günlük %{_gunluk_kar_prescan:.1f} ≤ %{_t1_loss_prescan}. Tüm marginler %50'ye düşürülecek.", state)
 
             # Bulk Ticker: Tüm fiyatları tek istekte çek (Rate Limit %90 azalır)
             try:
@@ -1378,10 +1391,10 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         state["global_risk_seviyesi"] = "🟢 Düşük Risk"
 
                     if not pozisyonu_kapat:
-                        log_ekle(f"🎯 {secilen_sembol} Analizi: {karar_paketi.get('dusunce', '')}", state, is_breakout=is_breakout)
                         sinyal_k = karar_paketi.get("karar", "BEKLE")
-                        if sinyal_k in ["LONG", "SHORT"]:
-                            log_ekle(f"📝 KARAR: {sinyal_k} - Sebep: {karar_paketi.get('dusunce', '')[:80]}...", state)
+                        # V46: Only log actionable signals to reduce I/O (BEKLE coins are silent)
+                        if sinyal_k in ["LONG", "SHORT", "KAPAT"]:
+                            log_ekle(f"📝 {secilen_sembol} → {sinyal_k}: {karar_paketi.get('dusunce', '')[:100]}", state, is_breakout=is_breakout)
 
                     sinyal = karar_paketi.get("karar", "BEKLE")
                     zaman = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -1398,13 +1411,13 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         # 🚀 Evolutionary Trainer: MTF gate bypass — maksimum veri toplama
                         if state.get("mod") == "🚀 Evolutionary Trainer":
                             mtf_gecti = True
-                            log_ekle(f"🧪 EVO MTF BYPASS: {secilen_sembol} {sinyal} MTF gate atlandı (veri toplama modu).", state)
 
+                        # V46: MTF result as single compact log line (was 2-3 lines per coin)
                         if not mtf_gecti:
-                            log_ekle(f"🔬 MTF GATE REDDETTİ: {secilen_sembol} {sinyal} kararı MTF ({mtf_k}) ile çelişiyor. İşlem iptal.", state)
-                            sinyal = "BEKLE"  # MTF onaylamıyor, işlem iptal
+                            log_ekle(f"🔬 MTF RED: {secilen_sembol} {sinyal} ↔ MTF:{mtf_k}. İptal.", state)
+                            sinyal = "BEKLE"
                         else:
-                            log_ekle(f"✅ MTF GATE ONAYLADI: {secilen_sembol} {sinyal} → MTF: {mtf_k}", state)
+                            log_ekle(f"✅ MTF OK: {secilen_sembol} {sinyal} → {mtf_k}", state)
 
                     # V25: OrderFlow Likidite Vetosu — emir defteri derinliği işlem büyüklüğünün 5 katından azsa işleme girme
                     if sinyal in ["LONG", "SHORT"] and not sembol_acik_mi(state.get("aktif_pozisyonlar", {}), secilen_sembol):
@@ -1515,18 +1528,11 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                     margin = min(margin, mevcut_bakiye)
                                     margin = min(margin, mevcut_bakiye * 0.5)
 
-                            # V40: Dynamic Risk Scaling — günlük zarara göre margin kıs
-                            _gunluk_kar_v40 = gunluk_kar_hesapla(state)
-                            _t1_loss = getattr(cfg, "RISK_TIER_1_LOSS_PCT", -5.0)
-                            _t2_loss = getattr(cfg, "RISK_TIER_2_LOSS_PCT", -10.0)
-                            if _gunluk_kar_v40 <= _t2_loss:
-                                _risk_scale = getattr(cfg, "RISK_TIER_2_SCALE", 0.25)
-                                margin = margin * _risk_scale
-                                log_ekle(f"🛡️ V40 RISK T2: Günlük %{_gunluk_kar_v40:.1f} ≤ %{_t2_loss}. Margin %25'e düşürüldü: ${margin:.2f}", state)
-                            elif _gunluk_kar_v40 <= _t1_loss:
-                                _risk_scale = getattr(cfg, "RISK_TIER_1_SCALE", 0.50)
-                                margin = margin * _risk_scale
-                                log_ekle(f"🛡️ V40 RISK T1: Günlük %{_gunluk_kar_v40:.1f} ≤ %{_t1_loss}. Margin %50'ye düşürüldü: ${margin:.2f}", state)
+                            # V46: Use pre-computed risk tier (no per-coin log_ekle)
+                            if _risk_tier_prescan == "T2":
+                                margin = margin * getattr(cfg, "RISK_TIER_2_SCALE", 0.25)
+                            elif _risk_tier_prescan == "T1":
+                                margin = margin * getattr(cfg, "RISK_TIER_1_SCALE", 0.50)
 
                             buyukluk_usdt = margin * tavsiye_kaldirac
                             
@@ -1830,6 +1836,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                     break
                 with lock:
                     state["sonraki_analiz_sn"] -= 1
+
+            # V46: Lightweight heartbeat — proves the loop is alive without I/O overhead
+            print('.', end='', flush=True)
 
         except (ccxt.BaseError, sqlite3.Error, Exception) as e:
             err_str = str(e)

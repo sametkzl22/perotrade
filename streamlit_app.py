@@ -706,7 +706,10 @@ if st.session_state.view_mode == "📜 Sadece İşlem Logları":
     # Düşünce Günlüğü
     st.markdown("### 🧠 AI Düşünce Günlüğü")
     log_kutusu = st.container(height=400, border=True)
-    for log in S.get("ai_dusunce_gunlugu", []):
+    # V46: Auto-clear — only render last 40 entries to save RAM
+    _gunluk_raw = S.get("ai_dusunce_gunlugu", [])
+    _gunluk_display = _gunluk_raw[:40] if len(_gunluk_raw) > 40 else _gunluk_raw
+    for log in _gunluk_display:
         cls_name = 'ai-log-breakout' if log.get('liq') or log.get('breakout') else 'ai-log-box'
         if '🛡️' in log.get('msg', ''):
             cls_name = 'ai-log-breakout'
@@ -993,7 +996,10 @@ with tab_dash:
     with col_sag:
         st.markdown("<div class='dashboard-header'><b>🧠 Pro Live Düşünce Günlüğü</b></div>", unsafe_allow_html=True)
         log_kutusu = st.container(height=500, border=True)
-        for log in S.get("ai_dusunce_gunlugu", []):
+        # V46: Auto-clear — only render last 40 entries
+        _gunluk_raw2 = S.get("ai_dusunce_gunlugu", [])
+        _gunluk_display2 = _gunluk_raw2[:40] if len(_gunluk_raw2) > 40 else _gunluk_raw2
+        for log in _gunluk_display2:
             cls_name = 'ai-log-breakout' if log.get('liq') or log.get('breakout') else 'ai-log-box'
             if '🛡️' in log.get('msg', ''):
                 cls_name = 'ai-log-breakout'
