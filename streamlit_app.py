@@ -118,7 +118,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.markdown("""
+# V42 Memory Guard: Cache static CSS to save RAM on t2.micro
+@st.cache_data
+def _get_cached_css() -> str:
+    return """
 <style>
 .stApp { background: linear-gradient(135deg, #0b0c10 0%, #1f2833 100%); color: #c5c6c7; font-family: 'Inter', sans-serif; }
 [data-testid="stMetric"] { background: rgba(31, 40, 51, 0.8); border: 1px solid #45a29e; border-radius: 12px; padding: 16px; box-shadow: 0 4px 15px rgba(0,0,0,0.4); transition: transform 0.2s; }
@@ -140,7 +143,9 @@ st.markdown("""
 @keyframes pulse { 0%, 100% {opacity: 1;} 50% {opacity: 0.7;} }
 @keyframes shake { 0% { transform: translateX(0); } 25% { transform: translateX(-2px); } 50% { transform: translateX(2px); } 75% { transform: translateX(-2px); } 100% { transform: translateX(0); } }
 </style>
-""", unsafe_allow_html=True)
+"""
+
+st.markdown(_get_cached_css(), unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────
