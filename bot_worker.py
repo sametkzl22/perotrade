@@ -215,7 +215,7 @@ def _exchange_olustur(state: dict, pro: bool = False) -> object:
 
     params = {
         "enableRateLimit": True,
-        "timeout": 30000,  # 🚀 EKLE: 30 saniye sonra ağ isteğinden vazgeç ve hata döndür
+        "timeout": 20000,  # V45: 20s timeout — 30s fazla bekleme yaratıyordu
         "options": {"defaultType": futures_type},
     }
 
@@ -229,6 +229,19 @@ def _exchange_olustur(state: dict, pro: bool = False) -> object:
 
     lib = ccxtpro if pro else ccxt
     return getattr(lib, exchange_adi)(params)
+
+
+def _rate_limit_retry(func, *args, max_retries=3, **kwargs):
+    """V45: Rate limit hatalarında otomatik retry (150+ coin taramasında gerekli)."""
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except ccxt.RateLimitExceeded:
+            wait = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+            time.sleep(wait)
+        except ccxt.DDoSProtection:
+            time.sleep(3)
+    return func(*args, **kwargs)  # Son deneme — hata fırlatabilir
 
 
 # ─────────────────────────────────────────────
@@ -792,24 +805,6 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
             if not secilen_coinler:
                 secilen_coinler = [{"sembol": "BTC/USDT", "pazar": {}, "sma": "BEKLE", "is_breakout": False, "rapor": ""}]
 
-            with lock:
-                state["taranan_coinler"] = state_taranan_liste
-
-            # V41-TURBO: Instant snapshot save — populate Signal Hub without waiting for timer
-            try:
-                _snap = {}
-                _acq = lock.acquire(timeout=5.0)
-                if _acq:
-                    try:
-                        for _k, _v in state.items():
-                            if isinstance(_v, (str, int, float, bool, list, dict, type(None))):
-                                _snap[_k] = _v
-                    finally:
-                        lock.release()
-                if _snap:
-                    ps.state_kaydet(_snap)
-            except Exception:
-                pass
 
             is_breakout_global = False
             bekleme_suresi_global = 30
@@ -825,9 +820,9 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                 if dur_sinyali.is_set():
                     break
 
-                # V41-TURBO: CPU breathing room — 50ms is enough for t2.micro without causing scan delays
+                # V45: 10ms CPU breathing — Bulk Ticker zaten rate limit koruyor
                 if index > 0:
-                    time.sleep(0.05)
+                    time.sleep(0.01)
                     
                 with lock:
                     mevcut_islem_sayisi = len(state.get("aktif_pozisyonlar", {}))
@@ -846,7 +841,6 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                 if is_breakout: is_breakout_global = True
 
                 with lock:
-                    state["taranan_coinler"] = tarama_sonucu.get("taranan_liste", [])
                     state["aktif_sembol"] = secilen_sembol
                     state["is_breakout"] = is_breakout
                     if is_breakout:
@@ -1697,6 +1691,26 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         if kapat_tid:
                             islem_kapat_with_retry(state, kapat_tid, fiyat, karar_paketi.get("dusunce", ""), exchange)
 
+            # V45: taranan_coinler'i for döngüsü BİTTİKTEN SONRA ata (tek yazma)
+            with lock:
+                state["taranan_coinler"] = state_taranan_liste
+
+            # V45 Force Flush: Signal Hub'ı anında güncelle — timer'ı bekleme
+            try:
+                _snap = {}
+                _acq = lock.acquire(timeout=5.0)
+                if _acq:
+                    try:
+                        for _k, _v in state.items():
+                            if isinstance(_v, (str, int, float, bool, list, dict, type(None))):
+                                _snap[_k] = _v
+                    finally:
+                        lock.release()
+                if _snap:
+                    ps.state_kaydet(_snap)
+            except Exception:
+                pass
+
             # V23: Yüksek güvenli fırsat bildirimi (her tarama döngüsü sonunda)
             try:
                 with lock:
@@ -1751,7 +1765,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
             guncel_bakiye = state.get("bakiye", 0.0)
             bakiye_degisti_mi = abs(guncel_bakiye - son_kayit_bakiye) > 0.01
 
-            if bakiye_degisti_mi or (time.time() - son_kayit_zamani >= 10):
+            if bakiye_degisti_mi or (time.time() - son_kayit_zamani >= 5):  # V45: 10s→5s
                 try:
                     # Step 1: Snapshot state under lock (fast, in-memory only)
                     temiz = {}

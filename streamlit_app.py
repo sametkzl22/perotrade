@@ -1043,6 +1043,10 @@ with tab_dash:
             _s_sinyal_display = "🔴 SHORT"
         else:
             _s_sinyal_display = "⚪ BEKLE"
+        # V45: Freshness timestamp column
+        _s_analiz_zamani = _coin.get("analiz_zamani", _coin.get("scan_time", _coin.get("zaman", "")))
+        _s_zaman_str = str(_s_analiz_zamani) if _s_analiz_zamani else "—"
+
         _sinyal_liste.append({
             "Sembol": _s_sembol,
             "Sinyal": _s_sinyal_display,
@@ -1051,6 +1055,7 @@ with tab_dash:
             "Short İhtimali": _s_short_str,
             "Beklenen Büyüme (%)": round(_s_growth_val, 2),
             "Trend Durumu": str(_s_trend),
+            "Son Analiz": _s_zaman_str,
         })
 
     if _sinyal_liste:
@@ -1157,5 +1162,6 @@ with tab_canli:
 # Auto-Refresh (Engine çalışırken)
 # ─────────────────────────────────────────────
 if _is_running:
-    time.sleep(1.0)
+    time.sleep(0.5)  # V45: 1.0s→0.5s for smooth Signal Hub flow
     st.rerun()
+
