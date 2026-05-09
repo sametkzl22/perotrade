@@ -1805,26 +1805,26 @@ def bottom_hunter_karar(sembol: str, pazar: dict, sma_sinyal: str, acik_pozisyon
         hacim_yukseliyor = pazar.get("is_breakout", False) or pazar.get("volume_spike", False)
 
     # --- Bottom-Finder (LONG) ---
-    bottom_threshold = lrc_alt * 0.995 if lrc_gecerli else 0  # V48: %0.5 altı yeterli (eski: %2)
+    bottom_threshold = lrc_alt * 0.997 if lrc_gecerli else 0  # V49: %0.3 altı yeterli (V48: %0.5)
     bottom_hit = lrc_gecerli and son_close > 0 and son_close <= bottom_threshold
-    rsi_oversold = rsi_val < 36  # V48: RSI<36 (eski: <30)
+    rsi_oversold = rsi_val < 42  # V49: RSI<42 (V48: <36)
 
     if bottom_hit and rsi_oversold and hacim_yukseliyor:
         karar = "LONG"
         guven = min(95, guven + 25)
-        neden_parts.append(f"🎯 BOTTOM-HUNTER LONG: ${son_close:.4f} ≤ LRC_Alt*0.995 (${bottom_threshold:.4f})")
-        neden_parts.append(f"RSI={rsi_val:.1f}<36 ✅ | Hacim ↑ ✅")
+        neden_parts.append(f"🎯 BOTTOM-HUNTER LONG: ${son_close:.4f} ≤ LRC_Alt*0.997 (${bottom_threshold:.4f})")
+        neden_parts.append(f"RSI={rsi_val:.1f}<42 ✅ | Hacim ↑ ✅")
 
     # --- Peak-Finder (SHORT) ---
-    peak_threshold = lrc_ust * 1.005 if lrc_gecerli else 0  # V48: %0.5 üstü yeterli (eski: %2)
+    peak_threshold = lrc_ust * 1.003 if lrc_gecerli else 0  # V49: %0.3 üstü (V48: %0.5)
     peak_hit = lrc_gecerli and son_close > 0 and son_close >= peak_threshold
-    rsi_overbought = rsi_val > 64  # V48: RSI>64 (eski: >70)
+    rsi_overbought = rsi_val > 58  # V49: RSI>58 (V48: >64)
 
     if karar == "BEKLE" and peak_hit and rsi_overbought and hacim_yukseliyor:
         karar = "SHORT"
         guven = min(95, guven + 25)
-        neden_parts.append(f"📉 PEAK-FINDER SHORT: ${son_close:.4f} ≥ LRC_Üst*1.005 (${peak_threshold:.4f})")
-        neden_parts.append(f"RSI={rsi_val:.1f}>64 ✅ | Hacim ↑ ✅")
+        neden_parts.append(f"📉 PEAK-FINDER SHORT: ${son_close:.4f} ≥ LRC_Üst*1.003 (${peak_threshold:.4f})")
+        neden_parts.append(f"RSI={rsi_val:.1f}>58 ✅ | Hacim ↑ ✅")
 
     # BEKLE durumunda neden
     if karar == "BEKLE":

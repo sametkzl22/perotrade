@@ -644,12 +644,12 @@ with st.sidebar:
     if not guclü_firsatlar and not orta_firsatlar:
         st.sidebar.info("Henüz %60+ güvenli fırsat bulunamadı.")
 
-    # V48: Sistem Çalışma Süresi (Uptime)
-    bas_zamani = S.get("baslangic_zamani", 0)
-    if bas_zamani > 0:
+    # V49: Sistem Çalışma Süresi (Uptime) — system_start_time tercih edilir
+    _sys_start = S.get("system_start_time", 0) or S.get("baslangic_zamani", 0)
+    if _sys_start > 0:
         st.sidebar.markdown("---")
         st.sidebar.markdown("### ⏱️ Sistem Çalışma Süresi")
-        _uptime_sn = time.time() - bas_zamani
+        _uptime_sn = time.time() - _sys_start
         _up_gun = int(_uptime_sn // 86400)
         _up_saat = int((_uptime_sn % 86400) // 3600)
         _up_dakika = int((_uptime_sn % 3600) // 60)
@@ -753,8 +753,8 @@ st.metric("Toplam Varlık", f"${tplm:,.2f}")
 st.metric("Boşta USDT", f"${bky:,.2f}")
 st.metric("Kullanılan Margin", f"${kullanilan:,.2f}")
 
-# V48: Uptime göstergesi (demo timer yerine)
-_uptime_bas = S.get("baslangic_zamani", 0)
+# V49: Uptime göstergesi (system_start_time tercih edilir)
+_uptime_bas = S.get("system_start_time", 0) or S.get("baslangic_zamani", 0)
 if _is_running and _uptime_bas > 0:
     _uptime_total = time.time() - _uptime_bas
     _ut_g = int(_uptime_total // 86400)

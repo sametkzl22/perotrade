@@ -285,6 +285,7 @@ class GlobalBotState:
             "martingale_ardisik_kayip": 0,
             "martingale_carpan": 1.0,
             "baslangic_zamani": time.time(),
+            "system_start_time": time.time(),  # V49: Uptime counter için sabit başlangıç
 
             "exchange_adi": cfg.EXCHANGE_NAME,
             "mod": "⚡ Agresif Mod",
@@ -292,8 +293,6 @@ class GlobalBotState:
             "openai_key": "",
             "global_risk_seviyesi": "Normal",
             "kaldirac": 10,
-            "baslangic_zamani": 0.0,
-            "hedef_sure_saat": 24.0,
 
             "son_fiyat_tick": 0.0,
             "cuzdan_gecmisi": [],
@@ -1335,12 +1334,16 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                     state["aktif_pozisyonlar"][dca_tid]["dca_sayisi"] = dca.get("dca_sayisi", 1)
                                     state["bakiye"] -= ekleme
                                     log_ekle(f"✅ DCA UYGULANDI: ${ekleme:.2f} eklendi.", state)
-                                    # Immediate Save: DCA (Bakiye Güncelleme) anında mühürle
-                                    try:
-                                        tem_s = {k: v for k, v in state.items() if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
-                                        ps.state_kaydet(tem_s)
-                                    except Exception:
-                                        pass
+                            # V49: Disk I/O lock dışına taşındı (deadlock fix)
+                            try:
+                                _dca_snap = {k: v for k, v in state.items() if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
+                            except Exception:
+                                _dca_snap = {}
+                            if _dca_snap:
+                                try:
+                                    ps.state_kaydet(_dca_snap)
+                                except Exception:
+                                    pass
                 else:
                     karar_paketi["karar"] = "KAPAT"
 
