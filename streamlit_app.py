@@ -644,35 +644,21 @@ with st.sidebar:
     if not guclü_firsatlar and not orta_firsatlar:
         st.sidebar.info("Henüz %60+ güvenli fırsat bulunamadı.")
 
-    # Esnek Demo Test Süresi
-    if not S.get("use_real_api", False):
+    # V48: Sistem Çalışma Süresi (Uptime)
+    bas_zamani = S.get("baslangic_zamani", 0)
+    if bas_zamani > 0:
         st.sidebar.markdown("---")
-        st.sidebar.markdown("### ⏳ Demo Test Süresi")
-        hedef_saat = st.sidebar.number_input("Test Süresi (Saat)", min_value=1, max_value=720, value=int(S.get("hedef_sure_saat", 48)))
-        if hedef_saat != S.get("hedef_sure_saat", 48.0):
-            _write_ui_setting("hedef_sure_saat", float(hedef_saat))
-            
-        bas_zamani = S.get("baslangic_zamani", 0)
-        gecen_saniye = (time.time() - bas_zamani) if bas_zamani > 0 else 0
-        hedef_saniye = hedef_saat * 3600
-        kalan_saniye = max(0.0, hedef_saniye - gecen_saniye)
-        saat = int(kalan_saniye // 3600)
-        dakika = int((kalan_saniye % 3600) // 60)
-        ilerleme_pct = min(1.0, gecen_saniye / hedef_saniye) if hedef_saniye > 0 else 1.0
-
-        st.sidebar.progress(ilerleme_pct)
-        st.sidebar.markdown(f"**Kalan Süre:** {saat}s {dakika}d")
-
-        if bas_zamani > 0 and kalan_saniye == 0:
-            islem_gecmisi = S.get("islem_gecmisi", [])
-            kapanan_islemler = [i for i in islem_gecmisi if "KAPAT" in i.get("sinyal", "")]
-            pozitifler = [i for i in kapanan_islemler if isinstance(i.get("kar_zarar"), (int, float)) and float(str(i["kar_zarar"]).replace(" USDT", "").replace("+", "")) > 0]
-            basari_orani = (len(pozitifler) / len(kapanan_islemler) * 100) if kapanan_islemler else 0
-
-            st.sidebar.success(f"🎉 **{int(hedef_saat)} Saatlik Demo Tamamlandı!**\n\n"
-                               f"📊 **Toplam İşlem:** {len(kapanan_islemler)}\n"
-                               f"🎯 **Başarı Oranı:** %{basari_orani:.1f}\n"
-                               f"💰 **Toplam Kâr:** ${state_bakiye - cfg.INITIAL_BALANCE:.2f}")
+        st.sidebar.markdown("### ⏱️ Sistem Çalışma Süresi")
+        _uptime_sn = time.time() - bas_zamani
+        _up_gun = int(_uptime_sn // 86400)
+        _up_saat = int((_uptime_sn % 86400) // 3600)
+        _up_dakika = int((_uptime_sn % 3600) // 60)
+        _up_saniye = int(_uptime_sn % 60)
+        _uptime_str = f"{_up_gun:02d}:{_up_saat:02d}:{_up_dakika:02d}:{_up_saniye:02d}"
+        st.sidebar.markdown(f"<div style='text-align:center; font-size:24px; font-weight:800; color:#66fcf1; font-family:monospace;'>"
+                            f"⏱️ {_uptime_str}</div>"
+                            f"<div style='text-align:center; font-size:11px; color:#999;'>GG:SS:DD:SN</div>",
+                            unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
 # GLOBAL HEADER / METRICS (Ortak)
@@ -767,10 +753,15 @@ st.metric("Toplam Varlık", f"${tplm:,.2f}")
 st.metric("Boşta USDT", f"${bky:,.2f}")
 st.metric("Kullanılan Margin", f"${kullanilan:,.2f}")
 
-gecen_sure = (time.time() - S.get("baslangic_zamani", 0)) / 3600 if S.get("baslangic_zamani", 0) > 0 else 0
-kalan_sure = max(0, S.get("hedef_sure_saat", 24) - gecen_sure)
-if _is_running:
-    st.info(f"⏳ Kalan Hedef Süresi: {kalan_sure:.1f} Saat")
+# V48: Uptime göstergesi (demo timer yerine)
+_uptime_bas = S.get("baslangic_zamani", 0)
+if _is_running and _uptime_bas > 0:
+    _uptime_total = time.time() - _uptime_bas
+    _ut_g = int(_uptime_total // 86400)
+    _ut_s = int((_uptime_total % 86400) // 3600)
+    _ut_d = int((_uptime_total % 3600) // 60)
+    _ut_sn = int(_uptime_total % 60)
+    st.info(f"⏱️ Uptime: {_ut_g}g {_ut_s}s {_ut_d}d {_ut_sn}sn")
 
 st.markdown("---")
 st.markdown("### 📈 Günlük Performans Takibi")

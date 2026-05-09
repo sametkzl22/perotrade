@@ -963,26 +963,8 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                     _aktif_tid = sembol_icin_trade_id_bul(state.get("aktif_pozisyonlar", {}), secilen_sembol)
                     poz_durumu = state["aktif_pozisyonlar"][_aktif_tid].get("pozisyon", "YOK") if _aktif_tid else "YOK"
 
-                # Zaman Baskısı
+                # V48: Zaman baskısı kaldırıldı — bot süresiz çalışır
                 zaman_baski_carpani = 1.0
-                if state.get("baslangic_zamani", 0) > 0 and state.get("hedef_sure_saat", 0) > 0:
-                    gecen_saat = (time.time() - state["baslangic_zamani"]) / 3600.0
-                    sure_orani = gecen_saat / state["hedef_sure_saat"]
-                    hedef_farki_pct = (state.get("hedef_bakiye", 100) - state.get("bakiye", 0)) / max(state.get("hedef_bakiye", 100), 1)
-
-                    if sure_orani >= 0.80 and hedef_farki_pct > 0.20:
-                        zaman_baski_carpani = 4.0
-                        with lock:
-                            state["bot_durumu"] = "💥 BERSERKER Modu!"
-                            log_ekle(f"💥 BERSERKER MODU AKTİF! Süre: %{sure_orani * 100:.0f} geçti.", state)
-                    elif sure_orani >= 0.70 and hedef_farki_pct > 0.30:
-                        zaman_baski_carpani = 3.0
-                        with lock:
-                            log_ekle(f"🎯 FINAL HUNTER MODU AKTİF! Süre: %{sure_orani * 100:.0f} geçti.", state)
-                    elif sure_orani >= 0.50 and hedef_farki_pct > 0.05:
-                        zaman_baski_carpani = 2.0
-                    elif sure_orani > 0.30 and hedef_farki_pct > 0:
-                        zaman_baski_carpani = 1.0 + (sure_orani * hedef_farki_pct * 2.0)
 
                 karar_paketi = {"karar": "BEKLE", "dusunce": kapat_sinyali_nedeni, "aralik_sn": 5}
                 mtf_guc = mtf.get("guc", 0) if isinstance(mtf, dict) else 0
@@ -2129,6 +2111,13 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
                                     poz_ref_track["max_fiyat"] = max(_old_peak, _mon_fiyat)
                                 elif _mon_yon == "SHORT":
                                     poz_ref_track["max_fiyat"] = min(_old_peak, _mon_fiyat) if _old_peak > 0 else _mon_fiyat
+
+                                # V48: Break-even SL trigger — ROE >%2 ise SL'yi girişe çek
+                                if _mon_roe_pct >= 2.0 and poz_ref_track.get("dinamik_sl_fiyat", 0) != _mon_giris:
+                                    if (_mon_yon == "LONG" and poz_ref_track.get("dinamik_sl_fiyat", 0) < _mon_giris) or \
+                                       (_mon_yon == "SHORT" and poz_ref_track.get("dinamik_sl_fiyat", 0) > _mon_giris):
+                                        poz_ref_track["dinamik_sl_fiyat"] = _mon_giris
+                                        log_ekle(f"🛡️ [{_mon_sembol}] V48 Break-Even: ROE %{_mon_roe_pct:.1f} ≥ %2. SL → ${_mon_giris:.4f}", state)
                         finally:
                             lock.release()
 

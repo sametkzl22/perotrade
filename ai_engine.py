@@ -702,6 +702,13 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
             pazar["atr_spike"] = atr_spike.get("spike", False)
             pazar["atr_spike_oran"] = atr_spike.get("spike_oran", 0.0)
 
+            # V48: LRC kanalı hesapla — Bottom-Hunter + Signal Hub için
+            lrc_data = lrc_analizi_yap(df, period=getattr(cfg, "LRC_LOOKBACK", 100))
+            if lrc_data.get("gecerli"):
+                pazar["lrc_alt"] = lrc_data["lrc_alt"]
+                pazar["lrc_ust"] = lrc_data["lrc_ust"]
+                pazar["lrc_orta"] = lrc_data["lrc_orta"]
+
             # Breakout Kontrolü (Hacim Patlaması & Konsolidasyon)
             is_breakout = False
             son_hacim = df['volume'].iloc[-1]
@@ -729,7 +736,19 @@ def anormallik_tara_ve_sec(exchange, top_coinler, sma_kisa, sma_uzun) -> dict:
                 "Volatilite": round(pazar["volatilite"], 2),
                 "Hacim Artışı": f"%{hacim_artis_pct:.0f}",
                 "ATR Spike": f"🔥 x{atr_spike.get('spike_oran', 0):.1f}" if atr_spike.get("spike") else "—",
-                "Breakout": "🔥 EVET" if is_breakout else "HAYIR"
+                "Breakout": "🔥 EVET" if is_breakout else "HAYIR",
+                # V48: Bottom-Hunter için LRC/RSI/Volume verileri
+                "sembol": coin,
+                "guven_skoru": round(skor, 1),
+                "sinyal": sma_sinyal,
+                "trend": sma_sinyal,
+                "rsi": round(pazar.get("rsi", 50), 1),
+                "lrc_alt": round(lrc_data.get("lrc_alt", 0), 4) if lrc_data.get("gecerli") else 0,
+                "lrc_ust": round(lrc_data.get("lrc_ust", 0), 4) if lrc_data.get("gecerli") else 0,
+                "lrc_orta": round(lrc_data.get("lrc_orta", 0), 4) if lrc_data.get("gecerli") else 0,
+                "volume_bars": [float(v) for v in df['volume'].iloc[-7:].tolist()] if len(df) >= 7 else [],
+                "beklenen_artis": round(pazar.get("volatilite", 0) * 0.5, 2),
+                "analiz_zamani": datetime.now(timezone.utc).strftime("%H:%M:%S"),
             })
             
             # Volatilite * Breakout puanı (Hacimli ama ölü USDC gibi coinleri eler)
@@ -1786,26 +1805,26 @@ def bottom_hunter_karar(sembol: str, pazar: dict, sma_sinyal: str, acik_pozisyon
         hacim_yukseliyor = pazar.get("is_breakout", False) or pazar.get("volume_spike", False)
 
     # --- Bottom-Finder (LONG) ---
-    bottom_threshold = lrc_alt * 0.98 if lrc_gecerli else 0
+    bottom_threshold = lrc_alt * 0.995 if lrc_gecerli else 0  # V48: %0.5 altı yeterli (eski: %2)
     bottom_hit = lrc_gecerli and son_close > 0 and son_close <= bottom_threshold
-    rsi_oversold = rsi_val < 30
+    rsi_oversold = rsi_val < 36  # V48: RSI<36 (eski: <30)
 
     if bottom_hit and rsi_oversold and hacim_yukseliyor:
         karar = "LONG"
         guven = min(95, guven + 25)
-        neden_parts.append(f"🎯 BOTTOM-HUNTER LONG: ${son_close:.4f} ≤ LRC_Alt*0.98 (${bottom_threshold:.4f})")
-        neden_parts.append(f"RSI={rsi_val:.1f}<30 ✅ | Hacim ↑ ✅")
+        neden_parts.append(f"🎯 BOTTOM-HUNTER LONG: ${son_close:.4f} ≤ LRC_Alt*0.995 (${bottom_threshold:.4f})")
+        neden_parts.append(f"RSI={rsi_val:.1f}<36 ✅ | Hacim ↑ ✅")
 
     # --- Peak-Finder (SHORT) ---
-    peak_threshold = lrc_ust * 1.02 if lrc_gecerli else 0
+    peak_threshold = lrc_ust * 1.005 if lrc_gecerli else 0  # V48: %0.5 üstü yeterli (eski: %2)
     peak_hit = lrc_gecerli and son_close > 0 and son_close >= peak_threshold
-    rsi_overbought = rsi_val > 70
+    rsi_overbought = rsi_val > 64  # V48: RSI>64 (eski: >70)
 
     if karar == "BEKLE" and peak_hit and rsi_overbought and hacim_yukseliyor:
         karar = "SHORT"
         guven = min(95, guven + 25)
-        neden_parts.append(f"📉 PEAK-FINDER SHORT: ${son_close:.4f} ≥ LRC_Üst*1.02 (${peak_threshold:.4f})")
-        neden_parts.append(f"RSI={rsi_val:.1f}>70 ✅ | Hacim ↑ ✅")
+        neden_parts.append(f"📉 PEAK-FINDER SHORT: ${son_close:.4f} ≥ LRC_Üst*1.005 (${peak_threshold:.4f})")
+        neden_parts.append(f"RSI={rsi_val:.1f}>64 ✅ | Hacim ↑ ✅")
 
     # BEKLE durumunda neden
     if karar == "BEKLE":
