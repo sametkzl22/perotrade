@@ -74,9 +74,13 @@ CONFIDENCE_BASED_SIZING = True     # True = güvene dayalı dinamik margin, Fals
 TP1_ROE_PCT = 2.0    # TP1 hedefi: %2 ROE’de pozisyonun %50’sini kapat, SL’yi Break-Even’e çek
 TP2_ROE_PCT = 5.0    # TP2 hedefi: Sabit fallback (ATR hesaplanamadığında kullanılır)
 
-# ───── V39: Dynamic Trend Following + ATR Trailing Stop ─────
+# ───── V39/V47: Dynamic Trend Following + ATR Trailing Stop ─────
 ATR_MULTIPLIER_TP2 = 3.0  # TP2 = Entry ± (ATR × 3). ATR tabanlı dinamik hedef
-TRAILING_PCT = 3.0        # Trailing Stop: Fiyat peak'ten %3 geri çekilirse pozisyon kapatılır
+TRAILING_PCT = 2.5        # V47: Trailing Stop: Peak'ten %2.5 geri çekilmede kapat (eski: %3.0)
+
+# ───── V47: Bottom-Hunter / Peak-Finder Strategy ─────
+USE_ML_DECISION = False   # False = ML devre dışı, deterministic indicator-only karar
+LRC_LOOKBACK = 100        # LRC kanalı lookback periyodu (mum sayısı)
 
 # ───── Likidite Filtresi (V25) ─────
 MIN_24H_VOLUME_USDT = 50_000_000  # 24s hacim < 50M USDT olan coinler asla taranmaz

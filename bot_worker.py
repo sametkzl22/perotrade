@@ -1638,14 +1638,15 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                 "islem_margin": margin,
                                 "islem_kaldirac": tavsiye_kaldirac,
                                 "kademeli_tp_yapildi": False,
-                                "ts_aktif": False,
-                                "trailing_stop_fiyat": 0.0,
+                                # V47: Immediate TSL — trailing stop açılıştan itibaren aktif
+                                "ts_aktif": True,
+                                "trailing_stop_fiyat": fiyat,  # Peak = giriş fiyatı
                                 "acilis_zamani": time.time(),
                                 "giris_nedeni": karar_paketi.get("dusunce", "")[:120],
                                 "beklenen_hedef": karar_paketi.get("expected_growth", 0.0),
                                 # V34: Kısmi Kapatma (Partial Take Profit)
                                 "tp1_fiyat": round(tp1_f, 8),
-                                "tp2_fiyat": round(tp2_f, 8),
+                                "tp2_fiyat": round(tp2_f, 8),  # V47: Sadece referans, kapatıcı değil
                                 "tp1_yapildi": False,
                                 # V39: Trend Following tracking
                                 "atr_at_entry": round(_entry_atr, 8),
@@ -2181,32 +2182,9 @@ def position_monitor_loop(state: dict, lock: threading.Lock, dur_sinyali: thread
                             lock.release()
 
                     elif tp2_tetiklendi and not _mon_ts_aktif:
-                        # V39: TP2'ye ulaşıldı — pozisyon KAPATILMAZ, trailing moda geç
-                        _acquired = lock.acquire(timeout=5.0)
-                        if _acquired:
-                          try:
-                            poz_ref_tp2 = state["aktif_pozisyonlar"].get(_mon_tid)
-                            if poz_ref_tp2:
-                                poz_ref_tp2["ts_aktif"] = True
-                                poz_ref_tp2["max_fiyat"] = _mon_fiyat
-                                log_ekle(
-                                    f"🚀 [{_mon_sembol}] V39 TRAILING MOD AKTİF! TP2 (${_mon_tp2:.4f}) aşıldı. "
-                                    f"Peak takibi başladı. Fiyat: ${_mon_fiyat:.4f}. "
-                                    f"Çıkış: peak'ten %{getattr(cfg, 'TRAILING_PCT', 3.0)} geri çekilmede.",
-                                    state, is_breakout=True
-                                )
-                          finally:
-                            lock.release()
-                        threading.Thread(
-                            target=send_telegram_msg,
-                            args=(
-                                f"🚀 <b>{_mon_sembol}</b> TRAILING MOD AKTİF!\n"
-                                f"TP2 ${_mon_tp2:.4f} aşıldı. Peak takibi başladı.\n"
-                                f"Çıkış: Peak'ten %{getattr(cfg, 'TRAILING_PCT', 3.0)} geri çekilmede.",
-                            ),
-                            daemon=True,
-                        ).start()
-                        continue
+                        # V47: TP2 erişimi sadece loglama amaçlı — TSL zaten açılıştan aktif
+                        # Eski V39'da burada ts_aktif = True yapılıyordu, artık gerek yok
+                        pass
 
                     # ── TP1 Kontrolü (yarı pozisyon kapat + SL girişe çek) ──
                     if tp1_tetiklendi and not _mon_tp1_yapildi:

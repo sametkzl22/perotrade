@@ -1727,16 +1727,175 @@ def _build_feature_vector(pazar: dict, sma_sinyal: str, btc_trendi: str, fonlama
     return features
 
 
+# ─────────────────────────────────────────────
+# V47: Bottom-Hunter / Peak-Finder (Deterministic Indicator-Only)
+# ─────────────────────────────────────────────
+def bottom_hunter_karar(sembol: str, pazar: dict, sma_sinyal: str, acik_pozisyon: str,
+                        btc_trendi: str, fonlama: dict, zaman_baski_carpani: float = 1.0,
+                        mod: str = "", order_flow: dict = None,
+                        ensemble_df: pd.DataFrame = None) -> dict:
+    """V47: Tamamen deterministic, ML-free karar motoru.
+
+    Bottom-Finder LONG Koşulları (hepsi AND):
+      a) Fiyat <= LRC_Alt * 0.98 (kanal altının %2 altı)
+      b) RSI < 30 (aşırı satım)
+      c) Hacim son 5 mumdan yükseliyor
+
+    Peak-Finder SHORT Koşulları (hepsi AND):
+      a) Fiyat >= LRC_Üst * 1.02 (kanal üstünün %2 üstü)
+      b) RSI > 70 (aşırı alım)
+      c) Hacim son 5 mumdan yükseliyor
+    """
+    if not isinstance(pazar, dict):
+        return {"sembol": sembol, "karar": "BEKLE", "skor": 0, "dusunce": "Pazar verisi yok",
+                "aralik_sn": 30, "guven_skoru": 0, "expected_growth": 0,
+                "tavsiye_kaldirac": 10, "tavsiye_oran": 0.10, "ozet": "Veri yok"}
+    if not isinstance(fonlama, dict):
+        fonlama = {"oran": 0.0, "risk": "Yok"}
+
+    komp_skor = kompozit_skor_hesapla(pazar, sma_sinyal)
+    guven, beklenen_artis, kaldirac, oran = ai_metrikler(pazar, komp_skor, zaman_baski_carpani)
+
+    karar = "BEKLE"
+    neden_parts = []
+
+    # --- Veri Çıkarma ---
+    son_close = pazar.get("son_fiyat", 0) or pazar.get("close", 0) or 0
+    rsi_val = pazar.get("rsi", pazar.get("rsi_14", 50))
+    try:
+        rsi_val = float(rsi_val)
+    except (ValueError, TypeError):
+        rsi_val = 50.0
+
+    # LRC verileri pazar dict'inden al (anormallik_tara_ve_sec tarafından hesaplanmış olmalı)
+    lrc_alt = pazar.get("lrc_alt", 0)
+    lrc_ust = pazar.get("lrc_ust", 0)
+    lrc_orta = pazar.get("lrc_orta", 0)
+    lrc_gecerli = lrc_alt > 0 and lrc_ust > 0
+
+    # Hacim yükseliş kontrolü (son 5 mum ortalamasına göre)
+    hacim_yukseliyor = False
+    vol_data = pazar.get("volume_bars")  # Son mumların hacim listesi
+    if isinstance(vol_data, (list, tuple)) and len(vol_data) >= 6:
+        son_hacim = float(vol_data[-1])
+        ort_5_hacim = sum(float(v) for v in vol_data[-6:-1]) / 5
+        if ort_5_hacim > 0:
+            hacim_yukseliyor = son_hacim > ort_5_hacim
+    else:
+        # Fallback: pazar'daki hacim spike bilgisi
+        hacim_yukseliyor = pazar.get("is_breakout", False) or pazar.get("volume_spike", False)
+
+    # --- Bottom-Finder (LONG) ---
+    bottom_threshold = lrc_alt * 0.98 if lrc_gecerli else 0
+    bottom_hit = lrc_gecerli and son_close > 0 and son_close <= bottom_threshold
+    rsi_oversold = rsi_val < 30
+
+    if bottom_hit and rsi_oversold and hacim_yukseliyor:
+        karar = "LONG"
+        guven = min(95, guven + 25)
+        neden_parts.append(f"🎯 BOTTOM-HUNTER LONG: ${son_close:.4f} ≤ LRC_Alt*0.98 (${bottom_threshold:.4f})")
+        neden_parts.append(f"RSI={rsi_val:.1f}<30 ✅ | Hacim ↑ ✅")
+
+    # --- Peak-Finder (SHORT) ---
+    peak_threshold = lrc_ust * 1.02 if lrc_gecerli else 0
+    peak_hit = lrc_gecerli and son_close > 0 and son_close >= peak_threshold
+    rsi_overbought = rsi_val > 70
+
+    if karar == "BEKLE" and peak_hit and rsi_overbought and hacim_yukseliyor:
+        karar = "SHORT"
+        guven = min(95, guven + 25)
+        neden_parts.append(f"📉 PEAK-FINDER SHORT: ${son_close:.4f} ≥ LRC_Üst*1.02 (${peak_threshold:.4f})")
+        neden_parts.append(f"RSI={rsi_val:.1f}>70 ✅ | Hacim ↑ ✅")
+
+    # BEKLE durumunda neden
+    if karar == "BEKLE":
+        reasons = []
+        if lrc_gecerli:
+            if not bottom_hit and not peak_hit:
+                reasons.append(f"Fiyat kanal içinde (${lrc_alt:.2f}-${lrc_ust:.2f})")
+            if not rsi_oversold and not rsi_overbought:
+                reasons.append(f"RSI nötr ({rsi_val:.1f})")
+            if not hacim_yukseliyor:
+                reasons.append("Hacim düşük")
+        else:
+            reasons.append("LRC verisi yetersiz")
+        neden_parts.append(f"⏸️ BEKLE: {', '.join(reasons) if reasons else 'Koşullar karşılanmıyor'}")
+
+    # Açık pozisyon mantığı
+    if acik_pozisyon != "YOK":
+        if karar == acik_pozisyon:
+            karar = "BEKLE"
+            neden_parts.append("(Aynı yönde pozisyon açık)")
+        elif karar in ["LONG", "SHORT"] and karar != acik_pozisyon:
+            karar = "KAPAT"
+            neden_parts.append("(Ters sinyal → mevcut pozisyon kapatılacak)")
+
+    vol = pazar.get("volatilite", 0) or 0
+    sonraki_sn = dinamik_analiz_araligi(vol, pazar.get("is_breakout", False))
+    neden = " | ".join(neden_parts)
+
+    # V24 Order Flow Entegrasyonu
+    if order_flow and order_flow.get("is_valid") and karar in ["LONG", "SHORT"]:
+        of_durum = order_flow.get("durum")
+        of_penalty = getattr(cfg, "ORDERFLOW_CONFLICT_PENALTY", 0.40)
+        of_bonus = getattr(cfg, "ORDERFLOW_CONFIRM_BONUS", 20)
+        if karar == "LONG" and of_durum == "SATICI_BASKIN":
+            guven = max(0, guven * (1 - of_penalty))
+            karar = "BEKLE"
+            neden = f"❌ OrderFlow SATICI_BASKIN → LONG iptal. " + neden
+        elif karar == "SHORT" and of_durum == "ALICI_BASKIN":
+            guven = max(0, guven * (1 - of_penalty))
+            karar = "BEKLE"
+            neden = f"❌ OrderFlow ALICI_BASKIN → SHORT iptal. " + neden
+        elif karar == "LONG" and of_durum == "ALICI_BASKIN":
+            guven = min(100, guven + of_bonus)
+        elif karar == "SHORT" and of_durum == "SATICI_BASKIN":
+            guven = min(100, guven + of_bonus)
+
+    # Ensemble entegrasyonu
+    ensemble_rapor = ""
+    if ensemble_df is not None and karar in ["LONG", "SHORT", "KAPAT"]:
+        try:
+            ens = EnsembleKararMotoru(ensemble_df, sembol)
+            ens_sonuc = ens.ensemble_karar(karar)
+            guven = min(100, guven * ens_sonuc["guven_carpani"])
+            ensemble_rapor = ens_sonuc["rapor"]
+            if ens_sonuc["veto"] and karar in ["LONG", "SHORT"]:
+                karar = "BEKLE"
+                neden = f"{ens_sonuc['rapor']}. " + neden
+        except Exception:
+            pass
+
+    return {
+        "sembol": sembol,
+        "karar": karar,
+        "skor": komp_skor,
+        "dusunce": neden,
+        "aralik_sn": sonraki_sn,
+        "guven_skoru": guven,
+        "expected_growth": beklenen_artis,
+        "tavsiye_kaldirac": kaldirac,
+        "tavsiye_oran": oran,
+        "ozet": f"V47 BottomHunter | BTC: {btc_trendi} | RSI: {rsi_val:.0f} | LRC: {'✅' if lrc_gecerli else '❌'}",
+        "ensemble_rapor": ensemble_rapor
+    }
+
+
 def local_ml_karar(sembol: str, pazar: dict, sma_sinyal: str, acik_pozisyon: str,
                    btc_trendi: str, fonlama: dict, zaman_baski_carpani: float = 1.0,
                    mod: str = "", mtf_guc: int = 0, order_flow: dict = None,
                    ensemble_df: pd.DataFrame = None) -> dict:
     """
-    V35: Yerel ML model (XGBoost) ile anında karar verir.
-    Model yoksa mock_ai_karar'a fallback yapar.
-    Sınıf: 0=BEKLE, 1=LONG, 2=SHORT (3 sınıflı yapı)
-    predict_proba %60 altındaysa → BEKLE'ye çekilir.
+    V47: USE_ML_DECISION=False ise Bottom-Hunter'a yönlendir.
+    True ise eski XGBoost ML mantığını çalıştır.
     """
+    # V47: ML devre dışı → deterministic indicator-only karar
+    if not getattr(cfg, "USE_ML_DECISION", False):
+        return bottom_hunter_karar(
+            sembol, pazar, sma_sinyal, acik_pozisyon,
+            btc_trendi, fonlama, zaman_baski_carpani,
+            mod=mod, order_flow=order_flow, ensemble_df=ensemble_df
+        )
     if not isinstance(pazar, dict):
         return {"sembol": sembol, "karar": "BEKLE", "skor": 0, "dusunce": "Pazar verisi yok",
                 "aralik_sn": 30, "guven_skoru": 0, "expected_growth": 0,
