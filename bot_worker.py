@@ -30,7 +30,7 @@ import persistent_state as ps
 import data_logger
 import train_model
 from data_provider import DataProvider
-from utils import pnl_hesapla, aktif_margin_toplami, pnl_hesapla_coklu, gunluk_kar_hesapla, likidasyon_hesapla
+from utils import pnl_hesapla, aktif_margin_toplami, pnl_hesapla_coklu, gunluk_kar_hesapla, likidasyon_hesapla, get_true_equity
 
 
 # ─────────────────────────────────────────────
@@ -479,9 +479,10 @@ def islem_kapat(state, trade_id, fiyat, neden, is_breakout=False, is_liq=False):
             state["challenge_session"] = ch
             etiket = "CHALLENGE_MODE"
             log_ekle(f"🚀 CH KAPAT: {sembol} Net PNL: {net_pnl:+.4f} (Kom: {cikis_komisyon:.4f}). CH Bakiye: ${ch['bakiye']:.4f}", state)
-
-    reel_getiri = margin + aktif_pnl
-    state["bakiye"] += reel_getiri
+    else:
+        # V50: Strict ledger segregation. Global ledger is untouched during Challenge mode.
+        reel_getiri = margin + aktif_pnl
+        state["bakiye"] += reel_getiri
 
     del state["aktif_pozisyonlar"][trade_id]
 
@@ -815,12 +816,21 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
             _risk_tier_prescan = "NORMAL"
             if _gunluk_kar_prescan <= _t2_loss_prescan:
                 _risk_tier_prescan = "T2"
-                with lock:
-                    log_ekle(f"🛡️ V40 RISK T2: Günlük %{_gunluk_kar_prescan:.1f} ≤ %{_t2_loss_prescan}. Tüm marginler %25'e düşürülecek.", state)
+                if state.get("_last_logged_tier") != "T2":
+                    with lock:
+                        log_ekle(f"🛡️ V40 RISK T2: Günlük %{_gunluk_kar_prescan:.1f} ≤ %{_t2_loss_prescan}. Tüm marginler %25'e düşürülecek.", state)
+                    state["_last_logged_tier"] = "T2"
             elif _gunluk_kar_prescan <= _t1_loss_prescan:
                 _risk_tier_prescan = "T1"
-                with lock:
-                    log_ekle(f"🛡️ V40 RISK T1: Günlük %{_gunluk_kar_prescan:.1f} ≤ %{_t1_loss_prescan}. Tüm marginler %50'ye düşürülecek.", state)
+                if state.get("_last_logged_tier") != "T1":
+                    with lock:
+                        log_ekle(f"🛡️ V40 RISK T1: Günlük %{_gunluk_kar_prescan:.1f} ≤ %{_t1_loss_prescan}. Tüm marginler %50'ye düşürülecek.", state)
+                    state["_last_logged_tier"] = "T1"
+            else:
+                if state.get("_last_logged_tier") in ["T1", "T2"]:
+                    with lock:
+                        log_ekle(f"✅ V40 RISK: Günlük kar %{_gunluk_kar_prescan:.1f}. Risk kısıtlamaları kaldırıldı.", state)
+                    state["_last_logged_tier"] = "NORMAL"
 
             # Bulk Ticker: Tüm fiyatları tek istekte çek (Rate Limit %90 azalır)
             try:
@@ -981,12 +991,12 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                     state["bot_durumu"] = "Çalışıyor"
                     state["gunluk_pik_kar"] = 0.0  # Günlük pik sıfırla
                     # V40: HWM + ardışık kayıp reset
-                    state["daily_peak_equity"] = state['bakiye'] + aktif_margin_toplami(state.get('aktif_pozisyonlar', {}))
+                    state["daily_peak_equity"] = get_true_equity(state)
                     state["ardisik_kayip_sayaci"] = 0
                     state["risk_seviyesi"] = "🟢 Güvenli"
                     # V31 FIX: Mola sonrası bakiyeyi yeni sıfır noktası olarak kabul et
                     # Eski zararın tekrar mola tetiklemesini engeller
-                    state['gun_baslangic_bakiye'] = state['bakiye'] + aktif_margin_toplami(state.get('aktif_pozisyonlar', {}))
+                    state['gun_baslangic_bakiye'] = get_true_equity(state)
                     log_ekle(f"✅ MOLA BİTTİ: Bot otonom taramaya geri döndü. Yeni gün başlangıç bakiyesi: ${state['gun_baslangic_bakiye']:.2f}", state, is_breakout=True)
                     threading.Thread(
                         target=send_telegram_msg,
@@ -1159,7 +1169,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                     # Bakiye Senkronizasyonu (Manual Injection Guard)
                     # Challenge modunda bu kontrolü ATLA — challenge kendi izole bakiyesiyle çalışır
                     gun_baslangic = state.get("gun_baslangic_bakiye", state.get("baslangic_bakiye", cfg.INITIAL_BALANCE))
-                    mevcut_bakiye = state.get("bakiye", gun_baslangic) + aktif_margin_toplami(state.get("aktif_pozisyonlar", {}))
+                    mevcut_bakiye = get_true_equity(state)
                 
                     if not (state.get("mod") == "🚀 94-Day Challenge") and gun_baslangic > 0 and ((mevcut_bakiye - gun_baslangic) / gun_baslangic) * 100 >= 100.0:
                         with lock:
@@ -1284,7 +1294,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
 
                     # V40: High-Water Mark (HWM) Drawdown Guard
                     if not is_challenge:
-                        _hwm_equity = mevcut_bakiye  # mevcut_bakiye = bakiye + margin
+                        _hwm_equity = get_true_equity(state)
                         _daily_peak = state.get("daily_peak_equity", _hwm_equity)
                         if _hwm_equity > _daily_peak:
                             state["daily_peak_equity"] = _hwm_equity
@@ -1360,7 +1370,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                     state["ai_beklenen_artis"] = karar_paketi.get("expected_growth", 0.0)
                     state["ai_analiz_ozeti"] = karar_paketi.get("ozet", kapat_sinyali_nedeni)
 
-                    toplam_varlik = state["bakiye"] + aktif_margin_toplami(state.get("aktif_pozisyonlar", {}))
+                    toplam_varlik = get_true_equity(state)
                     state["cuzdan_gecmisi"].append({"zaman": datetime.now(timezone.utc).strftime("%H:%M:%S"), "deger": round(toplam_varlik, 2)})
                     if len(state["cuzdan_gecmisi"]) > 200:
                         state["cuzdan_gecmisi"] = state["cuzdan_gecmisi"][-200:]
@@ -1404,25 +1414,7 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         else:
                             log_ekle(f"✅ MTF OK: {secilen_sembol} {sinyal} → {mtf_k}", state)
 
-                    # V25: OrderFlow Likidite Vetosu — emir defteri derinliği işlem büyüklüğünün 5 katından azsa işleme girme
-                    if sinyal in ["LONG", "SHORT"] and not sembol_acik_mi(state.get("aktif_pozisyonlar", {}), secilen_sembol):
-                        try:
-                            of_veto_mult = getattr(cfg, "ORDERFLOW_LIQUIDITY_VETO_MULT", 5)
-                            # Tahmini büyüklük: equity * trade_risk * kaldıraç
-                            _eq = state.get("bakiye", 0) + aktif_margin_toplami(state.get("aktif_pozisyonlar", {}))
-                            _tr = float(state.get("trade_risk_pct", getattr(cfg, "TRADE_RISK_PCT", 10.0))) / 100.0
-                            _tahmini_buyukluk = _eq * _tr * karar_paketi.get("tavsiye_kaldirac", 10)
-                            
-                            # of_data V24'te tanımlı — on-demand çekilmişse kontrol et
-                            if of_data and of_data.get("is_valid"):
-                                ob_toplam = of_data.get("alici_hacim", 0) + of_data.get("satici_hacim", 0)
-                                gerekli_derinlik = _tahmini_buyukluk * of_veto_mult
-                                if ob_toplam > 0 and ob_toplam < gerekli_derinlik:
-                                    log_ekle(f"🛡️ V25 LİKİDİTE VETO: {secilen_sembol} emir defteri derinliği (${ob_toplam:,.0f}) < gereken (${gerekli_derinlik:,.0f} = işlem x{of_veto_mult}). İŞLEM ENGELLENDİ.", state)
-                                    sinyal = "BEKLE"
-                        except Exception:
-                            pass
-
+                    # V25/V50 OrderFlow Likidite Vetosu taşındı
                     if sinyal in ["LONG", "SHORT"] and not sembol_acik_mi(state.get("aktif_pozisyonlar", {}), secilen_sembol):
                         # v9: Challenge mod kaldıraç/risk override
                         if state.get("mod") == "🚀 94-Day Challenge":
@@ -1465,53 +1457,46 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                         risk_limit = 0.40 if zaman_baski_carpani >= 4.0 else 0.30 if zaman_baski_carpani >= 3.0 else 0.20
                         kullanilabilir_max = min(tavsiye_oran, risk_limit - (risk_pct / 100.0))
                         if kullanilabilir_max > 0:
-                            # v10: Challenge modda margin'ı challenge bakiyesinden hesapla
+                            # V50: Unified and Strict Position Sizing
                             if state.get("mod") == "🚀 94-Day Challenge":
                                 ch_data_ac = state.get("challenge_session", {})
                                 ch_bakiye_ac = ch_data_ac.get("bakiye", 10.0) if isinstance(ch_data_ac, dict) else 10.0
                                 margin = ch_bakiye_ac * kullanilabilir_max * mart_carpan
                                 margin = min(margin, ch_bakiye_ac * 0.5)
                             else:
-                                # V29: Confidence-Based Sizing (Free Will)
+                                c_trade_risk = float(state.get("trade_risk_pct", getattr(cfg, "TRADE_RISK_PCT", 10.0))) / 100.0
+                                toplam_equity = get_true_equity(state)
+                                
+                                # V50: Softened confidence scaling
                                 if getattr(cfg, "CONFIDENCE_BASED_SIZING", False):
                                     _guven_fw = karar_paketi.get("guven_skoru", 0)
-                                    aktif_kullanilan_margin = sum(p.get("islem_margin", 0) for p in state.get("aktif_pozisyonlar", {}).values())
-                                    mevcut_bakiye = state["bakiye"]
-                                    toplam_equity = mevcut_bakiye + aktif_kullanilan_margin
-                                    
                                     if _guven_fw >= 98:
-                                        fw_oran = 0.50   # %50 Wallet — çok yüksek güven
+                                        fw_oran = c_trade_risk * 1.5
                                     elif _guven_fw >= 90:
-                                        fw_oran = 0.25   # %25 Wallet
+                                        fw_oran = c_trade_risk * 1.2
                                     else:
-                                        fw_oran = 0.15   # %15 Wallet (minimum)
-                                    
+                                        fw_oran = c_trade_risk
                                     margin = toplam_equity * fw_oran * mart_carpan
-                                    
-                                    # Cüzdan güvenlik limitleri
-                                    c_max_wallet_risk = float(state.get("max_wallet_risk_pct", getattr(cfg, "MAX_WALLET_RISK_PCT", 100.0))) / 100.0
-                                    kullanilabilir_hedef_kasa = toplam_equity * c_max_wallet_risk
-                                    kalan_risk_limiti = max(0.0, kullanilabilir_hedef_kasa - aktif_kullanilan_margin)
-                                    margin = min(margin, kalan_risk_limiti)
-                                    margin = min(margin, mevcut_bakiye)
-                                    margin = min(margin, mevcut_bakiye * 0.5)  # Hard cap
-                                    
-                                    log_ekle(f"💡 FREE WILL: Güven %{_guven_fw:.0f} → Wallet %{fw_oran*100:.0f}. Margin: ${margin:.2f}", state)
+                                    log_ekle(f"💡 FREE WILL: Güven %{_guven_fw:.0f} → Risk Çarpanı {fw_oran/c_trade_risk:.1f}x. Margin: ${margin:.2f}", state)
                                 else:
-                                    # Eski V19/V25 Gelişmiş Risk Yönetimi (fallback)
-                                    c_max_wallet_risk = float(state.get("max_wallet_risk_pct", getattr(cfg, "MAX_WALLET_RISK_PCT", 100.0))) / 100.0
-                                    c_trade_risk = float(state.get("trade_risk_pct", getattr(cfg, "TRADE_RISK_PCT", 10.0))) / 100.0
-                                    
-                                    aktif_kullanilan_margin = sum(p.get("islem_margin", 0) for p in state.get("aktif_pozisyonlar", {}).values())
-                                    mevcut_bakiye = state["bakiye"]
-                                    toplam_equity = mevcut_bakiye + aktif_kullanilan_margin
-                                    kullanilabilir_hedef_kasa = toplam_equity * c_max_wallet_risk
-                                    
-                                    margin_hedef = toplam_equity * c_trade_risk * mart_carpan
-                                    kalan_risk_limiti = max(0.0, kullanilabilir_hedef_kasa - aktif_kullanilan_margin)
-                                    margin = min(margin_hedef, kalan_risk_limiti)
-                                    margin = min(margin, mevcut_bakiye)
-                                    margin = min(margin, mevcut_bakiye * 0.5)
+                                    margin = toplam_equity * c_trade_risk * mart_carpan
+                                
+                                # Global Wallet & Position Caps
+                                c_max_wallet_risk = float(state.get("max_wallet_risk_pct", getattr(cfg, "MAX_WALLET_RISK_PCT", 100.0))) / 100.0
+                                c_max_pos_size = float(getattr(cfg, "MAX_POSITION_SIZE_PCT", 10.0)) / 100.0
+                                
+                                aktif_kullanilan_margin = aktif_margin_toplami(state.get("aktif_pozisyonlar", {}))
+                                mevcut_bakiye = state.get("bakiye", 0.0)
+                                
+                                kullanilabilir_hedef_kasa = toplam_equity * c_max_wallet_risk
+                                kalan_risk_limiti = max(0.0, kullanilabilir_hedef_kasa - aktif_kullanilan_margin)
+                                
+                                margin = min(margin, kalan_risk_limiti)
+                                margin = min(margin, mevcut_bakiye)
+                                
+                                # V50: Strict Hard Cap on MAX_POSITION_SIZE_PCT
+                                hard_cap = toplam_equity * c_max_pos_size
+                                margin = min(margin, hard_cap)
 
                             # V46: Use pre-computed risk tier (no per-coin log_ekle)
                             if _risk_tier_prescan == "T2":
@@ -1521,6 +1506,18 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
 
                             buyukluk_usdt = margin * tavsiye_kaldirac
                             
+                            # V50: OrderFlow Likidite Vetosu — Moved here to evaluate actual final notional size
+                            if sinyal in ["LONG", "SHORT"] and of_data and of_data.get("is_valid"):
+                                try:
+                                    of_veto_mult = getattr(cfg, "ORDERFLOW_LIQUIDITY_VETO_MULT", 5)
+                                    ob_toplam = of_data.get("alici_hacim", 0) + of_data.get("satici_hacim", 0)
+                                    gerekli_derinlik = buyukluk_usdt * of_veto_mult
+                                    if ob_toplam > 0 and ob_toplam < gerekli_derinlik:
+                                        log_ekle(f"🛡️ V50 LİKİDİTE VETO: {secilen_sembol} emir defteri (${ob_toplam:,.0f}) < gereken (${gerekli_derinlik:,.0f} = işlem x{of_veto_mult}).", state)
+                                        sinyal = "BEKLE"
+                                except Exception:
+                                    pass
+
                             # V29: Slippage Guard (Market Impact Simulator)
                             if getattr(cfg, "SLIPPAGE_GUARD_ENABLED", False) and sinyal in ["LONG", "SHORT"]:
                                 try:
@@ -1542,30 +1539,11 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                                                 log_ekle(f"✅ SLIPPAGE OK: Etki %{etki_pct:.1f} < Max %{max_impact} (Derinlik: ${kademe_toplam:,.0f})", state)
                                 except Exception:
                                     pass  # Slippage guard hatası işlemi engellemez
-                            
+
                             # V31 FIX: Slippage Guard veya diğer veto'lar sinyal='BEKLE' yaptıysa
-                            # hayalet pozisyon açılmasını engelle — bu iterasyonu atla
                             if sinyal == "BEKLE":
                                 log_ekle(f"🛡️ GÜVENLIK KAPISI: {secilen_sembol} sinyal BEKLE'ye döndü, pozisyon açılmayacak.", state)
                                 continue
-                            
-                            # V26/V28 (Eski): Dinamik Pozisyon Boyutu — güven skoruna göre limit değişir
-                            # V29: Confidence-Based Sizing aktifse bu blok çalışmaz (margin zaten hesaplandı)
-                            if not getattr(cfg, "CONFIDENCE_BASED_SIZING", False):
-                                _guven = karar_paketi.get("guven_skoru", 0)
-                                if _guven >= 95:
-                                    max_poz_pct = 0.30
-                                elif _guven >= 85:
-                                    max_poz_pct = 0.20
-                                else:
-                                    max_poz_pct = 0.15
-                                
-                                toplam_equity_v26 = state["bakiye"] + aktif_margin_toplami(state.get("aktif_pozisyonlar", {}))
-                                max_buyukluk = toplam_equity_v26 * max_poz_pct
-                                if buyukluk_usdt > max_buyukluk:
-                                    log_ekle(f"🛡️ V26 DİNAMİK POZ: Güven %{_guven:.0f} → Limit %{max_poz_pct*100:.0f}. ${buyukluk_usdt:.0f} > Max ${max_buyukluk:.0f}. Sınırlandırılıyor.", state)
-                                    buyukluk_usdt = max_buyukluk
-                                    margin = buyukluk_usdt / tavsiye_kaldirac if tavsiye_kaldirac > 0 else margin
 
                             # v10: Challenge açılış komisyonu
                             if is_challenge:
@@ -1721,9 +1699,16 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
             except Exception:
                 pass
 
-            # Hedef bakiye kontrolü (for döngüsü bitti, while döngüsü içinde)
+            # V50: Standardized Daily Target Lock & True Equity Peak
             with lock:
-                if state.get("pik_bakiye", 0) >= state.get("hedef_bakiye", 100):
+                toplam_equity_hedef = get_true_equity(state)
+                hedef_bakiye = state.get("hedef_bakiye", 100.0)
+                
+                # Update global pik_bakiye strictly using true equity
+                if toplam_equity_hedef > state.get("pik_bakiye", 0):
+                    state["pik_bakiye"] = toplam_equity_hedef
+                
+                if toplam_equity_hedef >= hedef_bakiye:
                     if state.get("mod") == "🚀 94-Day Challenge":
                         pass
                     elif state.get("mod", "") == "💎 Ultra-Scalper":
@@ -1731,25 +1716,11 @@ def bot_engine(state: dict, lock: threading.Lock, dur_sinyali: threading.Event):
                             log_ekle("💎 Günlük Hedef Aşıldı - İşlemlere Devam Ediliyor (Ultra-Scalper)", state)
                             state["scalper_hedef_loglandi"] = True
                     else:
-                        import data_logger
-                        baslangic_zaman_ts = state.get("baslangic_zamani", 0)
-                        if baslangic_zaman_ts > 0:
-                            gercek_pnl = data_logger.gercek_pnl_getir(baslangic_zaman_ts)
-                            hedef_farki = state.get("hedef_bakiye", 100) - state.get("gun_baslangic_bakiye", 0)
-                            if (hedef_farki > 0 and gercek_pnl >= hedef_farki * 0.95) or (gercek_pnl >= hedef_farki and hedef_farki > 0):
-                                state["bot_durumu"] = "🎯 Hedefi Ulaştı!"
-                                state["bot_calisiyor"] = False
-                                log_ekle(f"🏆 HEDEF ULAŞILDI! (Gerçek PNL: ${gercek_pnl:.2f}) Bot durduruluyor.", state)
-                                islem_gecmisi_kaydet(state.get("islem_gecmisi", []))
-                                dur_sinyali.set()
-                            else:
-                                state["pik_bakiye"] = max(state.get("bakiye", 0), state.get("hedef_bakiye", 100) - 2.0)
-                        else:
-                            state["bot_durumu"] = "🎯 Hedefi Ulaştı!"
-                            state["bot_calisiyor"] = False
-                            log_ekle("🏆 HEDEF ULAŞILDI! Bot durduruluyor.", state)
-                            islem_gecmisi_kaydet(state.get("islem_gecmisi", []))
-                            dur_sinyali.set()
+                        state["bot_durumu"] = "🎯 Hedefi Ulaştı!"
+                        state["bot_calisiyor"] = False
+                        log_ekle(f"🏆 HEDEF ULAŞILDI! (Equity: ${toplam_equity_hedef:.2f} >= Hedef: ${hedef_bakiye:.2f}) Bot durduruluyor.", state)
+                        islem_gecmisi_kaydet(state.get("islem_gecmisi", []))
+                        dur_sinyali.set()
 
 
             # V41: Centralized Atomic Save — STRICTLY OUTSIDE any `with lock:` block.

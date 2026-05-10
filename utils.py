@@ -42,6 +42,18 @@ def pnl_hesapla_coklu(pozlar: dict, guncel_fiyatlar: dict) -> float:
     return toplam_pnl
 
 
+def get_true_equity(state: dict) -> float:
+    """Tam (gerçek) equity hesaplar: Boş Bakiye + Açık Margin + Unrealized PNL."""
+    bakiye = state.get("bakiye", getattr(cfg, "INITIAL_BALANCE", 100.0))
+    aktif_pozisyonlar = state.get("aktif_pozisyonlar", {})
+    guncel_fiyatlar = state.get("guncel_fiyatlar", {})
+    
+    margin_toplami = aktif_margin_toplami(aktif_pozisyonlar)
+    unrealized_pnl = pnl_hesapla_coklu(aktif_pozisyonlar, guncel_fiyatlar)
+    
+    return bakiye + margin_toplami + unrealized_pnl
+
+
 def gunluk_kar_hesapla(state: dict) -> float:
     """Günlük kâr/zarar yüzdesi hesaplar (Dashboard & Engine ortak)."""
     gun_baslangic = state.get("gun_baslangic_bakiye", state.get("baslangic_bakiye", getattr(cfg, "INITIAL_BALANCE", 100.0)))
@@ -50,15 +62,7 @@ def gunluk_kar_hesapla(state: dict) -> float:
         if gun_baslangic <= 0:
             return 0.0
 
-    bakiye = state.get("bakiye", gun_baslangic)
-    aktif_pozisyonlar = state.get("aktif_pozisyonlar", {})
-    guncel_fiyatlar = state.get("guncel_fiyatlar", {})
-
-    # Toplam Equity: Boş bakiye + Kullanılan Margin + Gerçekleşmemiş PNL
-    margin_toplami = aktif_margin_toplami(aktif_pozisyonlar)
-    unrealized_pnl = pnl_hesapla_coklu(aktif_pozisyonlar, guncel_fiyatlar)
-    
-    toplam_equity = bakiye + margin_toplami + unrealized_pnl
+    toplam_equity = get_true_equity(state)
 
     return ((toplam_equity - gun_baslangic) / gun_baslangic) * 100
 
